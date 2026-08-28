@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Vistara.Application/Vistara.Application.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Vistara.Contracts/Vistara.Contracts.csproj" />
+    <ProjectReference Include="../Vistara.Application/Vistara.Application.csproj" />
+    <ProjectReference Include="../Vistara.Persistence/Vistara.Persistence.csproj" />
+    <ProjectReference Include="../Vistara.Storage.Local/Vistara.Storage.Local.csproj" />
+    <ProjectReference Include="../Vistara.Storage.Azure/Vistara.Storage.Azure.csproj" />
+    <ProjectReference Include="../Vistara.Storage.S3/Vistara.Storage.S3.csproj" />
+    <ProjectReference Include="../Vistara.Imaging.NetVips/Vistara.Imaging.NetVips.csproj" />
+    <ProjectReference Include="../Vistara.Auth/Vistara.Auth.csproj" />
+    <ProjectReference Include="../Vistara.Observability/Vistara.Observability.csproj" />
+  </ItemGroup>
+</Project>

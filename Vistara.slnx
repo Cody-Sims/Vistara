@@ -1,0 +1,28 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Vistara.Api/Vistara.Api.csproj" />
+    <Project Path="src/Vistara.Application/Vistara.Application.csproj" />
+    <Project Path="src/Vistara.Auth/Vistara.Auth.csproj" />
+    <Project Path="src/Vistara.Contracts/Vistara.Contracts.csproj" />
+    <Project Path="src/Vistara.Domain/Vistara.Domain.csproj" />
+    <Project Path="src/Vistara.Imaging.NetVips/Vistara.Imaging.NetVips.csproj" />
+    <Project Path="src/Vistara.Migrations.Postgres/Vistara.Migrations.Postgres.csproj" />
+    <Project Path="src/Vistara.Migrations.Sqlite/Vistara.Migrations.Sqlite.csproj" />
+    <Project Path="src/Vistara.Observability/Vistara.Observability.csproj" />
+    <Project Path="src/Vistara.Persistence/Vistara.Persistence.csproj" />
+    <Project Path="src/Vistara.Storage.Azure/Vistara.Storage.Azure.csproj" />
+    <Project Path="src/Vistara.Storage.Local/Vistara.Storage.Local.csproj" />
+    <Project Path="src/Vistara.Storage.S3/Vistara.Storage.S3.csproj" />
+    <Project Path="src/Vistara.Worker/Vistara.Worker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Vistara.Api.ContractTests/Vistara.Api.ContractTests.csproj" />
+    <Project Path="tests/Vistara.ArchitectureTests/Vistara.ArchitectureTests.csproj" />
+    <Project Path="tests/Vistara.Imaging.Tests/Vistara.Imaging.Tests.csproj" />
+    <Project Path="tests/Vistara.IntegrationTests/Vistara.IntegrationTests.csproj" />
+    <Project Path="tests/Vistara.MigrationTests/Vistara.MigrationTests.csproj" />
+    <Project Path="tests/Vistara.PerformanceTests/Vistara.PerformanceTests.csproj" />
+    <Project Path="tests/Vistara.Storage.ConformanceTests/Vistara.Storage.ConformanceTests.csproj" />
+    <Project Path="tests/Vistara.UnitTests/Vistara.UnitTests.csproj" />
+  </Folder>
+</Solution>

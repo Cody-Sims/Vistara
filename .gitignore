@@ -1,0 +1,33 @@
+# .NET build output
+**/bin/
+**/obj/
+artifacts/
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+
+# IDE and editor state
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+
+# Frontend dependencies and output
+**/node_modules/
+**/dist/
+**/.vite/
+**/playwright-report/
+**/test-results/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+appsettings.*.local.json
+secrets.json
+
+# Operating system files
+.DS_Store
+Thumbs.db
