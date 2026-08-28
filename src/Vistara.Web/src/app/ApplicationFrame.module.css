@@ -72,6 +72,14 @@
   color: var(--color-text);
 }
 
+.previewBanner {
+  padding: var(--space-3) clamp(var(--space-4), 5vw, var(--space-8));
+  border-block-end: 1px solid var(--color-border);
+  background: var(--color-accent-soft);
+  color: var(--color-text);
+  text-align: center;
+}
+
 .loadingBar {
   padding: var(--space-2) clamp(var(--space-4), 5vw, var(--space-8));
   background: var(--color-accent-soft);

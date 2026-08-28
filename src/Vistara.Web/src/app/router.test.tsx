@@ -1,10 +1,14 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { RouterProvider } from 'react-router-dom';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createAppRouter } from './router';
 
 describe('application shell', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('redirects home to an accessible library frame', async () => {
     const user = userEvent.setup();
     const router = createAppRouter({ initialEntries: ['/'] });
@@ -101,5 +105,42 @@ describe('application shell', () => {
     expect(
       screen.getByRole('link', { name: 'Return to library' }),
     ).toBeInTheDocument();
+  });
+
+  it('uses the configured base path and identifies the API-free static preview', async () => {
+    vi.stubEnv('BASE_URL', '/Vistara/');
+    vi.stubEnv('MODE', 'pages');
+    const router = createAppRouter({ initialEntries: ['/Vistara/'] });
+
+    render(<RouterProvider router={router} />);
+
+    expect(
+      await screen.findByRole('heading', { name: 'Library' }),
+    ).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/Vistara/library');
+    expect(
+      screen.getByRole('complementary', { name: 'Static preview notice' }),
+    ).toHaveTextContent(
+      'Static preview only—no API, authentication, uploads, persistence, or worker processing.',
+    );
+    expect(screen.getByRole('link', { name: 'Vistara library' })).toHaveAttribute(
+      'href',
+      '/Vistara/library',
+    );
+  });
+
+  it('does not show the static preview notice in the normal application', async () => {
+    vi.stubEnv('BASE_URL', '/');
+    vi.stubEnv('MODE', 'production');
+    const router = createAppRouter({ initialEntries: ['/'] });
+
+    render(<RouterProvider router={router} />);
+
+    expect(
+      await screen.findByRole('heading', { name: 'Library' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('complementary', { name: 'Static preview notice' }),
+    ).not.toBeInTheDocument();
   });
 });

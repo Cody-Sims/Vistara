@@ -1,0 +1,33 @@
+{
+  "$schema": "../schema.json",
+  "id": "DEC-0007",
+  "title": "Protect main with required review and validated checks",
+  "status": "proposed",
+  "date": "2026-08-28",
+  "statement": "Configure repository rules so main accepts changes only through reviewed pull requests with required successful CI and security checks.",
+  "rationale": "Workflow hardening does not itself prevent bypassing review or merging a failing change; GitHub repository settings must enforce that boundary.",
+  "owners": [
+    "maintainers"
+  ],
+  "anchors": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "locator": "name: CI"
+    },
+    {
+      "path": ".github/workflows/codeql.yml",
+      "locator": "name: CodeQL"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "docs/specification.md",
+      "locator": "**Repository:** Public GitHub repository"
+    },
+    {
+      "path": "docs/specification.md",
+      "locator": "`BOOT-07` integrates and runs:"
+    }
+  ],
+  "relations": []
+}

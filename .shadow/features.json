@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "features": [
+    {
+      "id": "F-AGENT-OPERATIONS",
+      "name": "Agent tooling and repository operations",
+      "owner": ".github/instructions/agent-tooling.instructions.md",
+      "paths": [
+        ".github",
+        ".shadow",
+        "eng"
+      ],
+      "decisions": [
+        "DEC-0006",
+        "DEC-0007"
+      ]
+    },
+    {
+      "id": "F-APPLICATION",
+      "name": "Application architecture",
+      "owner": ".github/instructions/dotnet.instructions.md",
+      "paths": [
+        "src/Vistara.Application",
+        "src/Vistara.Contracts",
+        "src/Vistara.Domain",
+        "tests/Vistara.ArchitectureTests"
+      ],
+      "decisions": [
+        "DEC-0001"
+      ]
+    },
+    {
+      "id": "F-DELIVERY",
+      "name": "API, Worker, and container delivery",
+      "owner": ".github/instructions/deployment.instructions.md",
+      "paths": [
+        "deploy/containers",
+        "src/Vistara.Api",
+        "src/Vistara.Worker"
+      ],
+      "decisions": [
+        "DEC-0003",
+        "DEC-0004"
+      ]
+    },
+    {
+      "id": "F-FUTURE-AI",
+      "name": "Future AI and external compute",
+      "owner": ".github/instructions/dotnet.instructions.md",
+      "paths": [
+        "src/Vistara.Application/Ai",
+        "src/Vistara.Domain/Ai"
+      ],
+      "decisions": [
+        "DEC-0005",
+        "DEC-0008"
+      ]
+    },
+    {
+      "id": "F-STORAGE",
+      "name": "Storage and immutable media",
+      "owner": ".github/instructions/dotnet.instructions.md",
+      "paths": [
+        "src/Vistara.Storage.Azure",
+        "src/Vistara.Storage.Local",
+        "src/Vistara.Storage.S3"
+      ],
+      "decisions": [
+        "DEC-0002"
+      ]
+    },
+    {
+      "id": "F-WEB",
+      "name": "Gallery Web application",
+      "owner": ".github/instructions/web.instructions.md",
+      "paths": [
+        "src/Vistara.Web"
+      ],
+      "decisions": [
+        "DEC-0004"
+      ]
+    }
+  ]
+}

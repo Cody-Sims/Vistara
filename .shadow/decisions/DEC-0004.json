@@ -1,0 +1,42 @@
+{
+  "$schema": "../schema.json",
+  "id": "DEC-0004",
+  "title": "Integrated production SPA and static Pages preview boundary",
+  "status": "accepted",
+  "date": "2026-08-28",
+  "statement": "Production serves the compiled SPA from the API image for same-origin behavior; GitHub Pages, when configured, publishes only a static preview.",
+  "rationale": "Authentication, upload, media, and management flows require the API, while a Pages artifact can safely demonstrate only the browser shell.",
+  "owners": [
+    "maintainers"
+  ],
+  "anchors": [
+    {
+      "path": "deploy/containers/api.Dockerfile",
+      "locator": "COPY --from=web-build /web/dist ./wwwroot"
+    },
+    {
+      "path": "src/Vistara.Web/vite.config.ts",
+      "locator": "const isPagesBuild = mode === 'pages';"
+    },
+    {
+      "path": ".github/workflows/pages.yml",
+      "locator": "- name: Build static preview"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "docs/specification.md",
+      "locator": "- Integrated into the API image for same-origin production delivery."
+    },
+    {
+      "path": "docs/specification.md",
+      "locator": "The API image contains the built SPA. Images use a glibc-based official .NET runtime, run non-root, and pin native libvips packages and base-image digests."
+    }
+  ],
+  "relations": [
+    {
+      "type": "depends_on",
+      "target": "DEC-0003"
+    }
+  ]
+}

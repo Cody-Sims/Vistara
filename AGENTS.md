@@ -1,25 +1,36 @@
-# Repository guidance
+# Vistara agent navigation
 
 ## Start here
 
-- Read `docs/specification.md` for architecture, acceptance criteria, and roadmap ownership.
-- Follow the nearest scoped instructions if later tasks add them.
-- Keep changes within the ownership paths assigned by the roadmap or current task.
+1. Read `docs/specification.md`; it is the product, architecture, acceptance, and roadmap authority.
+2. Load the scoped instruction matching the paths you will change.
+3. Consult `.shadow/index.json` when a change affects a durable architecture decision.
+4. Stay inside the ownership paths assigned by the current roadmap task.
 
-## Project conventions
+## Scoped guidance
 
-- Target .NET 10. Nullable reference types, implicit usings, deterministic builds, warnings-as-errors, and SDK analyzers are configured centrally.
-- Put package versions in `Directory.Packages.props`; project files contain versionless `PackageReference` items.
-- Preserve dependency direction: Domain has no Vistara dependency; Application depends only on Domain; Contracts has no infrastructure dependency; infrastructure implements Application ports; API and Worker compose the system.
-- Do not add infrastructure references to Domain or Application, backend references to frontend code, a generic repository abstraction, or a required mediator framework.
-- Keep application ports focused and cancellation-aware. Keep API and Worker entry points thin; feature code belongs in its owned slice.
-- Never commit credentials, signed URLs, raw private metadata, authorization headers, or local environment files.
+| Scope | Instruction |
+|---|---|
+| .NET projects and source | `.github/instructions/dotnet.instructions.md` |
+| React application | `.github/instructions/web.instructions.md` |
+| Test code and fixtures | `.github/instructions/testing.instructions.md` |
+| Containers and deployment | `.github/instructions/deployment.instructions.md` |
+| GitHub Actions | `.github/instructions/workflows.instructions.md` |
+| Agent customization and Shadow records | `.github/instructions/agent-tooling.instructions.md` |
 
-## Verification
+## Architecture memory
 
-Run the narrowest relevant checks, then at minimum for shared bootstrap changes:
+`.shadow/README.md` explains the repository decision graph. Activate
+`.github/skills/maintain-shadow/SKILL.md` only for work that inspects or changes
+that graph.
+
+## Tooling checks
+
+Run the narrowest relevant product checks. For agent or architecture-memory
+changes, run:
 
 ```bash
-dotnet restore Vistara.slnx
-dotnet build Vistara.slnx -c Release --no-restore
+node eng/validate-shadow.mjs
+node eng/validate-agent-workflows.mjs
+node --test eng/tests/*.test.mjs
 ```

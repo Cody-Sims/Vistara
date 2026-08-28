@@ -21,10 +21,12 @@ export function createAppRouter({
   initialEntries,
   additionalRoutes = [],
 }: AppRouterOptions = {}) {
+  const basename = import.meta.env.BASE_URL;
+  const staticPreview = import.meta.env.MODE === 'pages';
   const routes: RouteObject[] = [
     {
       path: '/',
-      element: <ApplicationFrame />,
+      element: <ApplicationFrame staticPreview={staticPreview} />,
       errorElement: <RouteErrorBoundary />,
       hydrateFallbackElement: <InitialLoadingPage />,
       children: [
@@ -47,8 +49,8 @@ export function createAppRouter({
   ];
 
   if (initialEntries) {
-    return createMemoryRouter(routes, { initialEntries });
+    return createMemoryRouter(routes, { basename, initialEntries });
   }
 
-  return createBrowserRouter(routes);
+  return createBrowserRouter(routes, { basename });
 }

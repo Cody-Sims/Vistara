@@ -1,0 +1,33 @@
+{
+  "$schema": "../schema.json",
+  "id": "DEC-0001",
+  "title": "Modular monolith and inward dependency direction",
+  "status": "accepted",
+  "date": "2026-08-28",
+  "statement": "Vistara is a modular monolith whose Domain and Application layers point inward while API and Worker remain terminal composition roots.",
+  "rationale": "One release and explicit layer boundaries keep deployment small without surrendering testable domain isolation.",
+  "owners": [
+    "maintainers"
+  ],
+  "anchors": [
+    {
+      "path": "tests/Vistara.ArchitectureTests/ArchitectureRulesTests.cs",
+      "locator": "public void Production_project_graph_matches_the_approved_dependency_rules()"
+    },
+    {
+      "path": "tests/Vistara.ArchitectureTests/ProjectGraphPolicy.cs",
+      "locator": "private static readonly Dictionary<string, HashSet<string>> ExactAllowedReferences ="
+    }
+  ],
+  "evidence": [
+    {
+      "path": "docs/specification.md",
+      "locator": "Vistara ships as a modular monolith with API and worker roles from one release. SQLite supports one-host installations; PostgreSQL is the production database."
+    },
+    {
+      "path": "docs/specification.md",
+      "locator": "Vistara.Domain -> no Vistara project"
+    }
+  ],
+  "relations": []
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "../schema.json",
+  "id": "DEC-0006",
+  "title": "GitHub Actions use immutable pins and least privilege",
+  "status": "observed",
+  "date": "2026-08-28",
+  "statement": "Current GitHub Actions workflows pin third-party actions to full commit SHAs and declare limited permissions, finite job timeouts, and concurrency.",
+  "rationale": "The checked-in workflows consistently implement these supply-chain and token-scope controls.",
+  "owners": [
+    "maintainers"
+  ],
+  "anchors": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "locator": "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1"
+    },
+    {
+      "path": ".github/workflows/codeql.yml",
+      "locator": "security-events: write"
+    },
+    {
+      "path": ".github/workflows/dependency-review.yml",
+      "locator": "uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0"
+    }
+  ],
+  "evidence": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "locator": "cancel-in-progress: true"
+    },
+    {
+      "path": ".github/workflows/dependency-review.yml",
+      "locator": "timeout-minutes: 10"
+    }
+  ],
+  "relations": [
+    {
+      "type": "supports",
+      "target": "DEC-0007"
+    }
+  ]
+}

@@ -4,9 +4,13 @@ import styles from './ApplicationFrame.module.css';
 
 interface ApplicationFrameProps {
   children?: ReactNode;
+  staticPreview?: boolean;
 }
 
-export function ApplicationFrame({ children }: ApplicationFrameProps) {
+export function ApplicationFrame({
+  children,
+  staticPreview = false,
+}: ApplicationFrameProps) {
   const navigation = useNavigation();
 
   return (
@@ -34,6 +38,16 @@ export function ApplicationFrame({ children }: ApplicationFrameProps) {
           </NavLink>
         </nav>
       </header>
+
+      {staticPreview ? (
+        <aside
+          className={styles.previewBanner}
+          aria-label="Static preview notice"
+        >
+          <strong>Static preview only</strong>—no API, authentication, uploads,
+          persistence, or worker processing.
+        </aside>
+      ) : null}
 
       {navigation.state !== 'idle' ? (
         <div className={styles.loadingBar} role="status" aria-live="polite">

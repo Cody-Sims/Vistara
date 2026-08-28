@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "allowedStatuses": [
+    "accepted",
+    "observed",
+    "proposed",
+    "superseded"
+  ],
+  "allowedRelations": [
+    "constrains",
+    "depends_on",
+    "superseded_by",
+    "supersedes",
+    "supports"
+  ],
+  "entries": [
+    {
+      "id": "DEC-0001",
+      "title": "Modular monolith and inward dependency direction",
+      "status": "accepted",
+      "file": ".shadow/decisions/DEC-0001.json"
+    },
+    {
+      "id": "DEC-0002",
+      "title": "Provider-neutral storage with immutable media identities",
+      "status": "accepted",
+      "file": ".shadow/decisions/DEC-0002.json"
+    },
+    {
+      "id": "DEC-0003",
+      "title": "Separate API and Worker container images",
+      "status": "accepted",
+      "file": ".shadow/decisions/DEC-0003.json"
+    },
+    {
+      "id": "DEC-0004",
+      "title": "Integrated production SPA and static Pages preview boundary",
+      "status": "accepted",
+      "file": ".shadow/decisions/DEC-0004.json"
+    },
+    {
+      "id": "DEC-0005",
+      "title": "AI output is non-authoritative and cannot autonomously purge media",
+      "status": "accepted",
+      "file": ".shadow/decisions/DEC-0005.json"
+    },
+    {
+      "id": "DEC-0006",
+      "title": "GitHub Actions use immutable pins and least privilege",
+      "status": "observed",
+      "file": ".shadow/decisions/DEC-0006.json"
+    },
+    {
+      "id": "DEC-0007",
+      "title": "Protect main with required review and validated checks",
+      "status": "proposed",
+      "file": ".shadow/decisions/DEC-0007.json"
+    },
+    {
+      "id": "DEC-0008",
+      "title": "External compute remains an optional provider adapter",
+      "status": "proposed",
+      "file": ".shadow/decisions/DEC-0008.json"
+    }
+  ]
+}

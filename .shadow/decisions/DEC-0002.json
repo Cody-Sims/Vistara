@@ -1,0 +1,33 @@
+{
+  "$schema": "../schema.json",
+  "id": "DEC-0002",
+  "title": "Provider-neutral storage with immutable media identities",
+  "status": "accepted",
+  "date": "2026-08-28",
+  "statement": "Storage behavior is expressed through capability-aware provider-neutral ports, while originals and deterministic derivatives use application-generated immutable identities.",
+  "rationale": "Local, Azure Blob, and S3-compatible systems differ in conditional operations and checksums, so adapters expose capabilities without weakening immutability.",
+  "owners": [
+    "maintainers"
+  ],
+  "anchors": [
+    {
+      "path": "docs/specification.md",
+      "locator": "public interface IBlobStore"
+    },
+    {
+      "path": "docs/specification.md",
+      "locator": "Unsupported operations return `Unsupported`; adapters must not silently replace a conditional write with a race-prone `HEAD`/`PUT`."
+    }
+  ],
+  "evidence": [
+    {
+      "path": "docs/specification.md",
+      "locator": "| Storage | Local, Azure Blob, generic S3 adapter with AWS/R2/B2/MinIO profiles |"
+    },
+    {
+      "path": "docs/specification.md",
+      "locator": "| Originals | Immutable, application-generated keys |"
+    }
+  ],
+  "relations": []
+}

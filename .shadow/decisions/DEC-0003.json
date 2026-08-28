@@ -1,0 +1,38 @@
+{
+  "$schema": "../schema.json",
+  "id": "DEC-0003",
+  "title": "Separate API and Worker container images",
+  "status": "accepted",
+  "date": "2026-08-28",
+  "statement": "The same Vistara release produces separately deployable API and Worker container images with role-specific runtime contents.",
+  "rationale": "Independent process roles preserve the modular-monolith release model while allowing production API and background workloads to scale and operate separately.",
+  "owners": [
+    "maintainers"
+  ],
+  "anchors": [
+    {
+      "path": "deploy/containers/api.Dockerfile",
+      "locator": "ENTRYPOINT [\"dotnet\", \"Vistara.Api.dll\"]"
+    },
+    {
+      "path": "deploy/containers/worker.Dockerfile",
+      "locator": "ENTRYPOINT [\"dotnet\", \"Vistara.Worker.dll\"]"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "docs/specification.md",
+      "locator": "| Production example | Migration task, API, worker, PostgreSQL, MinIO/reverse proxy; external object storage supported |"
+    },
+    {
+      "path": "docs/specification.md",
+      "locator": "- Docker images and starter/production Compose environments."
+    }
+  ],
+  "relations": [
+    {
+      "type": "depends_on",
+      "target": "DEC-0001"
+    }
+  ]
+}

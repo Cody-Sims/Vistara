@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "allowedStatuses": [
+    "accepted",
+    "observed",
+    "proposed",
+    "superseded"
+  ],
+  "allowedRelations": [
+    "constrains",
+    "depends_on",
+    "superseded_by",
+    "supersedes",
+    "supports"
+  ],
+  "entries": [
+    {
+      "id": "DEC-0001",
+      "title": "Modular monolith",
+      "status": "accepted",
+      "file": ".shadow/decisions/DEC-0001.json"
+    }
+  ]
+}

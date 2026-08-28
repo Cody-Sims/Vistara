@@ -1,0 +1,25 @@
+{
+  "$schema": "../schema.json",
+  "id": "DEC-0001",
+  "title": "Modular monolith",
+  "status": "accepted",
+  "date": "2026-08-28",
+  "statement": "The system remains a modular monolith.",
+  "rationale": "The approved specification selects this architecture.",
+  "owners": [
+    "maintainers"
+  ],
+  "anchors": [
+    {
+      "path": "src/Core/Marker.cs",
+      "locator": "public sealed class Marker"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "docs/specification.md",
+      "locator": "The system is a modular monolith."
+    }
+  ],
+  "relations": []
+}

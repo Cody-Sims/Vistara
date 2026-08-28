@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "features": [
+    {
+      "id": "F-CORE",
+      "name": "Core",
+      "owner": ".github/instructions/architecture.instructions.md",
+      "paths": [
+        "src/Core"
+      ],
+      "decisions": [
+        "DEC-0001"
+      ]
+    }
+  ]
+}

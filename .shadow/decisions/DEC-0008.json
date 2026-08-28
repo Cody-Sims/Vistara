@@ -1,0 +1,38 @@
+{
+  "$schema": "../schema.json",
+  "id": "DEC-0008",
+  "title": "External compute remains an optional provider adapter",
+  "status": "proposed",
+  "date": "2026-08-28",
+  "statement": "Any hosted AI or external compute capability remains opt-in behind a typed provider adapter with consent, residency, retention, timeout, budget, and audit controls.",
+  "rationale": "The product can add external compute without making it authoritative, mandatory, or capable of bypassing Vistara lifecycle policy.",
+  "owners": [
+    "maintainers"
+  ],
+  "anchors": [
+    {
+      "path": "docs/specification.md",
+      "locator": "4. **Optional hosted providers**"
+    },
+    {
+      "path": "docs/specification.md",
+      "locator": "| `AI-06` | M | AI-01 | Hosted consent/budget/provider adapters | Consent, retention, circuit-breaker, budget tests |"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "docs/specification.md",
+      "locator": "Which optional AI hardware/provider profile should be prioritized after 0.1: CPU-local, NVIDIA-local, or hosted?"
+    },
+    {
+      "path": "docs/specification.md",
+      "locator": "Requests include tenant, asset revision, capability, model digest, preprocessing/config digest, consent snapshot, timeout, budget, and idempotency key."
+    }
+  ],
+  "relations": [
+    {
+      "type": "depends_on",
+      "target": "DEC-0005"
+    }
+  ]
+}

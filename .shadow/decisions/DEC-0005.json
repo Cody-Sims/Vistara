@@ -1,0 +1,33 @@
+{
+  "$schema": "../schema.json",
+  "id": "DEC-0005",
+  "title": "AI output is non-authoritative and cannot autonomously purge media",
+  "status": "accepted",
+  "date": "2026-08-28",
+  "statement": "AI may create provenance-preserving suggestions or action proposals, but it cannot directly mutate canonical media or autonomously perform permanent deletion.",
+  "rationale": "Typed, reviewable output and a separate human-confirmed trash and purge sequence preserve authorization, auditability, and recovery.",
+  "owners": [
+    "maintainers"
+  ],
+  "anchors": [
+    {
+      "path": "docs/specification.md",
+      "locator": "An AI provider may write typed suggestions or an `ActionProposal`. It receives no interface capable of deleting, moving, hiding, banning, reporting, or writing arbitrary storage objects."
+    },
+    {
+      "path": "docs/specification.md",
+      "locator": "No model score can bypass these stages."
+    }
+  ],
+  "evidence": [
+    {
+      "path": "docs/specification.md",
+      "locator": "| Deletion invariant | No model output can directly mutate or permanently delete media |"
+    },
+    {
+      "path": "docs/specification.md",
+      "locator": "- Autonomous moderation, deletion, purge, or account restriction."
+    }
+  ],
+  "relations": []
+}
