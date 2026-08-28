@@ -65,9 +65,11 @@ jobs:
             exit 1
           fi
 
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "namespace=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
-          echo "version=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          {
+            echo "commit=$commit"
+            echo "namespace=${GITHUB_REPOSITORY_OWNER,,}"
+            echo "version=$RELEASE_TAG"
+          } >> "$GITHUB_OUTPUT"
 
   build-api:
     name: Build API image
