@@ -1,0 +1,15 @@
+**
+!global.json
+!Directory.Build.props
+!Directory.Packages.props
+!Vistara.slnx
+!src/
+!src/**
+**/bin
+**/bin/**
+**/obj
+**/obj/**
+**/node_modules
+**/node_modules/**
+**/dist
+**/dist/**

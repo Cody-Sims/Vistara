@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  build-test:
+    name: Restore, build, and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+          # NuGet caching stays disabled until packages.lock.json files are committed.
+
+      - name: Restore
+        run: dotnet restore Vistara.slnx
+
+      - name: Build
+        run: dotnet build Vistara.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: >-
+          dotnet test Vistara.slnx
+          --configuration Release
+          --no-build
+          --no-restore
+          --logger "trx;LogFilePrefix=vistara"
+          --results-directory artifacts/test-results
+
+      - name: Upload failed test results
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/test-results/**/*.trx
+          if-no-files-found: ignore
+          retention-days: 7
+
+  web-check:
+    name: Lint, typecheck, test, and build web
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Install web dependencies
+        run: npm --prefix src/Vistara.Web ci
+
+      - name: Check web application
+        run: npm --prefix src/Vistara.Web run check
+
+  container-build:
+    name: Build ${{ matrix.image }} container
+    needs:
+      - build-test
+      - web-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - api
+          - worker
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build container
+        run: >-
+          docker build
+          --file deploy/containers/${{ matrix.image }}.Dockerfile
+          --tag vistara-${{ matrix.image }}:ci
+          .
