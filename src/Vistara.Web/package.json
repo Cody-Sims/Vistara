@@ -10,7 +10,9 @@
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit --pretty false",
     "test": "vitest",
-    "check": "npm run lint && npm run typecheck && npm run test -- --run && npm run build"
+    "api:generate": "node scripts/gallery-api.mjs generate",
+    "api:check": "node scripts/gallery-api.mjs check && node --test scripts/gallery-api.node.mjs",
+    "check": "npm run api:check && npm run lint && npm run typecheck && npm run test -- --run && npm run build"
   },
   "dependencies": {
     "@tanstack/react-query": "5.102.8",
@@ -20,6 +22,7 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@readme/openapi-parser": "8.0.1",
     "@testing-library/jest-dom": "7.0.1",
     "@testing-library/react": "16.3.3",
     "@testing-library/user-event": "14.6.6",
