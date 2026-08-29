@@ -32,5 +32,6 @@ node --test eng/tests/*.test.mjs
 - `.shadow/`: evidence-linked architecture decisions.
 - `.github/workflows/`: CI, security, Pages preview, and release-image automation.
 - `docs/specification.md`: approved product specification and ordered implementation roadmap.
+- [Future ideas](docs/future-ideas/README.md): uncommitted post-MVP research directions and constraints.
 
 Licensed under the [Apache License 2.0](LICENSE).
