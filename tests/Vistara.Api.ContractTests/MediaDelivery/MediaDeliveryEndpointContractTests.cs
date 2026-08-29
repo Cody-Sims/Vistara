@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Vistara.Api.Features.Media;
@@ -587,6 +588,72 @@ public sealed class MediaDeliveryEndpointContractTests
     }
 
     [Fact]
+    public async Task Late_stream_failures_do_not_retain_representation_headers()
+    {
+        var source = new FakeMediaContentSource(Content)
+        {
+            StreamFactory = _ => new FailingReadStream(
+                "derivatives/v1/private-key https://signed.example/secret"),
+        };
+
+        TestResponse response = await SendAsync(
+            new FakeMediaAuthorizationPort(),
+            FakeMediaApplicationPort.PublicReady(
+                Representation(source, "image/webp")),
+            "GET",
+            PublicRoute);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(
+            MediaDeliveryHttpContract.NoStoreCacheControl,
+            response.Headers.CacheControl.ToString());
+        Assert.False(response.Headers.ContainsKey("ETag"));
+        Assert.False(response.Headers.ContainsKey("Accept-Ranges"));
+        Assert.Equal("application/problem+json", response.ContentType);
+        Assert.Equal("media_service_unavailable", ProblemCode(response));
+        Assert.DoesNotContain(
+            "private-key",
+            response.BodyText,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Late_stream_failures_after_response_start_abort_without_rewriting_headers()
+    {
+        var responseFeature = new StartedResponseFeature();
+        var lifetimeFeature = new TrackingRequestLifetimeFeature();
+        var source = new FakeMediaContentSource(Content)
+        {
+            StreamFactory = _ => new FailingReadStream(
+                "late stream failure",
+                responseFeature.MarkStarted),
+        };
+
+        await SendAsync(
+            new FakeMediaAuthorizationPort(),
+            FakeMediaApplicationPort.PublicReady(
+                Representation(source, "image/webp")),
+            "GET",
+            PublicRoute,
+            configureContext: context =>
+            {
+                context.Features.Set<IHttpResponseFeature>(responseFeature);
+                context.Features.Set<IHttpRequestLifetimeFeature>(
+                    lifetimeFeature);
+            });
+
+        Assert.True(responseFeature.Started);
+        Assert.True(lifetimeFeature.Aborted);
+        Assert.Equal(
+            MediaDeliveryHttpContract.PublicImmutableCacheControl,
+            responseFeature.Headers.CacheControl.ToString());
+        Assert.Equal($"\"{Sha256}\"", responseFeature.Headers.ETag.ToString());
+        Assert.Equal(
+            "image/webp",
+            responseFeature.Headers.ContentType.ToString());
+    }
+
+    [Fact]
     public async Task Stream_copy_is_cancellation_aware_and_disposes_the_read_handle()
     {
         using var cancellation = new CancellationTokenSource();
@@ -630,6 +697,7 @@ public sealed class MediaDeliveryEndpointContractTests
         string route,
         IReadOnlyDictionary<string, string>? headers = null,
         string? deliveryCredential = "grant-token",
+        Action<DefaultHttpContext>? configureContext = null,
         CancellationToken cancellationToken = default)
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
@@ -667,6 +735,7 @@ public sealed class MediaDeliveryEndpointContractTests
         context.Request.RouteValues["assetId"] = AssetId.ToString("D");
         context.Response.Body = new MemoryStream();
         context.TraceIdentifier = "trace-media-delivery";
+        configureContext?.Invoke(context);
         if (headers is not null)
         {
             foreach ((string name, string value) in headers)
@@ -893,5 +962,84 @@ public sealed class MediaDeliveryEndpointContractTests
             Disposed = true;
             base.Dispose(disposing);
         }
+    }
+
+    private sealed class FailingReadStream(
+        string message,
+        Action? beforeFailure = null) : Stream
+    {
+        public override bool CanRead => true;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => false;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            beforeFailure?.Invoke();
+            throw new IOException(message);
+        }
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            beforeFailure?.Invoke();
+            return ValueTask.FromException<int>(new IOException(message));
+        }
+
+        public override void Flush() => throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+
+        public override void SetLength(long value) =>
+            throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class StartedResponseFeature : IHttpResponseFeature
+    {
+        public int StatusCode { get; set; } = StatusCodes.Status200OK;
+
+        public string? ReasonPhrase { get; set; }
+
+        public IHeaderDictionary Headers { get; set; } = new HeaderDictionary();
+
+        public Stream Body { get; set; } = new MemoryStream();
+
+        public bool HasStarted => Started;
+
+        public bool Started { get; private set; }
+
+        public void OnCompleted(Func<object, Task> callback, object state)
+        {
+        }
+
+        public void OnStarting(Func<object, Task> callback, object state)
+        {
+        }
+
+        public void MarkStarted() => Started = true;
+    }
+
+    private sealed class TrackingRequestLifetimeFeature :
+        IHttpRequestLifetimeFeature
+    {
+        public CancellationToken RequestAborted { get; set; }
+
+        public bool Aborted { get; private set; }
+
+        public void Abort() => Aborted = true;
     }
 }

@@ -302,9 +302,30 @@ public static class MediaDeliveryEndpoint
 
         await using (handle)
         {
-            await handle.Content.CopyToAsync(
-                context.Response.Body,
-                cancellationToken);
+            try
+            {
+                await handle.Content.CopyToAsync(
+                    context.Response.Body,
+                    cancellationToken);
+            }
+            catch (OperationCanceledException) when (
+                cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception) when (IsDependencyFailure(exception))
+            {
+                if (context.Response.HasStarted)
+                {
+                    context.Abort();
+                    return;
+                }
+
+                ClearRepresentationHeaders(context);
+                await WriteServiceUnavailableAsync(
+                    context,
+                    cancellationToken);
+            }
         }
     }
 

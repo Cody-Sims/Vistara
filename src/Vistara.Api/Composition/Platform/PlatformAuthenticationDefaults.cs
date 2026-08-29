@@ -21,6 +21,11 @@ public static class PlatformAuthenticationSelector
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        if (IsPublicMediaRequest(request))
+        {
+            return PlatformAuthenticationDefaults.AnonymousScheme;
+        }
+
         bool hasAuthorization = request.Headers.ContainsKey("Authorization");
         bool hasApiKey = request.Headers.ContainsKey(
             PlatformAuthenticationDefaults.ApiKeyHeaderName);
@@ -50,4 +55,8 @@ public static class PlatformAuthenticationSelector
             ? PlatformAuthenticationDefaults.CookieScheme
             : PlatformAuthenticationDefaults.AnonymousScheme;
     }
+
+    private static bool IsPublicMediaRequest(HttpRequest request) =>
+        (HttpMethods.IsGet(request.Method) || HttpMethods.IsHead(request.Method)) &&
+        request.Path.StartsWithSegments("/media");
 }

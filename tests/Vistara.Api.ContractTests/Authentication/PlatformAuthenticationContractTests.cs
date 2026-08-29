@@ -9,7 +9,9 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Vistara.Api.Composition.Platform;
+using Vistara.Api.Features.Media;
 using Vistara.Auth.Cookies;
+using Vistara.Contracts.Media;
 using Xunit;
 
 namespace Vistara.Api.ContractTests.Authentication;
@@ -22,6 +24,9 @@ public sealed class PlatformAuthenticationContractTests
         Guid.Parse("01990a2a-bc00-7000-8000-000000000202");
     private static readonly Guid OtherTenantId =
         Guid.Parse("01990a2a-bc00-7000-8000-000000000203");
+    private const string PublicMediaPath =
+        "/media/v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/" +
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.webp";
 
     [Fact]
     public void Authentication_selector_rejects_credential_scheme_confusion()
@@ -68,6 +73,69 @@ public sealed class PlatformAuthenticationContractTests
         Assert.Equal(
             expectedScheme,
             PlatformAuthenticationSelector.Select(context.Request));
+    }
+
+    [Fact]
+    public async Task Public_media_bypasses_cookie_authentication_and_rotation()
+    {
+        var credentials = new FakeCredentialAuthenticators
+        {
+            CookieResult = PlatformCredentialResult.Success(
+                new PlatformIdentity(
+                    UserId,
+                    TenantId,
+                    "Member",
+                    ["assets.read"],
+                    CookieTokenCryptography.ComputeDigest("valid-csrf")),
+                "vistara_session=rotated; Path=/; Secure; HttpOnly"),
+        };
+        await using TestPlatformHost host = CreateHost(credentials);
+
+        TestResponse response = await host.SendAsync(
+            "GET",
+            PublicMediaPath,
+            headers: new Dictionary<string, string>
+            {
+                ["Cookie"] = $"{CookieAuthOptions.ProductionCookieName}=valid",
+            });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("public-media", response.Body);
+        Assert.Equal(0, credentials.CookieCalls);
+        Assert.False(response.Headers.ContainsKey("Set-Cookie"));
+        Assert.Equal(
+            MediaDeliveryHttpContract.PublicImmutableCacheControl,
+            response.Headers.CacheControl.ToString());
+    }
+
+    [Fact]
+    public async Task Non_public_delivery_paths_still_authenticate_cookie_requests()
+    {
+        var credentials = new FakeCredentialAuthenticators
+        {
+            CookieResult = PlatformCredentialResult.Success(
+                new PlatformIdentity(
+                    UserId,
+                    TenantId,
+                    "Member",
+                    ["assets.read"],
+                    CookieTokenCryptography.ComputeDigest("valid-csrf")),
+                "vistara_session=rotated; Path=/; Secure; HttpOnly"),
+        };
+        await using TestPlatformHost host = CreateHost(credentials);
+
+        TestResponse response = await host.SendAsync(
+            "GET",
+            "/delivery/private.webp",
+            headers: new Dictionary<string, string>
+            {
+                ["Cookie"] = $"{CookieAuthOptions.ProductionCookieName}=valid",
+            });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(TenantId.ToString("D"), response.Body);
+        Assert.Equal(1, credentials.CookieCalls);
+        Assert.True(response.Headers.ContainsKey("Set-Cookie"));
     }
 
     [Fact]
@@ -124,6 +192,7 @@ public sealed class PlatformAuthenticationContractTests
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.Equal("authentication.required", response.ProblemCode());
+        Assert.Equal("no-store", response.Headers.CacheControl.ToString());
     }
 
     [Theory]
@@ -386,6 +455,8 @@ public sealed class PlatformAuthenticationContractTests
                 builder.Services.AddSingleton<IPlatformRateLimitHook>(rateLimitHook);
             }
 
+            builder.Services.AddSingleton<IMediaDeliveryApplicationPort>(
+                new PublicMediaApplicationPort());
             builder.Services.AddVistaraApiPlatform(builder.Configuration);
 
             WebApplication app = builder.Build();
@@ -393,18 +464,23 @@ public sealed class PlatformAuthenticationContractTests
             app.MapMethods(
                     "/api/v1/probe",
                     ["GET", "POST"],
-                    (HttpContext context) =>
-                        Results.Text(
-                            context.RequestServices
-                                .GetRequiredService<IPlatformTenantContext>()
-                                .TenantId?
-                                .ToString("D") ?? "missing"))
+                    TenantText)
+                .RequireAuthorization();
+            app.MapVistaraMedia();
+            app.MapGet("/delivery/private.webp", TenantText)
                 .RequireAuthorization();
             app.UseVistaraSpaFallback(
                 context => context.Response.WriteAsync("spa-shell"));
             RequestDelegate pipeline = ((IApplicationBuilder)app).Build();
             return new TestPlatformHost(app, pipeline);
         }
+
+        private static IResult TenantText(HttpContext context) =>
+            Results.Text(
+                context.RequestServices
+                    .GetRequiredService<IPlatformTenantContext>()
+                    .TenantId?
+                    .ToString("D") ?? "missing");
 
         internal async Task<TestResponse> SendAsync(
             string method,
@@ -535,5 +611,50 @@ public sealed class PlatformAuthenticationContractTests
             CancellationToken cancellationToken) =>
             ValueTask.FromResult(
                 PlatformRateLimitDecision.Reject(TimeSpan.FromSeconds(5)));
+    }
+
+    private sealed class PublicMediaApplicationPort :
+        IMediaDeliveryApplicationPort
+    {
+        private static readonly byte[] Content =
+            Encoding.UTF8.GetBytes("public-media");
+
+        public ValueTask<MediaDeliveryResult> ResolvePublicDerivativeAsync(
+            MediaDerivativeRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(
+                MediaDeliveryResult.Ready(
+                    new MediaRepresentation(
+                        Content.Length,
+                        "image/webp",
+                        new string('c', 64),
+                        new PublicMediaContentSource())));
+        }
+
+        public ValueTask<MediaDeliveryResult> ResolvePrivateDerivativeAsync(
+            MediaTenantScope scope,
+            MediaDerivativeRequest request,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<MediaDeliveryResult> ResolveOriginalAsync(
+            MediaAssetScope scope,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        private sealed class PublicMediaContentSource : IMediaContentSource
+        {
+            public ValueTask<MediaReadHandle> OpenReadAsync(
+                MediaByteRange? range,
+                CancellationToken cancellationToken)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return ValueTask.FromResult(
+                    new MediaReadHandle(
+                        new MemoryStream(Content, writable: false)));
+            }
+        }
     }
 }

@@ -22,6 +22,8 @@ using Vistara.Domain.Identity;
 using Vistara.Domain.Tenancy;
 using Vistara.Persistence;
 using Vistara.Persistence.Auth;
+using Vistara.Persistence.Derivatives;
+using Vistara.Persistence.Media;
 using Vistara.Persistence.Model;
 using Xunit;
 
@@ -187,6 +189,253 @@ public sealed class ApiRuntimeCompositionTests
                 .Select(property => property.Name)
                 .Order(StringComparer.Ordinal)
                 .ToArray());
+    }
+
+    [Fact]
+    public void Public_media_catalog_models_only_opaque_routing_rows()
+    {
+        var options =
+            new DbContextOptionsBuilder<MediaCatalogDbContext>()
+                .UseSqlite("Data Source=:memory:")
+                .Options;
+        using var catalog = new MediaCatalogDbContext(options);
+
+        Microsoft.EntityFrameworkCore.Metadata.IEntityType entity =
+            Assert.Single(catalog.Model.GetEntityTypes());
+        Assert.Equal(
+            "Vistara.Persistence.Media.PublicDerivativeRouteRow",
+            entity.ClrType.FullName);
+        Assert.Equal(
+            [
+                "CreatedAtUtc",
+                "LookupDigest",
+                "RequestId",
+                "RoutedTenantId",
+            ],
+            entity.GetProperties()
+                .Select(property => property.Name)
+                .Order(StringComparer.Ordinal)
+                .ToArray());
+    }
+
+    [Fact]
+    public async Task Public_media_lookup_ignores_an_unrelated_request_tenant()
+    {
+        string databasePath = CreateScratchPath("public-media-route.db");
+        Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+        Guid publicTenant = Guid.CreateVersion7();
+        Guid unrelatedTenant = Guid.CreateVersion7();
+        Guid publicUser = Guid.CreateVersion7();
+        Guid requestId = Guid.CreateVersion7();
+        DateTimeOffset now =
+            new(2026, 8, 29, 10, 0, 0, TimeSpan.Zero);
+        const string sourceHash =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string recipeHash =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        try
+        {
+            await InitializeTenantAsync(
+                databasePath,
+                publicTenant,
+                publicUser,
+                "public",
+                now);
+            await InitializeTenantAsync(
+                databasePath,
+                unrelatedTenant,
+                Guid.CreateVersion7(),
+                "unrelated",
+                now);
+            (Guid assetId, Guid revisionId) =
+                await AddDerivativeSourceAsync(
+                    databasePath,
+                    publicTenant,
+                    publicUser,
+                    sourceHash,
+                    now);
+
+            await RegisterPublicDerivativeAsync(
+                databasePath,
+                publicTenant,
+                assetId,
+                revisionId,
+                requestId,
+                sourceHash,
+                recipeHash,
+                now);
+
+            IConfiguration configuration = PersistenceConfiguration(databasePath);
+            ServiceCollection services = [];
+            var tenantScope = new MutableTenantScope();
+            tenantScope.Establish(unrelatedTenant);
+            services.AddSingleton<ITenantScope>(tenantScope);
+            services.AddSingleton<IMutableTenantScope>(tenantScope);
+            services.AddVistaraApiPlatform(configuration);
+            services.AddVistaraApiPersistence(configuration);
+            await using ServiceProvider provider = services.BuildServiceProvider();
+
+            await using AsyncServiceScope lookupScope =
+                provider.CreateAsyncScope();
+            RelationalMediaCatalogStore lookup = lookupScope.ServiceProvider
+                .GetRequiredService<RelationalMediaCatalogStore>();
+            PersistedPublicDerivativeRoute? route =
+                await lookup.ResolvePublicDerivativeRouteAsync(
+                    "v1",
+                    sourceHash,
+                    recipeHash,
+                    "webp",
+                    CancellationToken.None);
+
+            Assert.Equal(publicTenant, route?.TenantId);
+            Assert.Equal(requestId, route?.RequestId);
+            PersistedDerivativeMedia? derivative =
+                await lookup.GetDerivativeAsync(
+                    route!.TenantId,
+                    route.RequestId,
+                    CancellationToken.None);
+            Assert.Equal(publicTenant, derivative?.TenantId);
+            Assert.Equal(requestId, derivative?.RequestId);
+            Assert.Equal(unrelatedTenant, tenantScope.TenantId);
+        }
+        finally
+        {
+            DeleteScratchPath(databasePath);
+        }
+    }
+
+    private static async Task RegisterPublicDerivativeAsync(
+        string databasePath,
+        Guid tenantId,
+        Guid assetId,
+        Guid revisionId,
+        Guid requestId,
+        string sourceHash,
+        string recipeHash,
+        DateTimeOffset now)
+    {
+        IConfiguration configuration = PersistenceConfiguration(databasePath);
+        ServiceCollection services = [];
+        services.AddSingleton<ITenantScope>(new FixedTenantScope(tenantId));
+        services.AddVistaraApiPlatform(configuration);
+        services.AddVistaraApiPersistence(configuration);
+        await using ServiceProvider provider = services.BuildServiceProvider();
+        await using AsyncServiceScope scope = provider.CreateAsyncScope();
+        PersistedDerivativeSubmissionResult submission = await scope
+            .ServiceProvider
+            .GetRequiredService<RelationalDerivativeRequestStore>()
+            .SubmitAsync(
+                new PersistedDerivativeSubmission(
+                    RequestId: requestId,
+                    TenantId: tenantId,
+                    AssetId: assetId,
+                    RevisionId: revisionId,
+                    JobId: Guid.CreateVersion7(),
+                    JobPayload: "{}",
+                    JobDedupeKey: $"public-media-{requestId:N}",
+                    IdempotencyKey: $"public-media-{requestId:N}",
+                    RequestHash: new string('c', 64),
+                    PresetName: "viewer",
+                    PresetRevision: 1,
+                    Width: 1,
+                    Height: 1,
+                    Fit: "contain",
+                    Format: "webp",
+                    Quality: 80,
+                    FocalPointX: null,
+                    FocalPointY: null,
+                    CropX: null,
+                    CropY: null,
+                    CropWidth: null,
+                    CropHeight: null,
+                    PipelineId: "v1",
+                    PipelineFingerprint: "runtime-composition-test",
+                    SourceSha256: sourceHash,
+                    RecipeSha256: recipeHash,
+                    GenerationIdentity: new string('d', 64),
+                    CacheKey: $"derivatives/{requestId:N}.webp",
+                    Extension: "webp",
+                    IsPublic: true,
+                    CreatedAtUtc: now),
+                CancellationToken.None);
+        Assert.Equal(
+            PersistedDerivativeSubmissionStatus.Created,
+            submission.Status);
+        RelationalMediaCatalogStore media = scope.ServiceProvider
+            .GetRequiredService<RelationalMediaCatalogStore>();
+        await media.RegisterPublicDerivativeAsync(
+            tenantId,
+            requestId,
+            "v1",
+            sourceHash,
+            recipeHash,
+            "webp",
+            now,
+            CancellationToken.None);
+    }
+
+    private static async Task<(Guid AssetId, Guid RevisionId)>
+        AddDerivativeSourceAsync(
+            string databasePath,
+            Guid tenantId,
+            Guid ownerId,
+            string sourceHash,
+            DateTimeOffset now)
+    {
+        Guid blobId = Guid.CreateVersion7();
+        Guid assetId = Guid.CreateVersion7();
+        Guid revisionId = Guid.CreateVersion7();
+        var options = new DbContextOptionsBuilder<VistaraDbContext>()
+            .UseSqlite($"Data Source={databasePath}")
+            .Options;
+        await using var context = new VistaraDbContext(
+            options,
+            new FixedTenantScope(tenantId));
+        context.Blobs.Add(new BlobRow
+        {
+            Id = blobId,
+            TenantId = tenantId,
+            Provider = "Local",
+            Container = "media",
+            ObjectKey = $"originals/{blobId:N}",
+            Sha256 = sourceHash,
+            SizeBytes = 1,
+            ContentType = "image/webp",
+            State = "Active",
+            CreatedAtUtc = now,
+        });
+        var asset = new AssetRow
+        {
+            Id = assetId,
+            TenantId = tenantId,
+            OwnerId = ownerId,
+            Title = "public",
+            Status = "Ready",
+            Visibility = "Public",
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now,
+            Version = 1,
+        };
+        context.Assets.Add(asset);
+        await context.SaveChangesAsync();
+        context.AssetRevisions.Add(new AssetRevisionRow
+        {
+            Id = revisionId,
+            TenantId = tenantId,
+            AssetId = assetId,
+            RevisionNumber = 1,
+            BlobId = blobId,
+            DetectedFormat = "webp",
+            DetectedContentType = "image/webp",
+            Width = 1,
+            Height = 1,
+            FrameCount = 1,
+            CreatedAtUtc = now,
+        });
+        await context.SaveChangesAsync();
+        asset.CurrentRevisionId = revisionId;
+        await context.SaveChangesAsync();
+        return (assetId, revisionId);
     }
 
     [Fact]

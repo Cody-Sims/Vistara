@@ -30,12 +30,15 @@ public sealed record PersistedPublicDerivativeRoute(
 public sealed class RelationalMediaCatalogStore(
     VistaraDbContext context,
     MediaCatalogDbContext catalog,
+    TenantDbContextFactory tenantContexts,
     ITenantScope tenantScope)
 {
     private readonly VistaraDbContext _context =
         context ?? throw new ArgumentNullException(nameof(context));
     private readonly MediaCatalogDbContext _catalog =
         catalog ?? throw new ArgumentNullException(nameof(catalog));
+    private readonly TenantDbContextFactory _tenantContexts =
+        tenantContexts ?? throw new ArgumentNullException(nameof(tenantContexts));
     private readonly ITenantScope _tenantScope =
         tenantScope ?? throw new ArgumentNullException(nameof(tenantScope));
 
@@ -111,9 +114,6 @@ public sealed class RelationalMediaCatalogStore(
             return null;
         }
 
-        TenantScopeGuard.EstablishOrValidate(
-            _tenantScope,
-            row.RoutedTenantId);
         return new PersistedPublicDerivativeRoute(
             row.RoutedTenantId,
             row.RequestId);
@@ -124,8 +124,9 @@ public sealed class RelationalMediaCatalogStore(
         Guid requestId,
         CancellationToken cancellationToken)
     {
-        EnsureTenant(tenantId);
-        DerivativeRequestRow? row = await _context
+        await using VistaraDbContext context =
+            _tenantContexts.Create(tenantId);
+        DerivativeRequestRow? row = await context
             .Set<DerivativeRequestRow>()
             .AsNoTracking()
             .SingleOrDefaultAsync(

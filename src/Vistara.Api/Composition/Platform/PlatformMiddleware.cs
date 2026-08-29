@@ -75,6 +75,18 @@ internal static class PlatformProblemWriter
         string title,
         CancellationToken cancellationToken)
     {
+        if (context.Response.HasStarted)
+        {
+            context.Abort();
+            return Task.CompletedTask;
+        }
+
+        context.Response.ContentLength = null;
+        context.Response.Headers.Remove("ETag");
+        context.Response.Headers.Remove("Accept-Ranges");
+        context.Response.Headers.Remove("Content-Range");
+        context.Response.Headers.Remove("Content-Disposition");
+        context.Response.Headers.CacheControl = "no-store";
         context.Response.StatusCode = status;
         context.Response.ContentType = "application/problem+json";
         return context.Response.WriteAsync(
