@@ -3,6 +3,12 @@
 !Directory.Build.props
 !Directory.Packages.props
 !Vistara.slnx
+!deploy/
+!deploy/containers/
+!deploy/containers/build-libvips-runtime.sh
+!deploy/licenses/
+!deploy/licenses/NetVips-MIT.txt
+!deploy/licenses/THIRD-PARTY-NOTICES.md
 !src/
 !src/**
 **/bin
