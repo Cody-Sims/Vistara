@@ -58,7 +58,7 @@ common_environment=(
 assert_image_runtime "$api_image"
 assert_image_runtime "$worker_image"
 
-docker run --detach --rm \
+docker run --detach \
   --name "$api_container" \
   --publish 127.0.0.1::8080 \
   "${common_environment[@]}" \
@@ -83,7 +83,7 @@ for attempt in {1..30}; do
   sleep 1
 done
 
-docker run --detach --rm \
+docker run --detach \
   --name "$worker_container" \
   "${common_environment[@]}" \
   --env Worker__InstanceId=container-smoke \
