@@ -163,7 +163,7 @@ public sealed class SqliteMigrationTests
                   AND reserved_compute_units = 2
                   AND reserved_jobs = 0
                   AND reserved_budget_units = 0
-                  AND version = 1;
+                  AND version = 2;
                 """));
 
         SqliteSchema actual = await SqliteSchema.ReadAsync(connection);

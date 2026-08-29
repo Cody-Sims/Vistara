@@ -37,6 +37,14 @@ public sealed class LegacyUpgradeTests
         Guid.Parse("01991a54-6c00-7000-8000-000000000109");
     private static readonly Guid ApiKeyId =
         Guid.Parse("01991a54-6c00-7000-8000-00000000010a");
+    private static readonly Guid ConstrainedTenantId =
+        Guid.Parse("01991a54-6c00-7000-8000-00000000010b");
+    private static readonly Guid ConstrainedActorId =
+        Guid.Parse("01991a54-6c00-7000-8000-00000000010c");
+    private static readonly Guid ConstrainedUploadId =
+        Guid.Parse("01991a54-6c00-7000-8000-00000000010d");
+    private static readonly Guid ConstrainedReservationId =
+        Guid.Parse("01991a54-6c00-7000-8000-00000000010e");
 
     [Fact]
     public async Task Initial_data_upgrades_without_collisions_and_hydrates()
@@ -57,12 +65,12 @@ public sealed class LegacyUpgradeTests
             MigrationTestSupport.SqliteMigrations,
             await context.Database.GetAppliedMigrationsAsync());
         Assert.Equal(
-            3L,
+            4L,
             await ScalarAsync<long>(
                 anchor,
                 "SELECT COUNT(*) FROM quota_reservations;"));
         Assert.Equal(
-            3L,
+            4L,
             await ScalarAsync<long>(
                 anchor,
                 """
@@ -126,8 +134,33 @@ public sealed class LegacyUpgradeTests
                   AND reserved_uploads = 1
                   AND reserved_bytes = 41
                   AND reserved_objects = 2
-                  AND reserved_compute_units = 3;
+                  AND reserved_compute_units = 3
+                  AND reserved_jobs = 5;
                 """));
+        Assert.Equal(
+            5L,
+            await ScalarAsync<long>(
+                anchor,
+                $"SELECT reserved_jobs FROM quota_reservations WHERE id = '{DirectReservationId:D}';"));
+        Assert.Equal(
+            "Expired",
+            await ScalarAsync<string>(
+                anchor,
+                $"SELECT state FROM upload_sessions WHERE id = '{ConstrainedUploadId:D}';"));
+        Assert.Equal(
+            "Expired",
+            await ScalarAsync<string>(
+                anchor,
+                $"SELECT state FROM quota_reservations WHERE id = '{ConstrainedReservationId:D}';"));
+        Assert.Equal(
+            0L,
+            await ScalarAsync<long>(
+                anchor,
+                $"""
+                 SELECT reserved_jobs
+                 FROM quota_usage
+                 WHERE tenant_id = '{ConstrainedTenantId:D}';
+                 """));
 
         Assert.Equal(
             1L,
@@ -199,6 +232,22 @@ public sealed class LegacyUpgradeTests
                 CancellationToken.None));
         Assert.Equal(UploadState.Pending, direct.State);
 
+        await using VistaraDbContext constrainedContext =
+            MigrationTestSupport.CreateSqliteContext(
+                anchor,
+                ConstrainedTenantId);
+        var constrainedUploads = new UploadSessionRepository(constrainedContext);
+        UploadSession constrained = Assert.IsType<UploadSession>(
+            await constrainedUploads.FindByIdempotencyAsync(
+                ConstrainedTenantId,
+                ConstrainedActorId,
+                "constrained-key",
+                CancellationToken.None));
+        Assert.Equal(UploadState.Expired, constrained.State);
+        Assert.Equal(
+            UploadReservationState.Expired,
+            constrained.Reservation.State);
+
         var catalogOptions =
             new DbContextOptionsBuilder<AuthenticationCatalogDbContext>()
                 .UseSqlite(connectionString)
@@ -253,6 +302,7 @@ public sealed class LegacyUpgradeTests
         Assert.True(
             released.Reservation?.CreatedAtUtc <
             released.Reservation?.ExpiresAtUtc);
+        Assert.Equal(5, released.Snapshot?.ActiveReservations.Jobs);
     }
 
     [Fact]
@@ -297,6 +347,20 @@ public sealed class LegacyUpgradeTests
                 anchor,
                 $"SELECT state FROM quota_reservations WHERE id = '{MultipartReservationId:D}';"));
         Assert.Equal(
+            5L,
+            await ScalarAsync<long>(
+                anchor,
+                $"SELECT reserved_jobs FROM quota_reservations WHERE id = '{MultipartReservationId:D}';"));
+        Assert.Equal(
+            5L,
+            await ScalarAsync<long>(
+                anchor,
+                $"""
+                 SELECT reserved_jobs
+                 FROM quota_usage
+                 WHERE tenant_id = '{TenantId:D}';
+                 """));
+        Assert.Equal(
             $"upload:{FirstActorId:N}:known-key",
             await ScalarAsync<string>(
                 anchor,
@@ -336,6 +400,47 @@ public sealed class LegacyUpgradeTests
         Assert.Equal(10_000, candidate.MultipartSession.MaxParts);
         Assert.Equal(5L * 1024 * 1024, candidate.MultipartSession.MinPartBytes);
         Assert.Equal(5L * 1024 * 1024 * 1024, candidate.MultipartSession.MaxPartBytes);
+
+        await using VistaraDbContext constrainedContext =
+            MigrationTestSupport.CreateSqliteContext(
+                anchor,
+                ConstrainedTenantId);
+        var constrainedStore = new RelationalUploadReconciliationStore(
+            constrainedContext,
+            new FixedUuid7Generator());
+        PersistedUploadReconciliationCandidate constrainedCandidate =
+            Assert.Single(
+                (await constrainedStore.ScanAsync(
+                    ConstrainedTenantId,
+                    cursor: null,
+                    maximumSessions: 10,
+                    new DateTimeOffset(
+                        2026,
+                        8,
+                        30,
+                        0,
+                        0,
+                        0,
+                        TimeSpan.Zero),
+                    TimeSpan.FromMinutes(5),
+                    dryRun: false,
+                    CancellationToken.None)).Candidates);
+        Assert.Equal("OutcomeUnknown", constrainedCandidate.State);
+        Assert.Equal("Aborting", constrainedCandidate.LastKnownState);
+        Assert.True(constrainedCandidate.ReservationReleased);
+        Assert.NotNull(constrainedCandidate.MultipartSession);
+        Assert.Equal(
+            "legacy-constrained-upload",
+            constrainedCandidate.MultipartSession.UploadId);
+        Assert.Equal(
+            0L,
+            await ScalarAsync<long>(
+                anchor,
+                $"""
+                 SELECT reserved_jobs
+                 FROM quota_usage
+                 WHERE tenant_id = '{ConstrainedTenantId:D}';
+                 """));
     }
 
     [Fact]
@@ -360,7 +465,7 @@ public sealed class LegacyUpgradeTests
                 anchor,
                 "SELECT COUNT(*) FROM authentication_routes;"));
         Assert.Equal(
-            3L,
+            4L,
             await ScalarAsync<long>(
                 anchor,
                 "SELECT COUNT(*) FROM quota_reservations;"));
@@ -393,7 +498,14 @@ public sealed class LegacyUpgradeTests
                  created_at_utc, updated_at_utc, version)
              VALUES (
                  '{TenantId:D}', '{TenantId:D}', 'legacy', 'Legacy', 'Active',
-                 char(123) || char(125), char(123) || char(125),
+                 char(123) || char(125),
+                 char(123) || '"queuedJobs":5' || char(125),
+                 '2026-08-29T00:00:00Z',
+                 '2026-08-29T00:00:00Z', 1),
+                ('{ConstrainedTenantId:D}', '{ConstrainedTenantId:D}',
+                 'constrained', 'Constrained', 'Active',
+                 char(123) || char(125),
+                 char(123) || '"queuedJobs":4' || char(125),
                  '2026-08-29T00:00:00Z',
                  '2026-08-29T00:00:00Z', 1);
 
@@ -405,6 +517,13 @@ public sealed class LegacyUpgradeTests
                   '2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z', 1),
                  ('{SecondActorId:D}', 'second@example.test', 'Second', 'Active',
                   '2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z', 1);
+             INSERT INTO users (
+                 id, normalized_email, display_name, status,
+                 created_at_utc, updated_at_utc, version)
+             VALUES (
+                 '{ConstrainedActorId:D}', 'constrained@example.test',
+                 'Constrained', 'Active', '2026-08-29T00:00:00Z',
+                 '2026-08-29T00:00:00Z', 1);
 
              INSERT INTO tenant_memberships (
                  tenant_id, user_id, role, status, invited_at_utc,
@@ -415,7 +534,10 @@ public sealed class LegacyUpgradeTests
                   '2026-08-29T00:00:00Z', 1),
                  ('{TenantId:D}', '{SecondActorId:D}', 'Member', 'Active',
                   '2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z',
-                  '2026-08-29T00:00:00Z', 1);
+                  '2026-08-29T00:00:00Z', 1),
+                 ('{ConstrainedTenantId:D}', '{ConstrainedActorId:D}',
+                  'TenantOwner', 'Active', '2026-08-29T00:00:00Z',
+                  '2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z', 1);
 
              INSERT INTO auth_sessions (
                  id, user_id, digest, created_at_utc, expires_at_utc,
@@ -447,7 +569,12 @@ public sealed class LegacyUpgradeTests
                  ('{DirectUploadId:D}', '{TenantId:D}', '{SecondActorId:D}',
                   'Direct', 'staging/direct', NULL, 23, '{new string('b', 64)}',
                   'image/jpeg', 'Pending', '2026-08-29T01:00:00Z',
-                  '2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z', 1);
+                  '2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z', 1),
+                 ('{ConstrainedUploadId:D}', '{ConstrainedTenantId:D}',
+                  '{ConstrainedActorId:D}', 'Direct', 'staging/constrained',
+                  NULL, 11, '{new string('e', 64)}', 'image/webp', 'Pending',
+                  '2026-08-29T01:00:00Z', '2026-08-29T00:00:00Z',
+                  '2026-08-29T00:00:00Z', 1);
 
              INSERT INTO idempotency_requests (
                  tenant_id, principal_id, key, request_hash,
@@ -458,7 +585,11 @@ public sealed class LegacyUpgradeTests
                   '{MultipartUploadId:D}', '2026-08-29T01:00:00Z'),
                  ('{TenantId:D}', '{SecondActorId:D}', 'shared-key',
                   '{new string('2', 64)}', '{DirectUploadId:D}',
-                  '{DirectUploadId:D}', '2026-08-29T01:00:00Z');
+                  '{DirectUploadId:D}', '2026-08-29T01:00:00Z'),
+                 ('{ConstrainedTenantId:D}', '{ConstrainedActorId:D}',
+                  'constrained-key', '{new string('4', 64)}',
+                  '{ConstrainedUploadId:D}', '{ConstrainedUploadId:D}',
+                  '2026-08-29T01:00:00Z');
 
              INSERT INTO quota_reservations (
                  id, tenant_id, upload_session_id, reserved_bytes,
@@ -471,7 +602,10 @@ public sealed class LegacyUpgradeTests
                   '{DirectUploadId:D}', 23, 1, 1, 'Reserved',
                   '2026-08-29T01:00:00Z'),
                  ('{StandaloneReservationId:D}', '{TenantId:D}',
-                  NULL, 18, 1, 2, 'Reserved', '2026-08-29T02:00:00Z');
+                  NULL, 18, 1, 2, 'Reserved', '2026-08-29T02:00:00Z'),
+                 ('{ConstrainedReservationId:D}', '{ConstrainedTenantId:D}',
+                  '{ConstrainedUploadId:D}', 11, 1, 0, 'Reserved',
+                  '2026-08-29T01:00:00Z');
              """);
     }
 
@@ -488,6 +622,12 @@ public sealed class LegacyUpgradeTests
                  '{TenantId:D}', '{TenantId:D}', 'n-minus-one', 'N minus one',
                  'Active', char(123) || char(125), char(123) || char(125),
                  '2026-08-29T00:00:00Z',
+                 '2026-08-29T00:00:00Z', 1),
+                ('{ConstrainedTenantId:D}', '{ConstrainedTenantId:D}',
+                 'n-minus-one-constrained', 'N minus one constrained',
+                 'Active', char(123) || char(125),
+                 'legacy-invalid-quota',
+                 '2026-08-29T00:00:00Z',
                  '2026-08-29T00:00:00Z', 1);
 
              INSERT INTO users (
@@ -495,7 +635,10 @@ public sealed class LegacyUpgradeTests
                  created_at_utc, updated_at_utc, version)
              VALUES (
                  '{FirstActorId:D}', 'owner@example.test', 'Owner', 'Active',
-                 '2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z', 1);
+                 '2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z', 1),
+                ('{ConstrainedActorId:D}', 'constrained-owner@example.test',
+                 'Constrained Owner', 'Active', '2026-08-29T00:00:00Z',
+                 '2026-08-29T00:00:00Z', 1);
 
              INSERT INTO upload_sessions (
                  id, tenant_id, actor_id, display_file_name, strategy,
@@ -512,7 +655,14 @@ public sealed class LegacyUpgradeTests
                  '2026-08-29T01:00:00Z', 10000, 5242880, 5368709120,
                  17, '{new string('a', 64)}', 'image/png', 'UploadIssued',
                  '2026-08-29T01:00:00Z', '2026-08-29T00:00:00Z',
-                 '2026-08-29T00:05:00Z', 2);
+                 '2026-08-29T00:05:00Z', 2),
+                ('{ConstrainedUploadId:D}', '{ConstrainedTenantId:D}',
+                 '{ConstrainedActorId:D}', 'constrained.png', 'Multipart',
+                 'staging/constrained', 'aws-s3', 'media',
+                 'legacy-constrained-upload', '2026-08-29T01:00:00Z',
+                 10000, 5242880, 5368709120, 19, '{new string('e', 64)}',
+                 'image/png', 'UploadIssued', '2026-08-29T01:00:00Z',
+                 '2026-08-29T00:00:00Z', '2026-08-29T00:05:00Z', 2);
 
              INSERT INTO idempotency_requests (
                  tenant_id, principal_id, key, request_hash,
@@ -520,7 +670,11 @@ public sealed class LegacyUpgradeTests
              VALUES (
                  '{TenantId:D}', '{FirstActorId:D}', 'known-key',
                  '{new string('1', 64)}', '{MultipartUploadId:D}',
-                 '{MultipartUploadId:D}', '2026-08-29T01:00:00Z');
+                 '{MultipartUploadId:D}', '2026-08-29T01:00:00Z'),
+                ('{ConstrainedTenantId:D}', '{ConstrainedActorId:D}',
+                 'constrained-key', '{new string('4', 64)}',
+                 '{ConstrainedUploadId:D}', '{ConstrainedUploadId:D}',
+                 '2026-08-29T01:00:00Z');
 
              INSERT INTO quota_reservations (
                  id, tenant_id, upload_session_id, idempotency_key,
@@ -539,6 +693,12 @@ public sealed class LegacyUpgradeTests
                   'job:{FirstActorId:N}:work', '{new string('3', 64)}',
                   0, 5, 1, 0, 0, 0, 'Reserved',
                   '2026-08-29T00:00:00Z', '2026-08-29T02:00:00Z',
+                  '2026-08-29T00:00:00Z', 1),
+                 ('{ConstrainedReservationId:D}', '{ConstrainedTenantId:D}',
+                  '{ConstrainedUploadId:D}',
+                  'constrained-key', '{new string('4', 64)}',
+                  1, 19, 1, 2, 0, 0, 'Reserved',
+                  '2026-08-29T00:00:00Z', '2026-08-29T01:00:00Z',
                   '2026-08-29T00:00:00Z', 1);
 
              INSERT INTO quota_usage (
@@ -605,6 +765,22 @@ public sealed class LegacyUpgradeTests
             .Replace(
                 ApiKeyId.ToString("D"),
                 ApiKeyId.ToString("D").ToUpperInvariant(),
+                StringComparison.Ordinal)
+            .Replace(
+                ConstrainedTenantId.ToString("D"),
+                ConstrainedTenantId.ToString("D").ToUpperInvariant(),
+                StringComparison.Ordinal)
+            .Replace(
+                ConstrainedActorId.ToString("D"),
+                ConstrainedActorId.ToString("D").ToUpperInvariant(),
+                StringComparison.Ordinal)
+            .Replace(
+                ConstrainedUploadId.ToString("D"),
+                ConstrainedUploadId.ToString("D").ToUpperInvariant(),
+                StringComparison.Ordinal)
+            .Replace(
+                ConstrainedReservationId.ToString("D"),
+                ConstrainedReservationId.ToString("D").ToUpperInvariant(),
                 StringComparison.Ordinal);
 
     private static async Task<T> ScalarAsync<T>(

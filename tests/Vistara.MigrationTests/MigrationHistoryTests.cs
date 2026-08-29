@@ -40,10 +40,10 @@ public sealed class MigrationHistoryTests
 
         AssertRollbackDropsEveryTable(
             sqlite,
-            MigrationTestSupport.SqliteLegacyDataMigration);
+            MigrationTestSupport.SqliteLegacyUploadQuotaMigration);
         AssertRollbackDropsEveryTable(
             postgres,
-            MigrationTestSupport.PostgresLegacyDataMigration);
+            MigrationTestSupport.PostgresLegacyUploadQuotaMigration);
     }
 
     private static void AssertSnapshotOwnedByMigrationAssembly(

@@ -31,6 +31,10 @@ public sealed partial class PostgresMigrationTests
             MigrationTestSupport.PostgresLegacyDataMigration,
             script,
             StringComparison.Ordinal);
+        Assert.Contains(
+            MigrationTestSupport.PostgresLegacyUploadQuotaMigration,
+            script,
+            StringComparison.Ordinal);
         Assert.Contains("__EFMigrationsHistory", script, StringComparison.Ordinal);
         Assert.Contains("DO $EF$", script, StringComparison.Ordinal);
         Assert.Contains("uuid", script, StringComparison.Ordinal);
@@ -97,7 +101,7 @@ public sealed partial class PostgresMigrationTests
         using var context = MigrationTestSupport.CreatePostgresContext();
         string script = context.GetService<IMigrator>().GenerateScript(
             MigrationTestSupport.InitialMigration,
-            MigrationTestSupport.PostgresLegacyDataMigration);
+            MigrationTestSupport.PostgresLegacyUploadQuotaMigration);
 
         Assert.Contains(
             "CREATE POLICY \"vistara_migration_20260829034648\"",
@@ -105,6 +109,10 @@ public sealed partial class PostgresMigrationTests
             StringComparison.Ordinal);
         Assert.Contains(
             "CREATE POLICY \"vistara_migration_20260829130313\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "CREATE POLICY \"vistara_migration_20260829183622\"",
             script,
             StringComparison.Ordinal);
         Assert.Contains("TO CURRENT_USER", script, StringComparison.Ordinal);
@@ -118,6 +126,10 @@ public sealed partial class PostgresMigrationTests
             StringComparison.Ordinal);
         Assert.Contains(
             "DROP POLICY \"vistara_migration_20260829130313\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "DROP POLICY \"vistara_migration_20260829183622\"",
             script,
             StringComparison.Ordinal);
         Assert.DoesNotContain(
@@ -181,6 +193,14 @@ public sealed partial class PostgresMigrationTests
             MigrationTestSupport.Count(
                 script,
                 "replace(key_row.id::text, '-', '')") >= 2);
+        Assert.Contains(
+            "tenant.quotas_json IS JSON OBJECT",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "reserved_jobs = 5",
+            script,
+            StringComparison.Ordinal);
 
         AssertMigrationPolicySurrounds(
             script,
@@ -190,6 +210,10 @@ public sealed partial class PostgresMigrationTests
             script,
             "vistara_migration_20260829130313",
             "INSERT INTO authentication_routes");
+        AssertMigrationPolicySurrounds(
+            script,
+            "vistara_migration_20260829183622",
+            "CREATE TEMP TABLE legacy_upload_job_decisions");
     }
 
     [Fact]

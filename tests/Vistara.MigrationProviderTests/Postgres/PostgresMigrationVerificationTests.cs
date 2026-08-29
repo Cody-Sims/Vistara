@@ -17,8 +17,10 @@ public sealed class PostgresMigrationVerificationTests
         "20260829123733_CompleteRuntimeAndUploadReconciliation";
     private const string LegacyDataMigration =
         "20260829130313_NormalizeLegacyRuntimeData";
+    private const string LegacyUploadQuotaMigration =
+        "20260829183622_ReconcileLegacyUploadJobQuota";
     private const int ReplacedCheckConstraints = 3;
-    private const int MigrationBackfillPolicies = 8;
+    private const int MigrationBackfillPolicies = 12;
 
     private static readonly string[] ExpectedMigrations =
     [
@@ -26,6 +28,7 @@ public sealed class PostgresMigrationVerificationTests
         UploadIngestMigration,
         RuntimeReconciliationMigration,
         LegacyDataMigration,
+        LegacyUploadQuotaMigration,
     ];
 
     [Fact]
@@ -77,6 +80,22 @@ public sealed class PostgresMigrationVerificationTests
         Assert.Contains(
             LegacyDataMigration,
             idempotentScript,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            LegacyUploadQuotaMigration,
+            idempotentScript,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "CREATE TEMP TABLE legacy_upload_job_decisions",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "reserved_jobs = 5",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "tenant.quotas_json IS JSON OBJECT",
+            script,
             StringComparison.Ordinal);
         Assert.Equal(
             PostgresTenantRowSecurity.TenantOwnedTables.Count,

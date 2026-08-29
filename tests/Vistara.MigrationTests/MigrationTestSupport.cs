@@ -24,6 +24,10 @@ internal static class MigrationTestSupport
         "20260829130302_NormalizeLegacyRuntimeData";
     internal const string PostgresLegacyDataMigration =
         "20260829130313_NormalizeLegacyRuntimeData";
+    internal const string SqliteLegacyUploadQuotaMigration =
+        "20260829183036_ReconcileLegacyUploadJobQuota";
+    internal const string PostgresLegacyUploadQuotaMigration =
+        "20260829183622_ReconcileLegacyUploadJobQuota";
 
     internal static readonly string[] SqliteMigrations =
     [
@@ -31,6 +35,7 @@ internal static class MigrationTestSupport
         SqliteUploadIngestMigration,
         SqliteRuntimeReconciliationMigration,
         SqliteLegacyDataMigration,
+        SqliteLegacyUploadQuotaMigration,
     ];
 
     internal static readonly string[] PostgresMigrations =
@@ -39,6 +44,7 @@ internal static class MigrationTestSupport
         PostgresUploadIngestMigration,
         PostgresRuntimeReconciliationMigration,
         PostgresLegacyDataMigration,
+        PostgresLegacyUploadQuotaMigration,
     ];
 
     private static readonly Guid TenantId =

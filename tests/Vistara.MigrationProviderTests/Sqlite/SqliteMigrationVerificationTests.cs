@@ -20,6 +20,8 @@ public sealed class SqliteMigrationVerificationTests
         "20260829123724_CompleteRuntimeAndUploadReconciliation";
     private const string LegacyDataMigration =
         "20260829130302_NormalizeLegacyRuntimeData";
+    private const string LegacyUploadQuotaMigration =
+        "20260829183036_ReconcileLegacyUploadJobQuota";
 
     private static readonly string[] ExpectedMigrations =
     [
@@ -27,6 +29,7 @@ public sealed class SqliteMigrationVerificationTests
         UploadIngestMigration,
         RuntimeReconciliationMigration,
         LegacyDataMigration,
+        LegacyUploadQuotaMigration,
     ];
 
     private static readonly string[] ExpectedTables =
@@ -137,6 +140,22 @@ public sealed class SqliteMigrationVerificationTests
             script,
             StringComparison.Ordinal);
         Assert.Contains(LegacyDataMigration, script, StringComparison.Ordinal);
+        Assert.Contains(
+            LegacyUploadQuotaMigration,
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "CREATE TEMP TABLE legacy_upload_job_decisions",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "reserved_jobs = 5",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "json_valid(tenant.quotas_json)",
+            script,
+            StringComparison.Ordinal);
     }
 
     [Fact]
