@@ -260,6 +260,96 @@ public sealed class CookieAuthSessionTests
     }
 
     [Fact]
+    public async Task CookieAuth_suspended_tenant_revokes_session_before_privilege_rotation()
+    {
+        TestContext context = CreateContext();
+        IssuedBrowserSession issued = await context.Manager.IssueAsync(
+            context.User,
+            context.MembershipOne,
+            null,
+            CancellationToken.None);
+        Assert.True(context.MembershipOne.ChangeRole(
+            TenantRole.TenantAdmin,
+            Now.AddMinutes(1)).IsSuccess);
+        Assert.True(context.TenantOne.Suspend(Now.AddMinutes(1)).IsSuccess);
+        context.Clock.UtcNow = Now.AddMinutes(1);
+
+        Result<AuthenticatedBrowserSession> result =
+            await context.Authenticator.AuthenticateAsync(
+                issued.Cookie.Value,
+                CancellationToken.None);
+
+        Assert.Equal(CookieAuthErrors.InvalidSession.Code, result.Error?.Code);
+        Assert.True(context.Store.IsRevoked(issued.Cookie.Value));
+        Assert.Empty(context.Store.ActiveRecords);
+    }
+
+    [Fact]
+    public async Task CookieAuth_tenant_switch_rejects_suspended_target_tenant()
+    {
+        TestContext context = CreateContext();
+        IssuedBrowserSession issued = await context.Manager.IssueAsync(
+            context.User,
+            context.MembershipOne,
+            null,
+            CancellationToken.None);
+        Assert.True(context.TenantTwo.Suspend(Now.AddMinutes(1)).IsSuccess);
+        context.Clock.UtcNow = Now.AddMinutes(1);
+
+        Result<IssuedBrowserSession> result =
+            await context.TenantSwitcher.SwitchAsync(
+                issued.Cookie.Value,
+                TenantTwo,
+                CancellationToken.None);
+
+        Assert.Equal(CookieAuthErrors.TenantUnavailable.Code, result.Error?.Code);
+        Assert.False(context.Store.IsRevoked(issued.Cookie.Value));
+    }
+
+    [Fact]
+    public async Task CookieAuth_suspended_current_tenant_denies_switch_and_revokes_session()
+    {
+        TestContext context = CreateContext();
+        IssuedBrowserSession issued = await context.Manager.IssueAsync(
+            context.User,
+            context.MembershipOne,
+            null,
+            CancellationToken.None);
+        Assert.True(context.TenantOne.Suspend(Now.AddMinutes(1)).IsSuccess);
+        context.Clock.UtcNow = Now.AddMinutes(1);
+
+        Result<IssuedBrowserSession> result =
+            await context.TenantSwitcher.SwitchAsync(
+                issued.Cookie.Value,
+                TenantTwo,
+                CancellationToken.None);
+
+        Assert.Equal(CookieAuthErrors.InvalidSession.Code, result.Error?.Code);
+        Assert.True(context.Store.IsRevoked(issued.Cookie.Value));
+    }
+
+    [Fact]
+    public async Task CookieAuth_login_skips_suspended_tenants()
+    {
+        TestContext context = CreateContext();
+        Assert.True(context.TenantOne.Suspend(Now.AddMinutes(1)).IsSuccess);
+        var handler = new LocalLoginHandler(
+            new FakeLocalCredentialVerifier(context.User),
+            context.Manager);
+
+        Result<IssuedBrowserSession> requested = await handler.HandleAsync(
+            new LocalLoginRequest("alice", "password", TenantOne, null),
+            CancellationToken.None);
+        Result<IssuedBrowserSession> fallback = await handler.HandleAsync(
+            new LocalLoginRequest("alice", "password", null, null),
+            CancellationToken.None);
+
+        Assert.Equal(CookieAuthErrors.TenantUnavailable.Code, requested.Error?.Code);
+        Assert.True(fallback.TryGetValue(out IssuedBrowserSession? issued));
+        Assert.Equal(TenantTwo, issued.Principal.TenantId);
+    }
+
+    [Fact]
     public async Task CookieAuth_tenant_switch_rotates_session_and_uses_latest_membership()
     {
         TestContext context = CreateContext();
@@ -487,6 +577,8 @@ public sealed class CookieAuthSessionTests
     private static TestContext CreateContext(CookieAuthOptions? options = null)
     {
         User user = CreateUser();
+        Tenant tenantOne = CreateTenant(TenantOne, "tenant-one");
+        Tenant tenantTwo = CreateTenant(TenantTwo, "tenant-two");
         TenantMembership membershipOne = CreateMembership(
             TenantOne,
             TenantRole.Member);
@@ -495,6 +587,7 @@ public sealed class CookieAuthSessionTests
             TenantRole.Viewer);
         var clock = new MutableClock(Now);
         var users = new FakeUserRepository(user);
+        var tenants = new FakeTenantRepository(tenantOne, tenantTwo);
         var memberships = new FakeMembershipRepository(
             membershipOne,
             membershipTwo);
@@ -508,9 +601,12 @@ public sealed class CookieAuthSessionTests
             memberships,
             store,
             options ?? new CookieAuthOptions(),
-            audit);
+            audit,
+            tenants);
         return new TestContext(
             user,
+            tenantOne,
+            tenantTwo,
             membershipOne,
             membershipTwo,
             clock,
@@ -538,6 +634,17 @@ public sealed class CookieAuthSessionTests
         return user;
     }
 
+    private static Tenant CreateTenant(TenantId tenantId, string slug)
+    {
+        Result<Tenant> result = Tenant.Create(
+            tenantId,
+            slug,
+            slug,
+            Now);
+        Assert.True(result.TryGetValue(out Tenant? tenant));
+        return tenant;
+    }
+
     private static TenantMembership CreateMembership(
         TenantId tenantId,
         TenantRole role)
@@ -554,6 +661,8 @@ public sealed class CookieAuthSessionTests
 
     private sealed record TestContext(
         User User,
+        Tenant TenantOne,
+        Tenant TenantTwo,
         TenantMembership MembershipOne,
         TenantMembership MembershipTwo,
         MutableClock Clock,
@@ -646,6 +755,35 @@ public sealed class CookieAuthSessionTests
 
         public ValueTask UpdateAsync(
             User updated,
+            long expectedVersion,
+            CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+    }
+
+    private sealed class FakeTenantRepository(params Tenant[] tenants)
+        : ITenantRepository
+    {
+        public ValueTask<Tenant?> FindByIdAsync(
+            TenantId id,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(
+                tenants.SingleOrDefault(tenant => tenant.Id == id));
+        }
+
+        public ValueTask<Tenant?> FindBySlugAsync(
+            TenantSlug slug,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<Tenant?>(null);
+
+        public ValueTask AddAsync(
+            Tenant tenant,
+            CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+
+        public ValueTask UpdateAsync(
+            Tenant tenant,
             long expectedVersion,
             CancellationToken cancellationToken) =>
             ValueTask.CompletedTask;

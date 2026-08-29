@@ -142,7 +142,10 @@ public sealed class JwtAuthenticator
 
         var validationParameters = new TokenValidationParameters
         {
+            AudienceValidator = (audiences, _, _) =>
+                HasSingleExactAudience(audiences, profile.Audience),
             ClockSkew = MaximumClockSkew,
+            IgnoreTrailingSlashWhenValidatingAudience = false,
             IssuerSigningKeys = matchingKeys,
             LifetimeValidator = ValidateLifetime,
             RequireExpirationTime = true,
@@ -368,6 +371,24 @@ public sealed class JwtAuthenticator
     private static int CountClaims(IEnumerable<Claim> claims, string claimType) =>
         claims.Count(claim =>
             string.Equals(claim.Type, claimType, StringComparison.Ordinal));
+
+    private static bool HasSingleExactAudience(
+        IEnumerable<string>? audiences,
+        string configuredAudience)
+    {
+        if (audiences is null)
+        {
+            return false;
+        }
+
+        using IEnumerator<string> enumerator = audiences.GetEnumerator();
+        return enumerator.MoveNext() &&
+            string.Equals(
+                enumerator.Current,
+                configuredAudience,
+                StringComparison.Ordinal) &&
+            !enumerator.MoveNext();
+    }
 
     private bool ValidateLifetime(
         DateTime? notBefore,

@@ -15,6 +15,7 @@ public sealed class CookieSessionManager
     private readonly ICookieTokenSource _tokenSource;
     private readonly IUserRepository _users;
     private readonly ITenantMembershipRepository _memberships;
+    private readonly ITenantRepository? _tenants;
     private readonly ICookieSessionStore _store;
     private readonly CookieAuthOptions _options;
     private readonly ICookieAuthAuditSink _audit;
@@ -27,13 +28,15 @@ public sealed class CookieSessionManager
         ITenantMembershipRepository memberships,
         ICookieSessionStore store,
         CookieAuthOptions options,
-        ICookieAuthAuditSink audit)
+        ICookieAuthAuditSink audit,
+        ITenantRepository? tenants = null)
     {
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
         _idGenerator = idGenerator ?? throw new ArgumentNullException(nameof(idGenerator));
         _tokenSource = tokenSource ?? throw new ArgumentNullException(nameof(tokenSource));
         _users = users ?? throw new ArgumentNullException(nameof(users));
         _memberships = memberships ?? throw new ArgumentNullException(nameof(memberships));
+        _tenants = tenants;
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _audit = audit ?? throw new ArgumentNullException(nameof(audit));
@@ -179,7 +182,8 @@ public sealed class CookieSessionManager
             tenantId,
             resolution.User.Id,
             cancellationToken);
-        if (target?.Status != MembershipStatus.Active)
+        if (target?.Status != MembershipStatus.Active ||
+            !await IsTenantActiveAsync(tenantId, cancellationToken))
         {
             return Result.Failure<IssuedBrowserSession>(CookieAuthErrors.TenantUnavailable);
         }
@@ -248,15 +252,23 @@ public sealed class CookieSessionManager
     {
         IReadOnlyList<TenantMembership> memberships =
             await _memberships.ListForUserAsync(userId, cancellationToken);
-        TenantMembership? selected = requestedTenantId.HasValue
-            ? memberships.SingleOrDefault(
+        TenantMembership? selected = null;
+        IEnumerable<TenantMembership> candidates = requestedTenantId.HasValue
+            ? memberships.Where(
                 membership =>
                     membership.TenantId == requestedTenantId.Value &&
                     membership.Status == MembershipStatus.Active)
             : memberships
                 .Where(membership => membership.Status == MembershipStatus.Active)
-                .OrderBy(membership => membership.TenantId.Value)
-                .FirstOrDefault();
+                .OrderBy(membership => membership.TenantId.Value);
+        foreach (TenantMembership candidate in candidates)
+        {
+            if (await IsTenantActiveAsync(candidate.TenantId, cancellationToken))
+            {
+                selected = candidate;
+                break;
+            }
+        }
 
         return requestedTenantId.HasValue && selected is null
             ? Result.Failure<TenantSelection>(CookieAuthErrors.TenantUnavailable)
@@ -316,9 +328,32 @@ public sealed class CookieSessionManager
                 await _store.RevokeAsync(digest, now, cancellationToken);
                 return null;
             }
+
+            if (!await IsTenantActiveAsync(
+                    record.TenantId.Value,
+                    cancellationToken))
+            {
+                await _store.RevokeAsync(digest, now, cancellationToken);
+                return null;
+            }
         }
 
         return new SessionResolution(record, user, membership);
+    }
+
+    private async ValueTask<bool> IsTenantActiveAsync(
+        TenantId tenantId,
+        CancellationToken cancellationToken)
+    {
+        if (_tenants is null)
+        {
+            return false;
+        }
+
+        Tenant? tenant = await _tenants.FindByIdAsync(
+            tenantId,
+            cancellationToken);
+        return tenant?.Status == TenantStatus.Active;
     }
 
     private async ValueTask<bool> StoreInitialAsync(

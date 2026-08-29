@@ -236,6 +236,28 @@ public sealed class JwtAuthenticatorTests
         Assert.Equal(JwtErrors.InvalidToken.Code, result.Error?.Code);
     }
 
+    [Theory]
+    [InlineData("https://api.example/resource", "https://api.example/resource/")]
+    [InlineData("https://api.example/resource/", "https://api.example/resource")]
+    [InlineData(Audience, "VISTARA-API")]
+    public async Task Jwt_rejects_non_ordinal_exact_audience_variants(
+        string configuredAudience,
+        string presentedAudience)
+    {
+        using RSA rsa = RSA.Create(2048);
+        var key = new RsaSecurityKey(rsa) { KeyId = "rsa-1" };
+        JwtIssuerProfile profile = CreateProfile(
+            key,
+            audience: configuredAudience);
+
+        Result<JwtPrincipal> result = await CreateAuthenticator(profile)
+            .AuthenticateAsync(
+                CreateToken(key, audience: presentedAudience),
+                CancellationToken.None);
+
+        Assert.Equal(JwtErrors.InvalidToken.Code, result.Error?.Code);
+    }
+
     [Fact]
     public async Task Jwt_requires_type_but_accepts_an_explicitly_configured_type()
     {
@@ -624,11 +646,12 @@ public sealed class JwtAuthenticatorTests
     private static JwtIssuerProfile CreateProfile(
         SecurityKey signingKey,
         string algorithm = SecurityAlgorithms.RsaSha256,
-        string issuer = Issuer) =>
+        string issuer = Issuer,
+        string audience = Audience) =>
         JwtIssuerProfile.ForSigningKeys(
             "trusted",
             issuer,
-            Audience,
+            audience,
             [signingKey],
             [algorithm]);
 
