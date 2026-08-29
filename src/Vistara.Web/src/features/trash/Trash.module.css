@@ -1,0 +1,246 @@
+.feature {
+  display: grid;
+  gap: var(--space-6);
+  inline-size: min(100%, 72rem);
+  margin-inline: auto;
+}
+
+.header,
+.toolbar,
+.actions,
+.cardHeading,
+.batch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.header h1,
+.impact h2,
+.batch h2 {
+  margin-block: 0 var(--space-2);
+}
+
+.header p,
+.reason,
+.impact > p,
+.batch p {
+  color: var(--color-muted);
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--color-accent);
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.toolbar,
+.card,
+.impact,
+.batch,
+.empty {
+  padding: var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+}
+
+.cardList {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 21rem), 1fr));
+  gap: var(--space-4);
+}
+
+.card {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.select {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: 1.1rem;
+  font-weight: 800;
+}
+
+.select input {
+  inline-size: 1.3rem;
+  block-size: 1.3rem;
+}
+
+.badge {
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.badge[data-retained='false'] {
+  background: #4c2529;
+  color: #fff3f3;
+}
+
+.details {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.details div {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.details dt {
+  color: var(--color-muted);
+}
+
+.details dd {
+  margin: 0;
+  text-align: end;
+}
+
+.primaryButton,
+.secondaryButton,
+.dangerButton {
+  display: inline-flex;
+  min-block-size: 2.75rem;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.secondaryButton {
+  border-color: var(--color-border);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+.dangerButton {
+  border-color: #e88989;
+  background: #4c2529;
+  color: #fff3f3;
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled,
+.dangerButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.error,
+.status,
+.aiBoundary {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+}
+
+.error {
+  border: 1px solid #e88989;
+  background: #4c2529;
+}
+
+.status {
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.impact {
+  display: grid;
+  gap: var(--space-4);
+  border-color: #e88989;
+}
+
+.aiBoundary {
+  border-inline-start: 0.3rem solid var(--color-focus);
+  background: var(--color-surface-raised);
+  color: var(--color-text) !important;
+}
+
+.impactList {
+  display: grid;
+  gap: var(--space-3);
+  padding: 0;
+  list-style: none;
+}
+
+.impactList > li {
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.barriers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: 0;
+  list-style: none;
+}
+
+.barriers li {
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  background: #4c2529;
+  color: #fff3f3;
+  font-size: 0.85rem;
+}
+
+.field {
+  display: grid;
+  gap: var(--space-2);
+  font-weight: 700;
+}
+
+.field input {
+  min-block-size: 2.75rem;
+  inline-size: 100%;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-canvas);
+  color: var(--color-text);
+}
+
+.dialogBackdrop {
+  position: fixed;
+  z-index: 10;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: rgb(0 0 0 / 72%);
+}
+
+.dialog {
+  inline-size: min(100%, 34rem);
+  padding: var(--space-6);
+  border: 1px solid #e88989;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-panel);
+}
+
+@media (max-width: 40rem) {
+  .header > *,
+  .header button,
+  .toolbar > *,
+  .toolbar .actions,
+  .actions > * {
+    inline-size: 100%;
+  }
+}
