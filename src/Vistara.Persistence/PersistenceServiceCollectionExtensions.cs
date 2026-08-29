@@ -1,10 +1,19 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Vistara.Application.Assets;
+using Vistara.Application.Assets.Ingest;
 using Vistara.Application.Identity;
 using Vistara.Application.Tenancy;
 using Vistara.Application.Uploads;
+using Vistara.Application.Uploads.Quotas;
+using Vistara.Persistence.Auth;
+using Vistara.Persistence.Derivatives;
+using Vistara.Persistence.Events;
+using Vistara.Persistence.Ingest;
+using Vistara.Persistence.Media;
 using Vistara.Persistence.Repositories;
+using Vistara.Persistence.Uploads;
 
 namespace Vistara.Persistence;
 
@@ -58,6 +67,55 @@ public static class PersistenceServiceCollectionExtensions
                         "The database provider is not supported.");
             }
         });
+        services.AddDbContext<AuthenticationCatalogDbContext>(options =>
+        {
+            if (persistenceOptions.Provider == VistaraDatabaseProvider.Sqlite)
+            {
+                options.UseSqlite(persistenceOptions.ConnectionString);
+            }
+            else
+            {
+                options.UseNpgsql(persistenceOptions.ConnectionString);
+            }
+        });
+        services.AddDbContext<JwtRevocationCatalogDbContext>(options =>
+        {
+            if (persistenceOptions.Provider == VistaraDatabaseProvider.Sqlite)
+            {
+                options.UseSqlite(persistenceOptions.ConnectionString);
+            }
+            else
+            {
+                options.UseNpgsql(persistenceOptions.ConnectionString);
+            }
+        });
+        services.AddDbContext<MediaCatalogDbContext>(options =>
+        {
+            if (persistenceOptions.Provider == VistaraDatabaseProvider.Sqlite)
+            {
+                options.UseSqlite(persistenceOptions.ConnectionString);
+            }
+            else
+            {
+                options.UseNpgsql(persistenceOptions.ConnectionString);
+            }
+        });
+        services.AddDbContext<RateLimitCatalogDbContext>(options =>
+        {
+            if (persistenceOptions.Provider == VistaraDatabaseProvider.Sqlite)
+            {
+                options.UseSqlite(persistenceOptions.ConnectionString);
+            }
+            else
+            {
+                options.UseNpgsql(persistenceOptions.ConnectionString);
+            }
+        });
+        services.AddScoped<RelationalAuthenticationStore>();
+        services.AddScoped<RelationalDerivativeRequestStore>();
+        services.AddScoped<RelationalEventStreamStore>();
+        services.AddScoped<RelationalMediaCatalogStore>();
+        services.AddScoped<RelationalRateLimitStore>();
 
         services.AddScoped<ITenantRepository, TenantRepository>();
         services.AddScoped<IUserRepository, UserRepository>();
@@ -67,6 +125,11 @@ public static class PersistenceServiceCollectionExtensions
         services.AddScoped<IAssetRepository, AssetRepository>();
         services.AddScoped<IBlobMetadataRepository, BlobMetadataRepository>();
         services.AddScoped<IUploadSessionRepository, UploadSessionRepository>();
+        services.TryAddSingleton(new UploadPersistenceOptions());
+        services.TryAddScoped<RelationalUploadApplicationStore>();
+        services.TryAddScoped<IQuotaReservationStore, RelationalQuotaReservationStore>();
+        services.TryAddScoped<RelationalAssetIngestUnitOfWork>();
+        services.TryAddScoped<RelationalIngestStore>();
         return services;
     }
 }
