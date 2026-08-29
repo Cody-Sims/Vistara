@@ -23,9 +23,6 @@ public static class GalleryOpenApiDocument
   "x-vistara-contract-source": "temporary-reviewed-manifest",
   "x-vistara-runtime-gallery-routes": false,
   "x-vistara-replacement-policy": "Endpoint integration must replace or validate this manifest against registered runtime endpoints before marking gallery routes implemented.",
-  "x-vistara-typescript-declarations": [
-    "export interface CursorPage<T> {\n  readonly items: readonly T[];\n  readonly nextCursor?: SignedCursor;\n}"
-  ],
   "paths": {
     "/api/v1/assets": {
       "get": {
@@ -53,8 +50,7 @@ public static class GalleryOpenApiDocument
             "required": false,
             "x-vistara-query-object": true,
             "schema": {
-              "$ref": "#/components/schemas/AssetListQuery",
-              "x-vistara-typescript-type": "AssetListQuery"
+              "$ref": "#/components/schemas/AssetListQuery"
             }
           }
         ],
@@ -79,8 +75,7 @@ public static class GalleryOpenApiDocument
                       "$ref": "#/components/schemas/SignedCursor"
                     }
                   },
-                  "additionalProperties": false,
-                  "x-vistara-typescript-type": "CursorPage<AssetSummary>"
+                  "additionalProperties": false
                 }
               }
             }
@@ -222,8 +217,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AssetDetail",
-                  "x-vistara-typescript-type": "AssetDetail"
+                  "$ref": "#/components/schemas/AssetDetail"
                 }
               }
             }
@@ -367,6 +361,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -375,8 +375,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AssetDetail",
-                  "x-vistara-typescript-type": "AssetDetail"
+                  "$ref": "#/components/schemas/AssetDetail"
                 }
               }
             }
@@ -532,8 +531,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateAssetRequest",
-                "x-vistara-typescript-type": "UpdateAssetRequest"
+                "$ref": "#/components/schemas/UpdateAssetRequest"
               }
             }
           }
@@ -576,8 +574,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AssetMetadata",
-                  "x-vistara-typescript-type": "AssetMetadata"
+                  "$ref": "#/components/schemas/AssetMetadata"
                 }
               }
             }
@@ -714,15 +711,18 @@ public static class GalleryOpenApiDocument
             "apiKey": []
           }
         ],
-        "parameters": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
         "responses": {
           "202": {
             "description": "Successful response.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationJob",
-                  "x-vistara-typescript-type": "OperationJob"
+                  "$ref": "#/components/schemas/OperationJob"
                 }
               }
             }
@@ -844,8 +844,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AssetBulkMutationRequest",
-                "x-vistara-typescript-type": "AssetBulkMutationRequest"
+                "$ref": "#/components/schemas/AssetBulkMutationRequest"
               }
             }
           }
@@ -878,8 +877,7 @@ public static class GalleryOpenApiDocument
             "required": false,
             "x-vistara-query-object": true,
             "schema": {
-              "$ref": "#/components/schemas/TimelineQuery",
-              "x-vistara-typescript-type": "TimelineQuery"
+              "$ref": "#/components/schemas/TimelineQuery"
             }
           }
         ],
@@ -889,8 +887,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TimelinePage",
-                  "x-vistara-typescript-type": "TimelinePage"
+                  "$ref": "#/components/schemas/TimelinePage"
                 }
               }
             }
@@ -1022,8 +1019,7 @@ public static class GalleryOpenApiDocument
             "required": false,
             "x-vistara-query-object": true,
             "schema": {
-              "$ref": "#/components/schemas/AssetListQuery",
-              "x-vistara-typescript-type": "AssetListQuery"
+              "$ref": "#/components/schemas/AssetListQuery"
             }
           }
         ],
@@ -1033,8 +1029,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SearchFacets",
-                  "x-vistara-typescript-type": "SearchFacets"
+                  "$ref": "#/components/schemas/SearchFacets"
                 }
               }
             }
@@ -1166,8 +1161,7 @@ public static class GalleryOpenApiDocument
             "required": false,
             "x-vistara-query-object": true,
             "schema": {
-              "$ref": "#/components/schemas/AlbumListQuery",
-              "x-vistara-typescript-type": "AlbumListQuery"
+              "$ref": "#/components/schemas/AlbumListQuery"
             }
           }
         ],
@@ -1192,8 +1186,7 @@ public static class GalleryOpenApiDocument
                       "$ref": "#/components/schemas/SignedCursor"
                     }
                   },
-                  "additionalProperties": false,
-                  "x-vistara-typescript-type": "CursorPage<AlbumSummary>"
+                  "additionalProperties": false
                 }
               }
             }
@@ -1316,15 +1309,18 @@ public static class GalleryOpenApiDocument
             "apiKey": []
           }
         ],
-        "parameters": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
         "responses": {
           "201": {
             "description": "Successful response.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AlbumDetail",
-                  "x-vistara-typescript-type": "AlbumDetail"
+                  "$ref": "#/components/schemas/AlbumDetail"
                 }
               }
             }
@@ -1446,8 +1442,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateAlbumRequest",
-                "x-vistara-typescript-type": "CreateAlbumRequest"
+                "$ref": "#/components/schemas/CreateAlbumRequest"
               }
             }
           }
@@ -1489,8 +1484,7 @@ public static class GalleryOpenApiDocument
             "required": false,
             "x-vistara-query-object": true,
             "schema": {
-              "$ref": "#/components/schemas/AlbumListQuery",
-              "x-vistara-typescript-type": "AlbumListQuery"
+              "$ref": "#/components/schemas/AlbumListQuery"
             }
           }
         ],
@@ -1500,8 +1494,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AlbumDetail",
-                  "x-vistara-typescript-type": "AlbumDetail"
+                  "$ref": "#/components/schemas/AlbumDetail"
                 }
               }
             }
@@ -1645,6 +1638,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -1653,8 +1652,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AlbumDetail",
-                  "x-vistara-typescript-type": "AlbumDetail"
+                  "$ref": "#/components/schemas/AlbumDetail"
                 }
               }
             }
@@ -1810,8 +1808,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateAlbumRequest",
-                "x-vistara-typescript-type": "UpdateAlbumRequest"
+                "$ref": "#/components/schemas/UpdateAlbumRequest"
               }
             }
           }
@@ -1844,6 +1841,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -2024,6 +2027,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -2032,8 +2041,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AlbumDetail",
-                  "x-vistara-typescript-type": "AlbumDetail"
+                  "$ref": "#/components/schemas/AlbumDetail"
                 }
               }
             }
@@ -2189,8 +2197,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AlbumItemsRequest",
-                "x-vistara-typescript-type": "AlbumItemsRequest"
+                "$ref": "#/components/schemas/AlbumItemsRequest"
               }
             }
           }
@@ -2223,6 +2230,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -2231,8 +2244,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AlbumDetail",
-                  "x-vistara-typescript-type": "AlbumDetail"
+                  "$ref": "#/components/schemas/AlbumDetail"
                 }
               }
             }
@@ -2388,8 +2400,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AlbumItemsRequest",
-                "x-vistara-typescript-type": "AlbumItemsRequest"
+                "$ref": "#/components/schemas/AlbumItemsRequest"
               }
             }
           }
@@ -2424,6 +2435,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -2432,8 +2449,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AlbumDetail",
-                  "x-vistara-typescript-type": "AlbumDetail"
+                  "$ref": "#/components/schemas/AlbumDetail"
                 }
               }
             }
@@ -2589,8 +2605,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ReorderAlbumItemsRequest",
-                "x-vistara-typescript-type": "ReorderAlbumItemsRequest"
+                "$ref": "#/components/schemas/ReorderAlbumItemsRequest"
               }
             }
           }
@@ -2623,8 +2638,7 @@ public static class GalleryOpenApiDocument
             "required": false,
             "x-vistara-query-object": true,
             "schema": {
-              "$ref": "#/components/schemas/TagListQuery",
-              "x-vistara-typescript-type": "TagListQuery"
+              "$ref": "#/components/schemas/TagListQuery"
             }
           }
         ],
@@ -2649,8 +2663,7 @@ public static class GalleryOpenApiDocument
                       "$ref": "#/components/schemas/SignedCursor"
                     }
                   },
-                  "additionalProperties": false,
-                  "x-vistara-typescript-type": "CursorPage<Tag>"
+                  "additionalProperties": false
                 }
               }
             }
@@ -2773,15 +2786,18 @@ public static class GalleryOpenApiDocument
             "apiKey": []
           }
         ],
-        "parameters": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
         "responses": {
           "201": {
             "description": "Successful response.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Tag",
-                  "x-vistara-typescript-type": "Tag"
+                  "$ref": "#/components/schemas/Tag"
                 }
               }
             }
@@ -2903,8 +2919,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateTagRequest",
-                "x-vistara-typescript-type": "CreateTagRequest"
+                "$ref": "#/components/schemas/CreateTagRequest"
               }
             }
           }
@@ -2939,6 +2954,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -2947,8 +2968,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Tag",
-                  "x-vistara-typescript-type": "Tag"
+                  "$ref": "#/components/schemas/Tag"
                 }
               }
             }
@@ -3104,8 +3124,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateTagRequest",
-                "x-vistara-typescript-type": "UpdateTagRequest"
+                "$ref": "#/components/schemas/UpdateTagRequest"
               }
             }
           }
@@ -3138,6 +3157,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -3327,6 +3352,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -3335,8 +3366,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AssetDetail",
-                  "x-vistara-typescript-type": "AssetDetail"
+                  "$ref": "#/components/schemas/AssetDetail"
                 }
               }
             }
@@ -3532,6 +3562,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -3540,8 +3576,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AssetDetail",
-                  "x-vistara-typescript-type": "AssetDetail"
+                  "$ref": "#/components/schemas/AssetDetail"
                 }
               }
             }
@@ -3730,6 +3765,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -3738,8 +3779,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AssetDetail",
-                  "x-vistara-typescript-type": "AssetDetail"
+                  "$ref": "#/components/schemas/AssetDetail"
                 }
               }
             }
@@ -3916,6 +3956,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -3924,8 +3970,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AssetDetail",
-                  "x-vistara-typescript-type": "AssetDetail"
+                  "$ref": "#/components/schemas/AssetDetail"
                 }
               }
             }
@@ -4102,8 +4147,7 @@ public static class GalleryOpenApiDocument
             "required": false,
             "x-vistara-query-object": true,
             "schema": {
-              "$ref": "#/components/schemas/ShareListQuery",
-              "x-vistara-typescript-type": "ShareListQuery"
+              "$ref": "#/components/schemas/ShareListQuery"
             }
           }
         ],
@@ -4128,8 +4172,7 @@ public static class GalleryOpenApiDocument
                       "$ref": "#/components/schemas/SignedCursor"
                     }
                   },
-                  "additionalProperties": false,
-                  "x-vistara-typescript-type": "CursorPage<ShareSummary>"
+                  "additionalProperties": false
                 }
               }
             }
@@ -4252,15 +4295,18 @@ public static class GalleryOpenApiDocument
             "apiKey": []
           }
         ],
-        "parameters": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
         "responses": {
           "201": {
             "description": "Successful response.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CreatedShare",
-                  "x-vistara-typescript-type": "CreatedShare"
+                  "$ref": "#/components/schemas/CreatedShare"
                 }
               }
             }
@@ -4382,8 +4428,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateShareRequest",
-                "x-vistara-typescript-type": "CreateShareRequest"
+                "$ref": "#/components/schemas/CreateShareRequest"
               }
             }
           }
@@ -4426,8 +4471,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ShareDetail",
-                  "x-vistara-typescript-type": "ShareDetail"
+                  "$ref": "#/components/schemas/ShareDetail"
                 }
               }
             }
@@ -4571,6 +4615,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -4579,8 +4629,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ShareDetail",
-                  "x-vistara-typescript-type": "ShareDetail"
+                  "$ref": "#/components/schemas/ShareDetail"
                 }
               }
             }
@@ -4736,8 +4785,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateShareRequest",
-                "x-vistara-typescript-type": "UpdateShareRequest"
+                "$ref": "#/components/schemas/UpdateShareRequest"
               }
             }
           }
@@ -4770,6 +4818,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -4946,8 +5000,7 @@ public static class GalleryOpenApiDocument
             "required": false,
             "x-vistara-query-object": true,
             "schema": {
-              "$ref": "#/components/schemas/CursorPageQuery",
-              "x-vistara-typescript-type": "CursorPageQuery"
+              "$ref": "#/components/schemas/CursorPageQuery"
             }
           }
         ],
@@ -4957,8 +5010,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublicShare",
-                  "x-vistara-typescript-type": "PublicShare"
+                  "$ref": "#/components/schemas/PublicShare"
                 }
               }
             }
@@ -5090,8 +5142,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ShareChallenge",
-                  "x-vistara-typescript-type": "ShareChallenge"
+                  "$ref": "#/components/schemas/ShareChallenge"
                 }
               }
             }
@@ -5203,8 +5254,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ShareChallengeRequest",
-                "x-vistara-typescript-type": "ShareChallengeRequest"
+                "$ref": "#/components/schemas/ShareChallengeRequest"
               }
             }
           }
@@ -5237,8 +5287,7 @@ public static class GalleryOpenApiDocument
             "required": false,
             "x-vistara-query-object": true,
             "schema": {
-              "$ref": "#/components/schemas/TrashListQuery",
-              "x-vistara-typescript-type": "TrashListQuery"
+              "$ref": "#/components/schemas/TrashListQuery"
             }
           }
         ],
@@ -5263,8 +5312,7 @@ public static class GalleryOpenApiDocument
                       "$ref": "#/components/schemas/SignedCursor"
                     }
                   },
-                  "additionalProperties": false,
-                  "x-vistara-typescript-type": "CursorPage<TrashAsset>"
+                  "additionalProperties": false
                 }
               }
             }
@@ -5389,15 +5437,18 @@ public static class GalleryOpenApiDocument
             "apiKey": []
           }
         ],
-        "parameters": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
         "responses": {
           "202": {
             "description": "Successful response.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationJob",
-                  "x-vistara-typescript-type": "OperationJob"
+                  "$ref": "#/components/schemas/OperationJob"
                 }
               }
             }
@@ -5519,8 +5570,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RestoreAssetsRequest",
-                "x-vistara-typescript-type": "RestoreAssetsRequest"
+                "$ref": "#/components/schemas/RestoreAssetsRequest"
               }
             }
           }
@@ -5546,15 +5596,18 @@ public static class GalleryOpenApiDocument
             "apiKey": []
           }
         ],
-        "parameters": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful response.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PurgeDryRun",
-                  "x-vistara-typescript-type": "PurgeDryRun"
+                  "$ref": "#/components/schemas/PurgeDryRun"
                 }
               }
             }
@@ -5676,8 +5729,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreatePurgeDryRunRequest",
-                "x-vistara-typescript-type": "CreatePurgeDryRunRequest"
+                "$ref": "#/components/schemas/CreatePurgeDryRunRequest"
               }
             }
           }
@@ -5712,6 +5764,12 @@ public static class GalleryOpenApiDocument
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -5720,8 +5778,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PurgeBatch",
-                  "x-vistara-typescript-type": "PurgeBatch"
+                  "$ref": "#/components/schemas/PurgeBatch"
                 }
               }
             }
@@ -5877,8 +5934,7 @@ public static class GalleryOpenApiDocument
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ConfirmPurgeRequest",
-                "x-vistara-typescript-type": "ConfirmPurgeRequest"
+                "$ref": "#/components/schemas/ConfirmPurgeRequest"
               }
             }
           }
@@ -5921,8 +5977,7 @@ public static class GalleryOpenApiDocument
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PurgeBatch",
-                  "x-vistara-typescript-type": "PurgeBatch"
+                  "$ref": "#/components/schemas/PurgeBatch"
                 }
               }
             }
@@ -6046,7 +6101,7 @@ public static class GalleryOpenApiDocument
       "browserCookie": {
         "type": "apiKey",
         "in": "cookie",
-        "name": "vistara_session"
+        "name": "__Host-vistara-session"
       },
       "bearerToken": {
         "type": "http",
@@ -6055,34 +6110,50 @@ public static class GalleryOpenApiDocument
       "apiKey": {
         "type": "apiKey",
         "in": "header",
-        "name": "X-Api-Key"
+        "name": "X-API-Key"
+      }
+    },
+    "parameters": {
+      "IfMatch": {
+        "name": "If-Match",
+        "in": "header",
+        "required": true,
+        "description": "Strong entity tag for the current aggregate version.",
+        "schema": {
+          "$ref": "#/components/schemas/EntityTag"
+        }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "Caller-generated key used to replay retriable mutations safely.",
+        "schema": {
+          "$ref": "#/components/schemas/IdempotencyKey"
+        }
       }
     },
     "schemas": {
       "Uuid": {
         "type": "string",
-        "x-vistara-typescript-declaration": "export type Uuid = string;"
+        "format": "uuid"
       },
       "UtcDateTime": {
         "type": "string",
-        "x-vistara-typescript-declaration": "export type UtcDateTime = string;"
+        "format": "date-time"
       },
       "SignedCursor": {
-        "type": "string",
-        "x-vistara-typescript-declaration": "export type SignedCursor = string;"
+        "type": "string"
       },
       "ResourceVersion": {
         "type": "integer",
-        "format": "int64",
-        "x-vistara-typescript-declaration": "export type ResourceVersion = number;"
+        "format": "int64"
       },
       "EntityTag": {
-        "type": "string",
-        "x-vistara-typescript-declaration": "export type EntityTag = `\"v${number}\"`;"
+        "type": "string"
       },
       "IdempotencyKey": {
-        "type": "string",
-        "x-vistara-typescript-declaration": "export type IdempotencyKey = string;"
+        "type": "string"
       },
       "CursorPageQuery": {
         "type": "object",
@@ -6095,8 +6166,7 @@ public static class GalleryOpenApiDocument
             "$ref": "#/components/schemas/SignedCursor"
           }
         },
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface CursorPageQuery {\n  readonly limit?: number;\n  readonly cursor?: SignedCursor;\n}"
+        "additionalProperties": false
       },
       "ApiProblemDetails": {
         "type": "object",
@@ -6143,8 +6213,7 @@ public static class GalleryOpenApiDocument
           "code",
           "errors"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface ApiProblemDetails {\n  readonly type: string;\n  readonly title: string;\n  readonly status: number;\n  readonly detail?: string;\n  readonly instance?: string;\n  readonly code: string;\n  readonly traceId?: string;\n  readonly requestId?: string;\n  readonly errors: Readonly<Record<string, readonly string[]>>;\n}"
+        "additionalProperties": false
       },
       "AssetStatus": {
         "oneOf": [
@@ -6168,8 +6237,7 @@ public static class GalleryOpenApiDocument
             "type": "string",
             "const": "purged"
           }
-        ],
-        "x-vistara-typescript-declaration": "export type AssetStatus =\n  | \"processing\"\n  | \"ready\"\n  | \"failed\"\n  | \"trashed\"\n  | \"purged\";"
+        ]
       },
       "AssetVisibility": {
         "oneOf": [
@@ -6185,8 +6253,7 @@ public static class GalleryOpenApiDocument
             "type": "string",
             "const": "public"
           }
-        ],
-        "x-vistara-typescript-declaration": "export type AssetVisibility = \"private\" | \"tenant\" | \"public\";"
+        ]
       },
       "AssetSort": {
         "oneOf": [
@@ -6206,8 +6273,7 @@ public static class GalleryOpenApiDocument
             "type": "string",
             "const": "title"
           }
-        ],
-        "x-vistara-typescript-declaration": "export type AssetSort = \"capturedAt\" | \"importedAt\" | \"updatedAt\" | \"title\";"
+        ]
       },
       "SortDirection": {
         "oneOf": [
@@ -6219,8 +6285,7 @@ public static class GalleryOpenApiDocument
             "type": "string",
             "const": "desc"
           }
-        ],
-        "x-vistara-typescript-declaration": "export type SortDirection = \"asc\" | \"desc\";"
+        ]
       },
       "TimelineGrouping": {
         "oneOf": [
@@ -6236,8 +6301,7 @@ public static class GalleryOpenApiDocument
             "type": "string",
             "const": "year"
           }
-        ],
-        "x-vistara-typescript-declaration": "export type TimelineGrouping = \"day\" | \"month\" | \"year\";"
+        ]
       },
       "AssetListQuery": {
         "type": "object",
@@ -6295,8 +6359,7 @@ public static class GalleryOpenApiDocument
             "$ref": "#/components/schemas/SortDirection"
           }
         },
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface AssetListQuery {\n  readonly limit?: number;\n  readonly cursor?: SignedCursor;\n  readonly search?: string;\n  readonly statuses?: readonly AssetStatus[];\n  readonly contentTypes?: readonly string[];\n  readonly albumId?: Uuid;\n  readonly tagIds?: readonly Uuid[];\n  readonly favorite?: boolean;\n  readonly capturedFrom?: UtcDateTime;\n  readonly capturedTo?: UtcDateTime;\n  readonly importedFrom?: UtcDateTime;\n  readonly importedTo?: UtcDateTime;\n  readonly sort?: AssetSort;\n  readonly direction?: SortDirection;\n}"
+        "additionalProperties": false
       },
       "AssetRendition": {
         "type": "object",
@@ -6318,7 +6381,8 @@ public static class GalleryOpenApiDocument
             ]
           },
           "path": {
-            "type": "string"
+            "type": "string",
+            "description": "Same-origin application path; never a provider URL or storage key."
           },
           "width": {
             "type": "integer",
@@ -6339,8 +6403,7 @@ public static class GalleryOpenApiDocument
           "height",
           "contentType"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface AssetRendition {\n  readonly kind: \"thumbnail\" | \"preview\" | \"display\";\n  /** Same-origin application path; never a provider URL or storage key. */\n  readonly path: string;\n  readonly width: number;\n  readonly height: number;\n  readonly contentType: string;\n}"
+        "additionalProperties": false
       },
       "AssetTagReference": {
         "type": "object",
@@ -6359,8 +6422,7 @@ public static class GalleryOpenApiDocument
           "id",
           "name"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface AssetTagReference {\n  readonly id: Uuid;\n  readonly name: string;\n  readonly color?: string;\n}"
+        "additionalProperties": false
       },
       "AssetAlbumReference": {
         "type": "object",
@@ -6376,8 +6438,7 @@ public static class GalleryOpenApiDocument
           "id",
           "name"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface AssetAlbumReference {\n  readonly id: Uuid;\n  readonly name: string;\n}"
+        "additionalProperties": false
       },
       "AssetSummary": {
         "type": "object",
@@ -6465,8 +6526,7 @@ public static class GalleryOpenApiDocument
           "renditions",
           "version"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface AssetSummary {\n  readonly id: Uuid;\n  readonly title: string;\n  readonly description?: string;\n  readonly status: AssetStatus;\n  readonly visibility: AssetVisibility;\n  readonly revisionNumber: number;\n  readonly contentType: string;\n  readonly format: string;\n  readonly width: number;\n  readonly height: number;\n  readonly sizeBytes: number;\n  readonly capturedAt?: UtcDateTime;\n  readonly importedAt: UtcDateTime;\n  readonly updatedAt: UtcDateTime;\n  readonly favorite: boolean;\n  readonly tags: readonly AssetTagReference[];\n  readonly renditions: readonly AssetRendition[];\n  readonly version: ResourceVersion;\n}"
+        "additionalProperties": false
       },
       "AssetMetadataSummary": {
         "type": "object",
@@ -6497,8 +6557,7 @@ public static class GalleryOpenApiDocument
         "required": [
           "restrictedMetadataAvailable"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface AssetMetadataSummary {\n  readonly capturedAt?: UtcDateTime;\n  readonly orientation?: number;\n  readonly cameraMake?: string;\n  readonly cameraModel?: string;\n  readonly lensModel?: string;\n  readonly colorSpace?: string;\n  readonly restrictedMetadataAvailable: boolean;\n}"
+        "additionalProperties": false
       },
       "AssetMetadata": {
         "type": "object",
@@ -6526,8 +6585,7 @@ public static class GalleryOpenApiDocument
           "summary",
           "safeProperties"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface AssetMetadata {\n  readonly assetId: Uuid;\n  readonly revisionNumber: number;\n  readonly summary: AssetMetadataSummary;\n  readonly safeProperties: Readonly<Record<string, string>>;\n}"
+        "additionalProperties": false
       },
       "AssetDetail": {
         "type": "object",
@@ -6550,18 +6608,68 @@ public static class GalleryOpenApiDocument
           "metadata",
           "albums"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface AssetDetail {\n  readonly asset: AssetSummary;\n  readonly metadata: AssetMetadataSummary;\n  readonly albums: readonly AssetAlbumReference[];\n}"
+        "additionalProperties": false
       },
       "TimelineQuery": {
         "type": "object",
         "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cursor": {
+            "$ref": "#/components/schemas/SignedCursor"
+          },
+          "search": {
+            "type": "string"
+          },
+          "statuses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssetStatus"
+            }
+          },
+          "contentTypes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "albumId": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "tagIds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          "favorite": {
+            "type": "boolean"
+          },
+          "capturedFrom": {
+            "$ref": "#/components/schemas/UtcDateTime"
+          },
+          "capturedTo": {
+            "$ref": "#/components/schemas/UtcDateTime"
+          },
+          "importedFrom": {
+            "$ref": "#/components/schemas/UtcDateTime"
+          },
+          "importedTo": {
+            "$ref": "#/components/schemas/UtcDateTime"
+          },
+          "sort": {
+            "$ref": "#/components/schemas/AssetSort"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/SortDirection"
+          },
           "groupBy": {
             "$ref": "#/components/schemas/TimelineGrouping"
           }
         },
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface TimelineQuery extends AssetListQuery {\n  readonly groupBy?: TimelineGrouping;\n}"
+        "additionalProperties": false
       },
       "TimelineGroup": {
         "type": "object",
@@ -6592,8 +6700,7 @@ public static class GalleryOpenApiDocument
           "endsAt",
           "items"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface TimelineGroup {\n  readonly key: string;\n  readonly label: string;\n  readonly startsAt: UtcDateTime;\n  readonly endsAt: UtcDateTime;\n  readonly items: readonly AssetSummary[];\n}"
+        "additionalProperties": false
       },
       "TimelinePage": {
         "type": "object",
@@ -6611,8 +6718,7 @@ public static class GalleryOpenApiDocument
         "required": [
           "groups"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface TimelinePage {\n  readonly groups: readonly TimelineGroup[];\n  readonly nextCursor?: SignedCursor;\n}"
+        "additionalProperties": false
       },
       "SearchFacetValue": {
         "type": "object",
@@ -6633,8 +6739,7 @@ public static class GalleryOpenApiDocument
           "label",
           "count"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface SearchFacetValue {\n  readonly value: string;\n  readonly label: string;\n  readonly count: number;\n}"
+        "additionalProperties": false
       },
       "SearchFacetGroup": {
         "type": "object",
@@ -6657,8 +6762,7 @@ public static class GalleryOpenApiDocument
           "values",
           "truncated"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface SearchFacetGroup {\n  readonly name: string;\n  readonly values: readonly SearchFacetValue[];\n  readonly truncated: boolean;\n}"
+        "additionalProperties": false
       },
       "SearchFacets": {
         "type": "object",
@@ -6673,8 +6777,7 @@ public static class GalleryOpenApiDocument
         "required": [
           "groups"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface SearchFacets {\n  readonly groups: readonly SearchFacetGroup[];\n}"
+        "additionalProperties": false
       },
       "UpdateAssetRequest": {
         "type": "object",
@@ -6683,33 +6786,23 @@ public static class GalleryOpenApiDocument
             "type": "string"
           },
           "description": {
-            "oneOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "string",
-                "const": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "visibility": {
             "$ref": "#/components/schemas/AssetVisibility"
           },
           "capturedAt": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/UtcDateTime"
-              },
-              {
-                "type": "string",
-                "const": "null"
-              }
-            ]
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
           }
         },
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface UpdateAssetRequest {\n  readonly title?: string;\n  readonly description?: string | null;\n  readonly visibility?: AssetVisibility;\n  readonly capturedAt?: UtcDateTime | null;\n}"
+        "additionalProperties": false
       },
       "VersionedAssetReference": {
         "type": "object",
@@ -6725,8 +6818,7 @@ public static class GalleryOpenApiDocument
           "id",
           "version"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface VersionedAssetReference {\n  readonly id: Uuid;\n  readonly version: ResourceVersion;\n}"
+        "additionalProperties": false
       },
       "AssetBulkAction": {
         "oneOf": [
@@ -6849,8 +6941,7 @@ public static class GalleryOpenApiDocument
             ],
             "additionalProperties": false
           }
-        ],
-        "x-vistara-typescript-declaration": "export type AssetBulkAction =\n  | { readonly kind: \"addTag\"; readonly tagId: Uuid }\n  | { readonly kind: \"removeTag\"; readonly tagId: Uuid }\n  | { readonly kind: \"addToAlbum\"; readonly albumId: Uuid }\n  | { readonly kind: \"removeFromAlbum\"; readonly albumId: Uuid }\n  | { readonly kind: \"setFavorite\"; readonly favorite: boolean }\n  | { readonly kind: \"updateMetadata\"; readonly metadata: UpdateAssetRequest }\n  | { readonly kind: \"trash\"; readonly reason: string };"
+        ]
       },
       "AssetBulkMutationRequest": {
         "type": "object",
@@ -6869,8 +6960,7 @@ public static class GalleryOpenApiDocument
           "items",
           "action"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface AssetBulkMutationRequest {\n  readonly items: readonly VersionedAssetReference[];\n  readonly action: AssetBulkAction;\n}"
+        "additionalProperties": false
       },
       "OperationJob": {
         "type": "object",
@@ -6912,12 +7002,10 @@ public static class GalleryOpenApiDocument
           "submittedCount",
           "submittedAt"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface OperationJob {\n  readonly jobId: Uuid;\n  readonly state: \"queued\" | \"running\" | \"completed\" | \"failed\";\n  readonly submittedCount: number;\n  readonly submittedAt: UtcDateTime;\n}"
+        "additionalProperties": false
       },
       "AlbumListQuery": {
-        "$ref": "#/components/schemas/CursorPageQuery",
-        "x-vistara-typescript-declaration": "export type AlbumListQuery = CursorPageQuery;"
+        "$ref": "#/components/schemas/CursorPageQuery"
       },
       "AlbumSummary": {
         "type": "object",
@@ -6952,8 +7040,7 @@ public static class GalleryOpenApiDocument
           "updatedAt",
           "version"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface AlbumSummary {\n  readonly id: Uuid;\n  readonly name: string;\n  readonly description?: string;\n  readonly cover?: AssetRendition;\n  readonly itemCount: number;\n  readonly updatedAt: UtcDateTime;\n  readonly version: ResourceVersion;\n}"
+        "additionalProperties": false
       },
       "AlbumItem": {
         "type": "object",
@@ -6974,8 +7061,7 @@ public static class GalleryOpenApiDocument
           "position",
           "addedAt"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface AlbumItem {\n  readonly asset: AssetSummary;\n  readonly position: number;\n  readonly addedAt: UtcDateTime;\n}"
+        "additionalProperties": false
       },
       "AlbumDetail": {
         "type": "object",
@@ -7006,8 +7092,7 @@ public static class GalleryOpenApiDocument
           "album",
           "items"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface AlbumDetail {\n  readonly album: AlbumSummary;\n  readonly items: CursorPage<AlbumItem>;\n}"
+        "additionalProperties": false
       },
       "CreateAlbumRequest": {
         "type": "object",
@@ -7022,8 +7107,7 @@ public static class GalleryOpenApiDocument
         "required": [
           "name"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface CreateAlbumRequest {\n  readonly name: string;\n  readonly description?: string;\n}"
+        "additionalProperties": false
       },
       "UpdateAlbumRequest": {
         "type": "object",
@@ -7032,30 +7116,20 @@ public static class GalleryOpenApiDocument
             "type": "string"
           },
           "description": {
-            "oneOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "string",
-                "const": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           },
           "coverAssetId": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/Uuid"
-              },
-              {
-                "type": "string",
-                "const": "null"
-              }
-            ]
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         },
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface UpdateAlbumRequest {\n  readonly name?: string;\n  readonly description?: string | null;\n  readonly coverAssetId?: Uuid | null;\n}"
+        "additionalProperties": false
       },
       "AlbumItemsRequest": {
         "type": "object",
@@ -7070,8 +7144,7 @@ public static class GalleryOpenApiDocument
         "required": [
           "items"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface AlbumItemsRequest {\n  readonly items: readonly VersionedAssetReference[];\n}"
+        "additionalProperties": false
       },
       "AlbumItemPosition": {
         "type": "object",
@@ -7088,8 +7161,7 @@ public static class GalleryOpenApiDocument
           "assetId",
           "position"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface AlbumItemPosition {\n  readonly assetId: Uuid;\n  readonly position: number;\n}"
+        "additionalProperties": false
       },
       "ReorderAlbumItemsRequest": {
         "type": "object",
@@ -7104,8 +7176,7 @@ public static class GalleryOpenApiDocument
         "required": [
           "items"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface ReorderAlbumItemsRequest {\n  readonly items: readonly AlbumItemPosition[];\n}"
+        "additionalProperties": false
       },
       "TagListQuery": {
         "type": "object",
@@ -7121,8 +7192,7 @@ public static class GalleryOpenApiDocument
             "type": "string"
           }
         },
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface TagListQuery {\n  readonly limit?: number;\n  readonly cursor?: SignedCursor;\n  readonly search?: string;\n}"
+        "additionalProperties": false
       },
       "Tag": {
         "type": "object",
@@ -7150,8 +7220,7 @@ public static class GalleryOpenApiDocument
           "assetCount",
           "version"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface Tag {\n  readonly id: Uuid;\n  readonly name: string;\n  readonly color?: string;\n  readonly assetCount: number;\n  readonly version: ResourceVersion;\n}"
+        "additionalProperties": false
       },
       "CreateTagRequest": {
         "type": "object",
@@ -7166,8 +7235,7 @@ public static class GalleryOpenApiDocument
         "required": [
           "name"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface CreateTagRequest {\n  readonly name: string;\n  readonly color?: string;\n}"
+        "additionalProperties": false
       },
       "UpdateTagRequest": {
         "type": "object",
@@ -7176,19 +7244,13 @@ public static class GalleryOpenApiDocument
             "type": "string"
           },
           "color": {
-            "oneOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "string",
-                "const": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface UpdateTagRequest {\n  readonly name?: string;\n  readonly color?: string | null;\n}"
+        "additionalProperties": false
       },
       "ShareStatus": {
         "oneOf": [
@@ -7204,8 +7266,7 @@ public static class GalleryOpenApiDocument
             "type": "string",
             "const": "revoked"
           }
-        ],
-        "x-vistara-typescript-declaration": "export type ShareStatus = \"active\" | \"expired\" | \"revoked\";"
+        ]
       },
       "ShareTargetKind": {
         "oneOf": [
@@ -7217,8 +7278,7 @@ public static class GalleryOpenApiDocument
             "type": "string",
             "const": "snapshot"
           }
-        ],
-        "x-vistara-typescript-declaration": "export type ShareTargetKind = \"album\" | \"snapshot\";"
+        ]
       },
       "ShareMetadataExposure": {
         "oneOf": [
@@ -7230,8 +7290,7 @@ public static class GalleryOpenApiDocument
             "type": "string",
             "const": "basic"
           }
-        ],
-        "x-vistara-typescript-declaration": "export type ShareMetadataExposure = \"none\" | \"basic\";"
+        ]
       },
       "ShareListQuery": {
         "type": "object",
@@ -7247,8 +7306,7 @@ public static class GalleryOpenApiDocument
             "$ref": "#/components/schemas/ShareStatus"
           }
         },
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface ShareListQuery {\n  readonly limit?: number;\n  readonly cursor?: SignedCursor;\n  readonly status?: ShareStatus;\n}"
+        "additionalProperties": false
       },
       "SharePermissions": {
         "type": "object",
@@ -7269,8 +7327,7 @@ public static class GalleryOpenApiDocument
           "downloadRenditions",
           "downloadOriginal"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface SharePermissions {\n  readonly view: true;\n  readonly downloadRenditions: boolean;\n  readonly downloadOriginal: boolean;\n}"
+        "additionalProperties": false
       },
       "ShareTarget": {
         "type": "object",
@@ -7290,8 +7347,7 @@ public static class GalleryOpenApiDocument
           "kind",
           "assetCount"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface ShareTarget {\n  readonly kind: ShareTargetKind;\n  readonly albumId?: Uuid;\n  readonly assetCount: number;\n}"
+        "additionalProperties": false
       },
       "ShareSummary": {
         "type": "object",
@@ -7341,8 +7397,7 @@ public static class GalleryOpenApiDocument
           "createdAt",
           "version"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface ShareSummary {\n  readonly id: Uuid;\n  readonly name: string;\n  readonly status: ShareStatus;\n  readonly target: ShareTarget;\n  readonly permissions: SharePermissions;\n  readonly metadataExposure: ShareMetadataExposure;\n  readonly passwordProtected: boolean;\n  readonly createdAt: UtcDateTime;\n  readonly expiresAt?: UtcDateTime;\n  readonly revokedAt?: UtcDateTime;\n  readonly version: ResourceVersion;\n}"
+        "additionalProperties": false
       },
       "ShareDetail": {
         "type": "object",
@@ -7361,8 +7416,7 @@ public static class GalleryOpenApiDocument
           "share",
           "snapshotAssets"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface ShareDetail {\n  readonly share: ShareSummary;\n  readonly snapshotAssets: readonly VersionedAssetReference[];\n}"
+        "additionalProperties": false
       },
       "CreateShareRequest": {
         "type": "object",
@@ -7401,8 +7455,7 @@ public static class GalleryOpenApiDocument
           "permissions",
           "metadataExposure"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface CreateShareRequest {\n  readonly name: string;\n  readonly targetKind: ShareTargetKind;\n  readonly albumId?: Uuid;\n  readonly snapshotAssets?: readonly VersionedAssetReference[];\n  readonly permissions: SharePermissions;\n  readonly metadataExposure: ShareMetadataExposure;\n  readonly expiresAt?: UtcDateTime;\n  readonly password?: string;\n}"
+        "additionalProperties": false
       },
       "CreatedShare": {
         "type": "object",
@@ -7418,8 +7471,7 @@ public static class GalleryOpenApiDocument
           "share",
           "publicToken"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface CreatedShare {\n  readonly share: ShareDetail;\n  readonly publicToken: string;\n}"
+        "additionalProperties": false
       },
       "UpdateShareRequest": {
         "type": "object",
@@ -7434,19 +7486,14 @@ public static class GalleryOpenApiDocument
             "$ref": "#/components/schemas/ShareMetadataExposure"
           },
           "expiresAt": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/UtcDateTime"
-              },
-              {
-                "type": "string",
-                "const": "null"
-              }
-            ]
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
           }
         },
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface UpdateShareRequest {\n  readonly name?: string;\n  readonly permissions?: SharePermissions;\n  readonly metadataExposure?: ShareMetadataExposure;\n  readonly expiresAt?: UtcDateTime | null;\n}"
+        "additionalProperties": false
       },
       "PublicSharedAsset": {
         "type": "object",
@@ -7485,8 +7532,7 @@ public static class GalleryOpenApiDocument
           "height",
           "renditions"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface PublicSharedAsset {\n  readonly id: Uuid;\n  readonly title: string;\n  readonly description?: string;\n  readonly capturedAt?: UtcDateTime;\n  readonly width: number;\n  readonly height: number;\n  readonly renditions: readonly AssetRendition[];\n}"
+        "additionalProperties": false
       },
       "PublicShare": {
         "type": "object",
@@ -7535,8 +7581,7 @@ public static class GalleryOpenApiDocument
           "metadataExposure",
           "passwordRequired"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface PublicShare {\n  readonly name: string;\n  readonly status: ShareStatus;\n  readonly permissions: SharePermissions;\n  readonly metadataExposure: ShareMetadataExposure;\n  readonly passwordRequired: boolean;\n  readonly expiresAt?: UtcDateTime;\n  readonly assets?: CursorPage<PublicSharedAsset>;\n}"
+        "additionalProperties": false
       },
       "ShareChallengeRequest": {
         "type": "object",
@@ -7548,8 +7593,7 @@ public static class GalleryOpenApiDocument
         "required": [
           "password"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface ShareChallengeRequest {\n  readonly password: string;\n}"
+        "additionalProperties": false
       },
       "ShareChallenge": {
         "type": "object",
@@ -7565,8 +7609,7 @@ public static class GalleryOpenApiDocument
           "authenticated",
           "expiresAt"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface ShareChallenge {\n  readonly authenticated: boolean;\n  readonly expiresAt: UtcDateTime;\n}"
+        "additionalProperties": false
       },
       "TrashListQuery": {
         "type": "object",
@@ -7598,8 +7641,7 @@ public static class GalleryOpenApiDocument
             "$ref": "#/components/schemas/SortDirection"
           }
         },
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface TrashListQuery {\n  readonly limit?: number;\n  readonly cursor?: SignedCursor;\n  readonly sort?: \"deletedAt\" | \"purgeAt\" | \"title\";\n  readonly direction?: SortDirection;\n}"
+        "additionalProperties": false
       },
       "TrashAsset": {
         "type": "object",
@@ -7638,8 +7680,7 @@ public static class GalleryOpenApiDocument
           "blockingReferenceCount",
           "estimatedReclaimBytes"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface TrashAsset {\n  readonly asset: AssetSummary;\n  readonly deletedAt: UtcDateTime;\n  readonly purgeAt: UtcDateTime;\n  readonly reason: string;\n  readonly activeHoldCount: number;\n  readonly blockingReferenceCount: number;\n  readonly estimatedReclaimBytes: number;\n}"
+        "additionalProperties": false
       },
       "RestoreAssetsRequest": {
         "type": "object",
@@ -7654,8 +7695,7 @@ public static class GalleryOpenApiDocument
         "required": [
           "items"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface RestoreAssetsRequest {\n  readonly items: readonly VersionedAssetReference[];\n}"
+        "additionalProperties": false
       },
       "CreatePurgeDryRunRequest": {
         "type": "object",
@@ -7675,8 +7715,7 @@ public static class GalleryOpenApiDocument
           "phase",
           "items"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface CreatePurgeDryRunRequest {\n  readonly phase: \"dryRun\";\n  readonly items: readonly VersionedAssetReference[];\n}"
+        "additionalProperties": false
       },
       "ConfirmPurgeRequest": {
         "type": "object",
@@ -7693,8 +7732,7 @@ public static class GalleryOpenApiDocument
           "dryRunDigest",
           "acknowledgePermanentDeletion"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface ConfirmPurgeRequest {\n  readonly dryRunDigest: string;\n  readonly acknowledgePermanentDeletion: true;\n}"
+        "additionalProperties": false
       },
       "PurgeCandidate": {
         "type": "object",
@@ -7714,7 +7752,30 @@ public static class GalleryOpenApiDocument
           },
           "barriers": {
             "type": "array",
-            "items": {}
+            "items": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "const": "notTrashed"
+                },
+                {
+                  "type": "string",
+                  "const": "retentionPeriod"
+                },
+                {
+                  "type": "string",
+                  "const": "activeHold"
+                },
+                {
+                  "type": "string",
+                  "const": "revisionChanged"
+                },
+                {
+                  "type": "string",
+                  "const": "blockingReference"
+                }
+              ]
+            }
           },
           "sharedLinkImpact": {
             "type": "integer",
@@ -7734,8 +7795,7 @@ public static class GalleryOpenApiDocument
           "sharedLinkImpact",
           "estimatedReclaimBytes"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface PurgeCandidate {\n  readonly assetId: Uuid;\n  readonly revisionNumber: number;\n  readonly title: string;\n  readonly eligible: boolean;\n  readonly barriers: readonly (\n    | \"notTrashed\"\n    | \"retentionPeriod\"\n    | \"activeHold\"\n    | \"revisionChanged\"\n    | \"blockingReference\"\n  )[];\n  readonly sharedLinkImpact: number;\n  readonly estimatedReclaimBytes: number;\n}"
+        "additionalProperties": false
       },
       "PurgeDryRun": {
         "type": "object",
@@ -7786,8 +7846,7 @@ public static class GalleryOpenApiDocument
           "items",
           "version"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface PurgeDryRun {\n  readonly batchId: Uuid;\n  readonly state: \"dryRunCompleted\";\n  readonly dryRunDigest: string;\n  readonly expiresAt: UtcDateTime;\n  readonly candidateCount: number;\n  readonly eligibleCount: number;\n  readonly estimatedReclaimBytes: number;\n  readonly items: readonly PurgeCandidate[];\n  readonly version: ResourceVersion;\n}"
+        "additionalProperties": false
       },
       "PurgeItemResult": {
         "type": "object",
@@ -7829,8 +7888,7 @@ public static class GalleryOpenApiDocument
           "result",
           "reclaimedBytes"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface PurgeItemResult {\n  readonly assetId: Uuid;\n  readonly revisionNumber: number;\n  readonly result: \"purged\" | \"blocked\" | \"failed\";\n  readonly reclaimedBytes: number;\n  readonly errorCode?: string;\n}"
+        "additionalProperties": false
       },
       "PurgeBatch": {
         "type": "object",
@@ -7911,8 +7969,7 @@ public static class GalleryOpenApiDocument
           "items",
           "version"
         ],
-        "additionalProperties": false,
-        "x-vistara-typescript-declaration": "export interface PurgeBatch {\n  readonly batchId: Uuid;\n  readonly state:\n    | \"dryRunCompleted\"\n    | \"approved\"\n    | \"executing\"\n    | \"completed\"\n    | \"cancelled\";\n  readonly requestedAt: UtcDateTime;\n  readonly approvedAt?: UtcDateTime;\n  readonly startedAt?: UtcDateTime;\n  readonly completedAt?: UtcDateTime;\n  readonly candidateCount: number;\n  readonly eligibleCount: number;\n  readonly processedCount: number;\n  readonly reclaimedBytes: number;\n  readonly items: readonly PurgeItemResult[];\n  readonly version: ResourceVersion;\n}"
+        "additionalProperties": false
       }
     }
   },

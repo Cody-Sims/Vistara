@@ -18,7 +18,7 @@ export type SignedCursor = string;
 
 export type ResourceVersion = number;
 
-export type EntityTag = `"v${number}"`;
+export type EntityTag = string;
 
 export type IdempotencyKey = string;
 
@@ -39,12 +39,7 @@ export interface ApiProblemDetails {
   readonly errors: Readonly<Record<string, readonly string[]>>;
 }
 
-export type AssetStatus =
-  | "processing"
-  | "ready"
-  | "failed"
-  | "trashed"
-  | "purged";
+export type AssetStatus = "processing" | "ready" | "failed" | "trashed" | "purged";
 
 export type AssetVisibility = "private" | "tenant" | "public";
 
@@ -135,7 +130,21 @@ export interface AssetDetail {
   readonly albums: readonly AssetAlbumReference[];
 }
 
-export interface TimelineQuery extends AssetListQuery {
+export interface TimelineQuery {
+  readonly limit?: number;
+  readonly cursor?: SignedCursor;
+  readonly search?: string;
+  readonly statuses?: readonly AssetStatus[];
+  readonly contentTypes?: readonly string[];
+  readonly albumId?: Uuid;
+  readonly tagIds?: readonly Uuid[];
+  readonly favorite?: boolean;
+  readonly capturedFrom?: UtcDateTime;
+  readonly capturedTo?: UtcDateTime;
+  readonly importedFrom?: UtcDateTime;
+  readonly importedTo?: UtcDateTime;
+  readonly sort?: AssetSort;
+  readonly direction?: SortDirection;
   readonly groupBy?: TimelineGrouping;
 }
 
@@ -180,14 +189,7 @@ export interface VersionedAssetReference {
   readonly version: ResourceVersion;
 }
 
-export type AssetBulkAction =
-  | { readonly kind: "addTag"; readonly tagId: Uuid }
-  | { readonly kind: "removeTag"; readonly tagId: Uuid }
-  | { readonly kind: "addToAlbum"; readonly albumId: Uuid }
-  | { readonly kind: "removeFromAlbum"; readonly albumId: Uuid }
-  | { readonly kind: "setFavorite"; readonly favorite: boolean }
-  | { readonly kind: "updateMetadata"; readonly metadata: UpdateAssetRequest }
-  | { readonly kind: "trash"; readonly reason: string };
+export type AssetBulkAction = { readonly kind: "addTag"; readonly tagId: Uuid } | { readonly kind: "removeTag"; readonly tagId: Uuid } | { readonly kind: "addToAlbum"; readonly albumId: Uuid } | { readonly kind: "removeFromAlbum"; readonly albumId: Uuid } | { readonly kind: "setFavorite"; readonly favorite: boolean } | { readonly kind: "updateMetadata"; readonly metadata: UpdateAssetRequest } | { readonly kind: "trash"; readonly reason: string };
 
 export interface AssetBulkMutationRequest {
   readonly items: readonly VersionedAssetReference[];
@@ -403,13 +405,7 @@ export interface PurgeCandidate {
   readonly revisionNumber: number;
   readonly title: string;
   readonly eligible: boolean;
-  readonly barriers: readonly (
-    | "notTrashed"
-    | "retentionPeriod"
-    | "activeHold"
-    | "revisionChanged"
-    | "blockingReference"
-  )[];
+  readonly barriers: readonly ("notTrashed" | "retentionPeriod" | "activeHold" | "revisionChanged" | "blockingReference")[];
   readonly sharedLinkImpact: number;
   readonly estimatedReclaimBytes: number;
 }
@@ -436,12 +432,7 @@ export interface PurgeItemResult {
 
 export interface PurgeBatch {
   readonly batchId: Uuid;
-  readonly state:
-    | "dryRunCompleted"
-    | "approved"
-    | "executing"
-    | "completed"
-    | "cancelled";
+  readonly state: "dryRunCompleted" | "approved" | "executing" | "completed" | "cancelled";
   readonly requestedAt: UtcDateTime;
   readonly approvedAt?: UtcDateTime;
   readonly startedAt?: UtcDateTime;

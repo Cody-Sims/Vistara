@@ -35,7 +35,9 @@ export async function loadGalleryManifest(
 
 export async function validateGalleryManifest(manifest) {
   validateVistaraMetadata(manifest);
-  assertLocalReferences(manifest);
+  assertLocalReferences(manifest, manifest);
+  validateCatalogSchemas(manifest);
+  validateOperationContracts(manifest);
 
   const parserOptions = {
     resolve: {
@@ -52,7 +54,7 @@ export async function validateGalleryManifest(manifest) {
 }
 
 export async function generateGalleryArtifacts(manifest) {
-  const dereferencedManifest = await validateGalleryManifest(manifest);
+  await validateGalleryManifest(manifest);
   const canonicalManifest = `${JSON.stringify(manifest, null, 2)}\n`;
 
   return new Map([
@@ -66,7 +68,7 @@ export async function generateGalleryArtifacts(manifest) {
     ],
     [
       "src/Vistara.Web/src/api/generated/models.ts",
-      renderModels(manifest, dereferencedManifest.components.schemas),
+      renderModels(manifest.components.schemas),
     ],
     [
       "src/Vistara.Web/src/api/generated/client.ts",
@@ -133,10 +135,10 @@ function validateVistaraMetadata(manifest) {
   }
 }
 
-function assertLocalReferences(value) {
+function assertLocalReferences(value, document) {
   if (Array.isArray(value)) {
     for (const item of value) {
-      assertLocalReferences(item);
+      assertLocalReferences(item, document);
     }
     return;
   }
@@ -154,8 +156,12 @@ function assertLocalReferences(value) {
     );
   }
 
+  if (Object.hasOwn(value, "$ref")) {
+    resolveLocalReference(document, value.$ref);
+  }
+
   for (const child of Object.values(value)) {
-    assertLocalReferences(child);
+    assertLocalReferences(child, document);
   }
 }
 
@@ -163,24 +169,548 @@ function* operations(manifest) {
   for (const [route, pathItem] of Object.entries(manifest.paths)) {
     for (const method of ["get", "post", "put", "patch", "delete"]) {
       if (pathItem[method] !== undefined) {
-        yield [route, method, pathItem[method]];
+        yield [route, method, pathItem[method], pathItem];
       }
     }
   }
 }
 
-function renderModels(manifest, schemas) {
-  const declarations = [
-    ...(manifest["x-vistara-typescript-declarations"] ?? []),
-    ...Object.values(schemas).map(
-      (schema) => schema["x-vistara-typescript-declaration"],
-    ),
-  ];
-  if (declarations.some((declaration) => typeof declaration !== "string")) {
-    throw new Error("Every generated TypeScript schema needs a declaration.");
+function resolveLocalReference(document, reference) {
+  let current = document;
+  for (const encodedSegment of reference.slice(2).split("/")) {
+    const segment = encodedSegment.replaceAll("~1", "/").replaceAll("~0", "~");
+    if (
+      current === null ||
+      typeof current !== "object" ||
+      !Object.hasOwn(current, segment)
+    ) {
+      throw new Error(`Unresolved local OpenAPI reference '${reference}'.`);
+    }
+    current = current[segment];
+  }
+  return current;
+}
+
+function validateCatalogSchemas(manifest) {
+  const schemas = manifest.components.schemas;
+  const catalogSchemas = manifest["x-vistara-catalog-schemas"];
+  if (!Array.isArray(catalogSchemas)) {
+    throw new Error("Gallery manifest must declare catalog schemas.");
   }
 
-  return `${generatedHeader}\n\n${declarations.join("\n\n")}\n`;
+  for (const metadata of catalogSchemas) {
+    if (
+      typeof metadata?.component !== "string" ||
+      !Object.hasOwn(schemas, metadata.component)
+    ) {
+      throw new Error(
+        `Catalog schema component '${metadata?.component}' does not exist.`,
+      );
+    }
+  }
+}
+
+function validateOperationContracts(manifest) {
+  for (const [route, method, operation, pathItem] of operations(manifest)) {
+    const operationName = `${method.toUpperCase()} ${route} (${operation.operationId})`;
+    const client = operation["x-vistara-client"];
+    const clr = operation["x-vistara-clr"];
+    const parameters = [...(pathItem.parameters ?? []), ...(operation.parameters ?? [])]
+      .map((parameter) => resolveOpenApiObject(manifest, parameter));
+
+    const hasIfMatch = validateRequiredHeader(
+      manifest,
+      parameters,
+      "If-Match",
+      "EntityTag",
+      operationName,
+    );
+    const hasIdempotencyKey = validateRequiredHeader(
+      manifest,
+      parameters,
+      "Idempotency-Key",
+      "IdempotencyKey",
+      operationName,
+    );
+    if (hasIfMatch && !hasIdempotencyKey) {
+      throw new Error(
+        `${operationName} requires If-Match without Idempotency-Key.`,
+      );
+    }
+
+    assertMetadataEquals(
+      operationName,
+      "x-vistara-clr.requiresIfMatch",
+      hasIfMatch,
+      clr.requiresIfMatch,
+    );
+    assertMetadataEquals(
+      operationName,
+      "x-vistara-clr.requiresIdempotencyKey",
+      hasIdempotencyKey,
+      clr.requiresIdempotencyKey,
+    );
+    assertMetadataEquals(
+      operationName,
+      "x-vistara-client.options",
+      hasIfMatch ? "versioned" : hasIdempotencyKey ? "idempotent" : null,
+      client.options,
+    );
+
+    const queryParameters = parameters.filter(
+      (parameter) =>
+        parameter.in === "query" &&
+        parameter["x-vistara-query-object"] === true,
+    );
+    if (queryParameters.length > 1) {
+      throw new Error(`${operationName} declares multiple query objects.`);
+    }
+    const queryType =
+      queryParameters.length === 0
+        ? null
+        : clientSchemaType(queryParameters[0].schema, operationName);
+    assertMetadataEquals(
+      operationName,
+      "x-vistara-client.queryType",
+      queryType,
+      client.queryType,
+    );
+    assertMetadataEquals(
+      operationName,
+      "x-vistara-clr.queryType presence",
+      queryType !== null,
+      clr.queryType !== null,
+    );
+
+    const requestSchema =
+      operation.requestBody?.content?.["application/json"]?.schema;
+    const requestType =
+      requestSchema === undefined
+        ? null
+        : clientSchemaType(requestSchema, operationName);
+    assertMetadataEquals(
+      operationName,
+      "x-vistara-client.requestType",
+      requestType,
+      client.requestType,
+    );
+    assertMetadataEquals(
+      operationName,
+      "x-vistara-clr.requestTypes.length",
+      requestType === null ? 0 : 1,
+      clr.requestTypes.length,
+    );
+
+    const successStatuses = Object.keys(operation.responses).filter((status) =>
+      /^2\d\d$/u.test(status),
+    );
+    if (successStatuses.length !== 1) {
+      throw new Error(`${operationName} must declare exactly one success response.`);
+    }
+    const responseStatus = Number(successStatuses[0]);
+    const responseSchema =
+      operation.responses[successStatuses[0]].content?.["application/json"]
+        ?.schema;
+    const responseType =
+      responseSchema === undefined
+        ? "void"
+        : clientSchemaType(responseSchema, operationName);
+    assertMetadataEquals(
+      operationName,
+      "x-vistara-client.responseType",
+      responseType,
+      client.responseType,
+    );
+    assertMetadataEquals(
+      operationName,
+      "x-vistara-clr.responseStatus",
+      responseStatus,
+      clr.responseStatus,
+    );
+
+    const problemStatuses = Object.entries(operation.responses)
+      .filter(([, response]) =>
+        Object.hasOwn(response.content ?? {}, "application/problem+json"),
+      )
+      .map(([status]) => Number(status));
+    assertMetadataEquals(
+      operationName,
+      "x-vistara-clr.problemStatuses",
+      problemStatuses,
+      clr.problemStatuses,
+    );
+    assertMetadataEquals(
+      operationName,
+      "x-vistara-clr.requiresAuthentication",
+      (operation.security?.length ?? 0) > 0,
+      clr.requiresAuthentication,
+    );
+
+    validatePathParameterMetadata(
+      manifest,
+      route,
+      operationName,
+      parameters,
+      client.pathParameters,
+      clr.pathParameters,
+    );
+  }
+}
+
+function resolveOpenApiObject(manifest, value) {
+  return value?.$ref === undefined
+    ? value
+    : resolveLocalReference(manifest, value.$ref);
+}
+
+function validateRequiredHeader(
+  manifest,
+  parameters,
+  headerName,
+  schemaName,
+  operationName,
+) {
+  const matches = parameters.filter(
+    (parameter) =>
+      parameter.in === "header" &&
+      parameter.name.toLowerCase() === headerName.toLowerCase(),
+  );
+  if (matches.length > 1) {
+    throw new Error(`${operationName} declares ${headerName} more than once.`);
+  }
+  if (matches.length === 0) {
+    return false;
+  }
+
+  const [parameter] = matches;
+  if (parameter.required !== true) {
+    throw new Error(`${operationName} ${headerName} must be required.`);
+  }
+  const expectedReference = `#/components/schemas/${schemaName}`;
+  if (parameter.schema?.$ref !== expectedReference) {
+    throw new Error(
+      `${operationName} ${headerName} must use ${expectedReference}.`,
+    );
+  }
+  resolveLocalReference(manifest, expectedReference);
+  return true;
+}
+
+function validatePathParameterMetadata(
+  manifest,
+  route,
+  operationName,
+  parameters,
+  clientParameters,
+  clrParameters,
+) {
+  const pathParameters = parameters.filter(
+    (parameter) => parameter.in === "path",
+  );
+  assertMetadataEquals(
+    operationName,
+    "x-vistara-client.pathParameters.length",
+    pathParameters.length,
+    clientParameters.length,
+  );
+  assertMetadataEquals(
+    operationName,
+    "x-vistara-clr.pathParameters.length",
+    pathParameters.length,
+    clrParameters.length,
+  );
+
+  for (const parameter of pathParameters) {
+    if (parameter.required !== true || !route.includes(`{${parameter.name}}`)) {
+      throw new Error(
+        `${operationName} path parameter '${parameter.name}' is invalid.`,
+      );
+    }
+
+    const clientParameter = clientParameters.find(
+      (candidate) => candidate.templateName === parameter.name,
+    );
+    const clrParameter = clrParameters.find(
+      (candidate) => candidate.name === parameter.name,
+    );
+    if (clientParameter === undefined || clrParameter === undefined) {
+      throw new Error(
+        `${operationName} metadata is missing path parameter '${parameter.name}'.`,
+      );
+    }
+
+    assertMetadataEquals(
+      operationName,
+      `x-vistara-client.pathParameters.${parameter.name}.type`,
+      parameterSchemaType(parameter.schema, operationName),
+      clientParameter.type,
+    );
+    assertMetadataEquals(
+      operationName,
+      `x-vistara-client.pathParameters.${parameter.name}.clrType`,
+      clrParameter.type,
+      clientParameter.clrType,
+    );
+  }
+}
+
+function parameterSchemaType(schema, operationName) {
+  if (schema?.$ref !== undefined) {
+    return clientSchemaType(schema, operationName);
+  }
+  if (schema?.type === "string" && schema.format === "uuid") {
+    return "Uuid";
+  }
+  if (schema?.type === "string") {
+    return "string";
+  }
+  throw new Error(`${operationName} has an unsupported path parameter schema.`);
+}
+
+function clientSchemaType(schema, operationName) {
+  if (schema?.$ref !== undefined) {
+    const prefix = "#/components/schemas/";
+    if (!schema.$ref.startsWith(prefix)) {
+      throw new Error(
+        `${operationName} client schema must reference a component schema.`,
+      );
+    }
+    return schema.$ref.slice(prefix.length);
+  }
+
+  const pageItemSchema = cursorPageItemSchema(schema);
+  if (pageItemSchema !== null) {
+    return `CursorPage<${clientSchemaType(
+      pageItemSchema,
+      operationName,
+    )}>`;
+  }
+
+  throw new Error(
+    `${operationName} client schema must use a component reference or cursor page.`,
+  );
+}
+
+function assertMetadataEquals(operationName, field, expected, actual) {
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(
+      `${operationName} ${field} disagrees with OpenAPI: expected ${JSON.stringify(
+        expected,
+      )}, received ${JSON.stringify(actual)}.`,
+    );
+  }
+}
+
+function renderModels(schemas) {
+  const declarations = Object.entries(schemas).map(([name, schema]) =>
+    renderNamedSchema(name, schema),
+  );
+  return `${generatedHeader}
+
+export interface CursorPage<T> {
+  readonly items: readonly T[];
+  readonly nextCursor?: SignedCursor;
+}
+
+${declarations.join("\n\n")}
+`;
+}
+
+function renderNamedSchema(name, schema) {
+  if (
+    schema.type === "object" &&
+    schema.$ref === undefined &&
+    schema.oneOf === undefined &&
+    schema.allOf === undefined
+  ) {
+    return `export interface ${name} ${renderInterfaceBody(schema)}`;
+  }
+  return `export type ${name} = ${renderSchemaType(schema, name)};`;
+}
+
+function renderInterfaceBody(schema) {
+  const required = new Set(schema.required ?? []);
+  const lines = [];
+  for (const [name, property] of Object.entries(schema.properties ?? {})) {
+    if (typeof property.description === "string") {
+      lines.push(`  /** ${property.description.replaceAll("*/", "*\\/")} */`);
+    }
+    lines.push(
+      `  readonly ${renderPropertyName(name)}${
+        required.has(name) ? "" : "?"
+      }: ${renderSchemaType(property)};`,
+    );
+  }
+  if (
+    schema.additionalProperties !== undefined &&
+    schema.additionalProperties !== false
+  ) {
+    lines.push(
+      `  readonly [name: string]: ${renderSchemaType(
+        schema.additionalProperties === true
+          ? {}
+          : schema.additionalProperties,
+      )};`,
+    );
+  }
+  return lines.length === 0 ? "{}" : `{\n${lines.join("\n")}\n}`;
+}
+
+function renderSchemaType(schema, rootName) {
+  if (schema === true) {
+    return "unknown";
+  }
+  if (schema === false) {
+    return "never";
+  }
+  if (schema === null || typeof schema !== "object") {
+    throw new Error("Every generated TypeScript schema must be an object.");
+  }
+
+  if (schema.$ref !== undefined) {
+    const prefix = "#/components/schemas/";
+    if (!schema.$ref.startsWith(prefix)) {
+      throw new Error(
+        `Generated TypeScript cannot reference '${schema.$ref}'.`,
+      );
+    }
+    return schema.$ref.slice(prefix.length);
+  }
+  if (Object.hasOwn(schema, "const")) {
+    return JSON.stringify(schema.const);
+  }
+  if (schema.oneOf !== undefined) {
+    return schema.oneOf
+      .map((candidate) => renderSchemaType(candidate))
+      .join(" | ");
+  }
+  if (schema.allOf !== undefined) {
+    return schema.allOf
+      .map((candidate) => renderSchemaType(candidate))
+      .join(" & ");
+  }
+  if (Array.isArray(schema.type)) {
+    return schema.type
+      .map((type) => renderPrimitiveType(type, schema, rootName))
+      .join(" | ");
+  }
+
+  const pageItemSchema = cursorPageItemSchema(schema);
+  if (pageItemSchema !== null) {
+    return `CursorPage<${renderSchemaType(pageItemSchema)}>`;
+  }
+
+  switch (schema.type) {
+    case "array":
+      return `readonly ${parenthesizeArrayItem(
+        renderSchemaType(schema.items ?? {}),
+      )}[]`;
+    case "boolean":
+      return "boolean";
+    case "integer":
+    case "number":
+      return "number";
+    case "null":
+      return "null";
+    case "object":
+      if (
+        Object.keys(schema.properties ?? {}).length === 0 &&
+        schema.additionalProperties !== undefined &&
+        schema.additionalProperties !== false
+      ) {
+        return `Readonly<Record<string, ${renderSchemaType(
+          schema.additionalProperties === true
+            ? {}
+            : schema.additionalProperties,
+        )}>>`;
+      }
+      return renderInlineObject(schema);
+    case "string":
+      return renderStringType(schema, rootName);
+    case undefined:
+      return "unknown";
+    default:
+      throw new Error(
+        `Unsupported JSON Schema type '${JSON.stringify(schema.type)}'.`,
+      );
+  }
+}
+
+function renderPrimitiveType(type, schema, rootName) {
+  switch (type) {
+    case "boolean":
+      return "boolean";
+    case "integer":
+    case "number":
+      return "number";
+    case "null":
+      return "null";
+    case "object":
+      return "Readonly<Record<string, unknown>>";
+    case "string":
+      return renderStringType(schema, rootName);
+    default:
+      throw new Error(`Unsupported JSON Schema union type '${type}'.`);
+  }
+}
+
+function renderStringType(schema, rootName) {
+  if (schema.format === "uuid" && rootName !== "Uuid") {
+    return "Uuid";
+  }
+  if (schema.format === "date-time" && rootName !== "UtcDateTime") {
+    return "UtcDateTime";
+  }
+  return "string";
+}
+
+function renderInlineObject(schema) {
+  const required = new Set(schema.required ?? []);
+  const properties = Object.entries(schema.properties ?? {}).map(
+    ([name, property]) =>
+      `readonly ${renderPropertyName(name)}${
+        required.has(name) ? "" : "?"
+      }: ${renderSchemaType(property)}`,
+  );
+  if (
+    schema.additionalProperties !== undefined &&
+    schema.additionalProperties !== false
+  ) {
+    properties.push(
+      `readonly [name: string]: ${renderSchemaType(
+        schema.additionalProperties === true
+          ? {}
+          : schema.additionalProperties,
+      )}`,
+    );
+  }
+  return properties.length === 0 ? "{}" : `{ ${properties.join("; ")} }`;
+}
+
+function renderPropertyName(name) {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(name)
+    ? name
+    : JSON.stringify(name);
+}
+
+function parenthesizeArrayItem(type) {
+  return type.includes(" | ") || type.includes(" & ") ? `(${type})` : type;
+}
+
+function cursorPageItemSchema(schema) {
+  const properties = schema?.properties;
+  return schema?.type === "object" &&
+    Array.isArray(schema.required) &&
+    schema.required.length === 1 &&
+    schema.required[0] === "items" &&
+    Object.keys(properties ?? {}).every((name) =>
+      ["items", "nextCursor"].includes(name),
+    ) &&
+    properties?.items?.type === "array" &&
+    properties.items.items?.$ref !== undefined &&
+    properties?.nextCursor?.$ref === "#/components/schemas/SignedCursor"
+    ? properties.items.items
+    : null;
 }
 
 function renderClient(manifest) {
