@@ -97,6 +97,19 @@ function AccountControl({ compact = false }: { readonly compact?: boolean }) {
   const menuId = useId();
   const container = useRef<HTMLDivElement>(null);
 
+  if (session.status === 'loading') {
+    return (
+      <button
+        className={compact ? styles.menuAccount : styles.account}
+        disabled
+        type="button"
+      >
+        <NavigationIcon name="user" />
+        <span className={styles.linkLabel}>Checking your session…</span>
+      </button>
+    );
+  }
+
   if (session.status !== 'authenticated' || !session.user) {
     return (
       <Link

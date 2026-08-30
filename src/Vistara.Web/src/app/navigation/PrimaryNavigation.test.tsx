@@ -164,4 +164,23 @@ describe('primary navigation', () => {
       await screen.findAllByRole('link', { name: 'Sign in' }),
     ).not.toHaveLength(0);
   });
+
+  it('waits for the session before offering sign-in or an account menu', () => {
+    const pending = {
+      getSession: vi.fn(() => new Promise<SessionSnapshot>(() => {})),
+      login: vi.fn(async () => snapshot('Member')),
+      logout: vi.fn(async () => undefined),
+      updatePreferences: vi.fn(async () => snapshot('Member')),
+    };
+    renderNavigation('/library', pending);
+
+    const rail = screen.getByRole('navigation', { name: 'Primary navigation' });
+
+    expect(
+      within(rail).getByRole('button', { name: 'Checking your session…' }),
+    ).toBeDisabled();
+    expect(
+      within(rail).queryByRole('link', { name: 'Sign in' }),
+    ).not.toBeInTheDocument();
+  });
 });
