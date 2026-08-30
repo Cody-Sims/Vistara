@@ -2,16 +2,19 @@ using System.Security.Cryptography;
 using Amazon.Runtime;
 using Azure.Core;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Vistara.Api.Composition.Gallery;
 using Vistara.Api.Composition.Media;
 using Vistara.Api.Composition.Platform;
 using Vistara.Api.Features.Derivatives;
 using Vistara.Api.Features.Events;
 using Vistara.Api.Features.Media;
+using Vistara.Api.OpenApi.Gallery;
 using Vistara.Application.Common.Imaging;
 using Vistara.Application.Derivatives;
 using Vistara.Application.Identity;
@@ -101,12 +104,18 @@ public sealed class ApiRuntimeCompositionTests
 
             builder.Services.AddSingleton<IMediaRuntimeDependencies>(
                 new FakeMediaRuntimeDependencies());
+            builder.Services.AddSingleton<IPlatformRateLimitHook>(
+                new DependencyFailingRateLimitHook());
             builder.Services.AddVistaraApiPlatform(builder.Configuration);
             builder.Services.AddVistaraApiPersistence(builder.Configuration);
             builder.Services.AddVistaraMedia(builder.Configuration);
+            builder.Services.AddVistaraGallery(builder.Configuration);
             await using WebApplication app = builder.Build();
             app.Services.ValidateVistaraApiPlatformComposition();
+            app.Services.ValidateVistaraGalleryComposition();
+            app.UseVistaraPlatform();
             app.MapVistaraPlatformEndpoints();
+            app.MapVistaraGalleryOpenApi();
 
             string[] routes = ((IEndpointRouteBuilder)app).DataSources
                 .SelectMany(source => source.Endpoints)
@@ -124,6 +133,31 @@ public sealed class ApiRuntimeCompositionTests
             Assert.Contains(
                 "/delivery/{pipeline}/{sourceHash}/{recipeHash}.{extension}",
                 routes);
+            Assert.Single(routes, route => route == "/api/v1/assets");
+            Assert.Single(routes, route => route == "/health/live");
+            Assert.Single(routes, route => route == "/health/ready");
+            Assert.Single(routes, route => route == "/health/startup");
+
+            (int liveStatus, string liveBody) =
+                await SendAsync(app, "/health/live");
+            Assert.Equal(StatusCodes.Status200OK, liveStatus);
+            Assert.Contains("\"name\":\"process\"", liveBody, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "\"name\":\"database\"",
+                liveBody,
+                StringComparison.Ordinal);
+
+            (int readyStatus, string readyBody) =
+                await SendAsync(app, "/health/ready");
+            Assert.Equal(StatusCodes.Status503ServiceUnavailable, readyStatus);
+            Assert.DoesNotContain(databasePath, readyBody, StringComparison.Ordinal);
+            Assert.DoesNotContain(mediaRoot, readyBody, StringComparison.Ordinal);
+
+            (int startupStatus, string startupBody) =
+                await SendAsync(app, "/health/startup");
+            Assert.Equal(StatusCodes.Status503ServiceUnavailable, startupStatus);
+            Assert.DoesNotContain(databasePath, startupBody, StringComparison.Ordinal);
+            Assert.DoesNotContain(mediaRoot, startupBody, StringComparison.Ordinal);
         }
         finally
         {
@@ -740,6 +774,27 @@ public sealed class ApiRuntimeCompositionTests
             .Replace('+', '-')
             .Replace('/', '_');
 
+    private static async Task<(int StatusCode, string Body)> SendAsync(
+        WebApplication app,
+        string path)
+    {
+        RequestDelegate pipeline = ((IApplicationBuilder)app).Build();
+        await using AsyncServiceScope scope = app.Services.CreateAsyncScope();
+        var context = new DefaultHttpContext
+        {
+            RequestServices = scope.ServiceProvider,
+        };
+        context.Request.Method = HttpMethods.Get;
+        context.Request.Path = path;
+        context.Response.Body = new MemoryStream();
+
+        await pipeline(context);
+        context.Response.Body.Position = 0;
+        string body = await new StreamReader(context.Response.Body)
+            .ReadToEndAsync(CancellationToken.None);
+        return (context.Response.StatusCode, body);
+    }
+
     private static string CreateScratchPath(string leafName) =>
         Path.Combine(
             AppContext.BaseDirectory,
@@ -772,6 +827,15 @@ public sealed class ApiRuntimeCompositionTests
 
         public IImageProcessor CreateImageProcessor() =>
             new FakeImageProcessor();
+    }
+
+    private sealed class DependencyFailingRateLimitHook : IPlatformRateLimitHook
+    {
+        public ValueTask<PlatformRateLimitDecision> CheckAsync(
+            HttpContext context,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException(
+                "Health liveness performed dependency I/O.");
     }
 
     private sealed class FakeImageProcessor : IImageProcessor
