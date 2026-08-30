@@ -422,3 +422,58 @@ test('refuses to run the drill inside a populated working directory', () => {
     assert.ok(existsSync(resolve(workdir, 'previous.json')));
   });
 });
+
+test('rejects a stale SQLite sidecar before touching the target', () => {
+  withWorkspace((root) => {
+    const instance = createLiveInstance(root);
+    const archive = resolve(root, 'archive');
+    assert.equal(backup(root, instance, archive).status, 0);
+
+    const targetDatabase = resolve(root, 'target/vistara.db');
+    mkdirSync(dirname(targetDatabase), { recursive: true });
+    writeFileSync(targetDatabase, 'production data');
+    writeFileSync(`${targetDatabase}-wal`, 'uncheckpointed writes');
+
+    const restored = run(RESTORE, [
+      '--archive',
+      archive,
+      '--target-database',
+      targetDatabase,
+      '--target-media',
+      resolve(root, 'target/media'),
+      '--force',
+    ]);
+    assert.notEqual(restored.status, 0);
+    assert.match(restored.stderr, /stale SQLite sidecar/i);
+    assert.equal(readFileSync(targetDatabase, 'utf8'), 'production data');
+    assert.equal(
+      readFileSync(`${targetDatabase}-wal`, 'utf8'),
+      'uncheckpointed writes',
+    );
+    assert.equal(existsSync(resolve(root, 'target/media')), false);
+  });
+});
+
+test('rejects a stale sidecar even when the target database is absent', () => {
+  withWorkspace((root) => {
+    const instance = createLiveInstance(root);
+    const archive = resolve(root, 'archive');
+    assert.equal(backup(root, instance, archive).status, 0);
+
+    const targetDatabase = resolve(root, 'target/vistara.db');
+    mkdirSync(dirname(targetDatabase), { recursive: true });
+    writeFileSync(`${targetDatabase}-shm`, 'shared memory index');
+
+    const restored = run(RESTORE, [
+      '--archive',
+      archive,
+      '--target-database',
+      targetDatabase,
+      '--target-media',
+      resolve(root, 'target/media'),
+    ]);
+    assert.notEqual(restored.status, 0);
+    assert.match(restored.stderr, /stale SQLite sidecar/i);
+    assert.equal(existsSync(targetDatabase), false);
+  });
+});

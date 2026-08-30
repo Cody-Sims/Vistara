@@ -54,15 +54,16 @@ database_file="$(manifest_value "$archive" database_file)"
 media_file="$(manifest_value "$archive" media_file)"
 
 if [ "$profile" = starter ]; then
+  for sidecar in "$target_database-wal" "$target_database-shm"; do
+    [ ! -e "$sidecar" ] ||
+      fail "Stale SQLite sidecar $sidecar exists; resolve it before restoring."
+  done
   if [ -e "$target_database" ] && [ "$force" = false ]; then
     fail "Target database $target_database already exists; pass --force to replace it."
   fi
   mkdir -p "$(dirname "$target_database")"
   cp "$archive/$database_file" "$target_database"
   chmod 0600 "$target_database"
-  for sidecar in "$target_database-wal" "$target_database-shm"; do
-    [ ! -e "$sidecar" ] || fail "Stale SQLite sidecar $sidecar exists; resolve it before restoring."
-  done
 else
   require_command pg_restore
   require_command psql
