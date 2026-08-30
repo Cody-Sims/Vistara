@@ -16,7 +16,7 @@ FROM ${DOTNET_SDK_IMAGE} AS build
 WORKDIR /src
 
 COPY global.json Directory.Build.props Directory.Packages.props Vistara.slnx ./
-COPY --exclude=**/bin --exclude=**/obj --exclude=**/node_modules --exclude=**/dist src/ src/
+COPY src/ src/
 
 RUN dotnet restore src/Vistara.Worker/Vistara.Worker.csproj
 RUN dotnet build src/Vistara.Worker/Vistara.Worker.csproj \

@@ -136,7 +136,14 @@ EOF
 }
 
 for role in api worker migration; do
+  dockerfile="$repository_root/deploy/containers/${role}.Dockerfile"
   ignore_file="$repository_root/deploy/containers/${role}.Dockerfile.dockerignore"
+
+  if grep -E '^[[:space:]]*COPY[[:space:]].*--exclude(=|[[:space:]])' "$dockerfile" >/dev/null; then
+    echo "$role Dockerfile uses COPY --exclude, which is not supported by the CI Dockerfile frontend" >&2
+    exit 1
+  fi
+
   if ! diff --unified <(expected_ignore "$role") "$ignore_file"; then
     echo "$role Docker build context does not match its audited allowlist" >&2
     exit 1
