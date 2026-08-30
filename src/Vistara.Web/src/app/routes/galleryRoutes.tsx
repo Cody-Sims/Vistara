@@ -16,6 +16,7 @@ import {
   LibraryRoute,
   PublicShareRoute,
   RoutePlaceholderPage,
+  SearchRoute,
   SharesRoute,
   TagsRoute,
   TrashRoute,
@@ -63,7 +64,7 @@ export function galleryRoutes(
         },
         {
           path: 'search',
-          element: feature('Search', <LibraryRoute />),
+          element: guarded('Search', <SearchRoute />),
         },
         {
           path: 'assets/:assetId',

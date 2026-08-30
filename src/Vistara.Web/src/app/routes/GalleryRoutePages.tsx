@@ -11,6 +11,7 @@ import {
 import { AlbumDetailView, AlbumsView } from '../../features/albums';
 import { FavoritesView } from '../../features/favorites';
 import { LibraryPage } from '../../features/library';
+import { SearchView } from '../../features/search';
 import { PublicShareView, ShareManager } from '../../features/shares';
 import { TagsView } from '../../features/tags';
 import { TrashManager } from '../../features/trash';
@@ -134,6 +135,10 @@ export function LibraryRoute() {
   }, [location.pathname, location.search]);
 
   return <LibraryPage dataSource={client} />;
+}
+
+export function SearchRoute() {
+  return <SearchView client={client} />;
 }
 
 export function ViewerRoute() {
