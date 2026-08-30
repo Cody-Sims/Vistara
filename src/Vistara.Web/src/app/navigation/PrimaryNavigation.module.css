@@ -1,0 +1,34 @@
+.navigation {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
+.link {
+  display: inline-flex;
+  min-block-size: 2.75rem;
+  align-items: center;
+  padding-inline: var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--color-muted);
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.link:hover {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+.active {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+@media (max-width: 48rem) {
+  .navigation {
+    justify-content: flex-start;
+    inline-size: 100%;
+  }
+}

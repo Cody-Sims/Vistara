@@ -1,20 +1,20 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Vistara reviewed gallery contract",
-    "version": "gallery-contract-freeze-integration",
-    "description": "Temporary reviewed Wave 6 contract manifest used for generated clients and API discovery until gallery endpoints are implemented. Paths describe the frozen intended contract, not currently registered runtime routes."
+    "title": "Vistara gallery API",
+    "version": "v1",
+    "description": "Implemented gallery routes served by the Vistara API and used to generate the browser client."
   },
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
-  "x-vistara-contract-source": "temporary-reviewed-manifest",
-  "x-vistara-runtime-gallery-routes": false,
-  "x-vistara-replacement-policy": "Endpoint integration must replace or validate this manifest against registered runtime endpoints before marking gallery routes implemented.",
+  "x-vistara-contract-source": "runtime-endpoint-catalog",
+  "x-vistara-runtime-gallery-routes": true,
+  "x-vistara-route-validation": "The API validates this operation catalog against the mapped gallery route set during startup.",
   "paths": {
     "/api/v1/assets": {
       "get": {
         "operationId": "listAssets",
         "summary": "List tenant-visible assets with opaque keyset pagination.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Assets"
         ],
@@ -171,7 +171,7 @@
       "get": {
         "operationId": "getAsset",
         "summary": "Get a tenant-visible asset and safe metadata summary.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Assets"
         ],
@@ -323,7 +323,7 @@
       "patch": {
         "operationId": "updateAsset",
         "summary": "Update mutable asset metadata using a strong If-Match ETag.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Assets"
         ],
@@ -528,7 +528,7 @@
       "get": {
         "operationId": "getAssetMetadata",
         "summary": "Get permission-gated allowlisted metadata without raw metadata blocks.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Assets"
         ],
@@ -682,7 +682,7 @@
       "post": {
         "operationId": "bulkMutateAssets",
         "summary": "Queue a bounded, version-aware bulk asset mutation.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Assets"
         ],
@@ -841,7 +841,7 @@
       "get": {
         "operationId": "getTimeline",
         "summary": "List assets grouped by capture date with import-date fallback.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Assets"
         ],
@@ -983,7 +983,7 @@
       "get": {
         "operationId": "getSearchFacets",
         "summary": "Get bounded facets for the normalized asset query.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Assets"
         ],
@@ -1125,7 +1125,7 @@
       "get": {
         "operationId": "listAlbums",
         "summary": "List albums with opaque keyset pagination.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Albums"
         ],
@@ -1280,7 +1280,7 @@
       "post": {
         "operationId": "createAlbum",
         "summary": "Create an album idempotently.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Albums"
         ],
@@ -1439,7 +1439,7 @@
       "get": {
         "operationId": "getAlbum",
         "summary": "Get an album and a cursor page of ordered members.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Albums"
         ],
@@ -1600,7 +1600,7 @@
       "patch": {
         "operationId": "updateAlbum",
         "summary": "Update album metadata using a strong If-Match ETag.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Albums"
         ],
@@ -1803,7 +1803,7 @@
       "delete": {
         "operationId": "deleteAlbum",
         "summary": "Delete an album without deleting its assets.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Albums"
         ],
@@ -1989,7 +1989,7 @@
       "post": {
         "operationId": "addAlbumItems",
         "summary": "Add a bounded set of versioned assets to an album.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Albums"
         ],
@@ -2192,7 +2192,7 @@
       "delete": {
         "operationId": "removeAlbumItems",
         "summary": "Remove a bounded set of assets from an album.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Albums"
         ],
@@ -2397,7 +2397,7 @@
       "patch": {
         "operationId": "reorderAlbumItems",
         "summary": "Replace album member positions using a strong If-Match ETag.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Albums"
         ],
@@ -2602,7 +2602,7 @@
       "get": {
         "operationId": "listTags",
         "summary": "List tenant tags with opaque keyset pagination.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Curation"
         ],
@@ -2757,7 +2757,7 @@
       "post": {
         "operationId": "createTag",
         "summary": "Create a tenant tag idempotently.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Curation"
         ],
@@ -2916,7 +2916,7 @@
       "patch": {
         "operationId": "updateTag",
         "summary": "Update a tag using a strong If-Match ETag.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Curation"
         ],
@@ -3119,7 +3119,7 @@
       "delete": {
         "operationId": "deleteTag",
         "summary": "Delete a tag without deleting tagged assets.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Curation"
         ],
@@ -3305,7 +3305,7 @@
       "put": {
         "operationId": "addAssetTag",
         "summary": "Add a tag to an asset.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Curation"
         ],
@@ -3515,7 +3515,7 @@
       "delete": {
         "operationId": "removeAssetTag",
         "summary": "Remove a tag from an asset.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Curation"
         ],
@@ -3727,7 +3727,7 @@
       "put": {
         "operationId": "favoriteAsset",
         "summary": "Add an asset to the current user's favorites.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Curation"
         ],
@@ -3918,7 +3918,7 @@
       "delete": {
         "operationId": "unfavoriteAsset",
         "summary": "Remove an asset from the current user's favorites.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Curation"
         ],
@@ -4111,7 +4111,7 @@
       "get": {
         "operationId": "listShares",
         "summary": "List managed share links without returning bearer tokens.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Shares"
         ],
@@ -4266,7 +4266,7 @@
       "post": {
         "operationId": "createShare",
         "summary": "Create a revocable share and return its bearer token once.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Shares"
         ],
@@ -4425,7 +4425,7 @@
       "get": {
         "operationId": "getShare",
         "summary": "Get a managed share without returning its bearer token.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Shares"
         ],
@@ -4577,7 +4577,7 @@
       "patch": {
         "operationId": "updateShare",
         "summary": "Update share permissions or expiry using a strong If-Match ETag.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Shares"
         ],
@@ -4780,7 +4780,7 @@
       "delete": {
         "operationId": "revokeShare",
         "summary": "Revoke a share using a strong If-Match ETag.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Shares"
         ],
@@ -4966,7 +4966,7 @@
       "get": {
         "operationId": "getPublicShare",
         "summary": "Get the intentionally limited public share projection.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Shares"
         ],
@@ -5107,7 +5107,7 @@
       "post": {
         "operationId": "challengePublicShare",
         "summary": "Challenge a password-protected share and establish a short-lived session.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Shares"
         ],
@@ -5251,7 +5251,7 @@
       "get": {
         "operationId": "listTrash",
         "summary": "List trashed assets and their retention deadlines.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Lifecycle"
         ],
@@ -5408,7 +5408,7 @@
       "post": {
         "operationId": "restoreAssets",
         "summary": "Restore a bounded set of versioned assets.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Lifecycle"
         ],
@@ -5567,7 +5567,7 @@
       "post": {
         "operationId": "dryRunPurge",
         "summary": "Create a revision-bound purge dry run without deleting assets.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Lifecycle"
         ],
@@ -5726,7 +5726,7 @@
       "post": {
         "operationId": "confirmPurge",
         "summary": "Separately confirm a dry run before queuing permanent deletion.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Lifecycle"
         ],
@@ -5931,7 +5931,7 @@
       "get": {
         "operationId": "getPurgeStatus",
         "summary": "Get purge batch progress and per-item outcomes.",
-        "description": "Reviewed contract operation. This manifest does not assert that the runtime route is implemented.",
+        "description": "Implemented runtime operation covered by startup route validation.",
         "tags": [
           "Lifecycle"
         ],
@@ -6890,40 +6890,6 @@
             "required": [
               "kind",
               "favorite"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "kind": {
-                "type": "string",
-                "const": "updateMetadata"
-              },
-              "metadata": {
-                "$ref": "#/components/schemas/UpdateAssetRequest"
-              }
-            },
-            "required": [
-              "kind",
-              "metadata"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "kind": {
-                "type": "string",
-                "const": "trash"
-              },
-              "reason": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "reason"
             ],
             "additionalProperties": false
           }
