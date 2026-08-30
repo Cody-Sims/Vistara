@@ -264,14 +264,23 @@ public sealed class ShareServicesTests
 
         string cursor = protector.Protect(state);
         bool valid = protector.TryUnprotect(cursor, out ShareCursorState parsed);
-        char replacement = cursor[^1] == 'A' ? 'B' : 'A';
-        bool tampered = protector.TryUnprotect(
-            string.Concat(cursor[..^1], replacement),
+        int payloadStart = cursor.IndexOf('_', "vsc_".Length) + 1;
+        int signatureStart = cursor.LastIndexOf('.') + 1;
+        bool payloadTampered = protector.TryUnprotect(
+            ReplaceCharacter(cursor, payloadStart),
+            out _);
+        bool signatureTampered = protector.TryUnprotect(
+            ReplaceCharacter(cursor, signatureStart),
+            out _);
+        bool signatureEncodingTampered = protector.TryUnprotect(
+            ReplaceTrailingBase64UrlPaddingBits(cursor),
             out _);
 
         Assert.True(valid);
         Assert.Equal(state, parsed);
-        Assert.False(tampered);
+        Assert.False(payloadTampered);
+        Assert.False(signatureTampered);
+        Assert.False(signatureEncodingTampered);
     }
 
     [Fact]
@@ -519,6 +528,26 @@ public sealed class ShareServicesTests
     }
 
     private static ShareActor Actor(Guid tenantId) => new(tenantId, ActorId);
+
+    private static string ReplaceCharacter(string value, int index)
+    {
+        char replacement = value[index] == 'A' ? 'B' : 'A';
+        return value[..index] + replacement + value[(index + 1)..];
+    }
+
+    private static string ReplaceTrailingBase64UrlPaddingBits(string value)
+    {
+        const string alphabet =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        int index = alphabet.IndexOf(value[^1], StringComparison.Ordinal);
+        if (index < 0 || index % 4 != 0)
+        {
+            throw new InvalidOperationException(
+                "A 256-bit signature must end in a canonical Base64URL character.");
+        }
+
+        return value[..^1] + alphabet[index + 1];
+    }
 
     private static DeliveryGrantIssueRequest DeliveryRequest(
         DeliveryGrantIdentity identity,

@@ -151,10 +151,17 @@ public sealed class ShareCursorProtector(
         int padding = (4 - (value.Length % 4)) % 4;
         try
         {
-            return Convert.FromBase64String(
+            byte[] decoded = Convert.FromBase64String(
                 string.Concat(
                     value.Replace('-', '+').Replace('_', '/'),
                     new string('=', padding)));
+            if (!string.Equals(Encode(decoded), value, StringComparison.Ordinal))
+            {
+                Zero(decoded);
+                return null;
+            }
+
+            return decoded;
         }
         catch (FormatException)
         {
