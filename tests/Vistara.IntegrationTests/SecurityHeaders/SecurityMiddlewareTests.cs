@@ -576,6 +576,78 @@ public sealed class SecurityMiddlewareTests
     }
 
     [Theory]
+    [InlineData("172.31.0.10")]
+    [InlineData("172.30.0.10")]
+    public async Task Compose_security_settings_bind_to_unique_allowed_hosts(
+        string knownProxy)
+    {
+        HostApplicationBuilder builder = Host.CreateApplicationBuilder(
+            new HostApplicationBuilderSettings
+            {
+                DisableDefaults = true,
+                EnvironmentName = Environments.Production,
+            });
+        builder.Configuration.AddInMemoryCollection(
+            new Dictionary<string, string?>
+            {
+                ["Security:Hosts:AllowedHosts:0"] = "localhost",
+                ["Security:Hosts:AllowedHosts:1"] = "127.0.0.1",
+                ["Security:Hosts:AllowedHosts:2"] = "[::1]",
+                ["Security:Hosts:AllowedHosts:3"] = "vistara.example.invalid",
+                ["Security:Proxy:KnownProxies:0"] = knownProxy,
+                ["Security:Proxy:ForwardLimit"] = "1",
+                ["Security:Transport:RedirectHttpToHttps"] = "false",
+            });
+        builder.Services.AddVistaraApiSecurity(
+            builder.Configuration,
+            builder.Environment);
+        using IHost host = builder.Build();
+
+        await host.StartAsync();
+
+        VistaraSecurityOptions options = host.Services
+            .GetRequiredService<IOptions<VistaraSecurityOptions>>()
+            .Value;
+        Assert.Equal(
+            [
+                "localhost",
+                "127.0.0.1",
+                "[::1]",
+                "vistara.example.invalid",
+            ],
+            options.Hosts.AllowedHosts);
+        Assert.Equal([knownProxy], options.Proxy.KnownProxies);
+        Assert.False(options.Transport.RedirectHttpToHttps);
+    }
+
+    [Fact]
+    public async Task Startup_rejects_duplicate_configured_allowed_hosts()
+    {
+        HostApplicationBuilder builder = Host.CreateApplicationBuilder(
+            new HostApplicationBuilderSettings
+            {
+                DisableDefaults = true,
+                EnvironmentName = Environments.Production,
+            });
+        builder.Configuration.AddInMemoryCollection(
+            new Dictionary<string, string?>
+            {
+                ["Security:Hosts:AllowedHosts:0"] = "vistara.example.test",
+                ["Security:Hosts:AllowedHosts:1"] = "VISTARA.EXAMPLE.TEST",
+            });
+        builder.Services.AddVistaraApiSecurity(
+            builder.Configuration,
+            builder.Environment);
+        using IHost host = builder.Build();
+
+        OptionsValidationException error =
+            await Assert.ThrowsAsync<OptionsValidationException>(
+                () => host.StartAsync());
+
+        Assert.Contains("unique", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
     [InlineData("Security:Proxy:KnownProxies:0", "not-an-ip-address")]
     [InlineData("Security:Proxy:KnownNetworks:0", "192.0.2.0/not-a-prefix")]
     public async Task Startup_rejects_invalid_trusted_proxy_configuration(

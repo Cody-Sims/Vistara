@@ -97,8 +97,20 @@ public static class SecurityServiceCollectionExtensions
 
         services.AddSingleton<IVistaraSecurityRegistration,
             VistaraSecurityRegistration>();
+        IConfigurationSection securitySection =
+            configuration.GetSection(VistaraSecurityOptions.SectionName);
+        IConfigurationSection allowedHostsSection =
+            securitySection.GetSection("Hosts:AllowedHosts");
         services.AddOptions<VistaraSecurityOptions>()
-            .Bind(configuration.GetSection(VistaraSecurityOptions.SectionName))
+            .Configure(options =>
+            {
+                if (allowedHostsSection.Exists())
+                {
+                    // The binder appends configured collection values.
+                    options.Hosts.AllowedHosts.Clear();
+                }
+            })
+            .Bind(securitySection)
             .ValidateOnStart();
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<
