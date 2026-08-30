@@ -64,11 +64,12 @@ metadata also requires attaching only the API/worker roles that need it to an
 operator-controlled egress network or proxy. Docker Compose bridge networks do
 not enforce hostname-level egress allowlists.
 
-The published HTTP port binds to `127.0.0.1` by default. Nginx reports HTTPS to
-the API so production HTTPS enforcement works behind a TLS-terminating edge; it
-does not trust or relay a client-supplied forwarding scheme. The direct HTTP
-listener is only for local health evaluation. Put a trusted TLS edge in front
-before changing `VISTARA_BIND_ADDRESS` or serving user traffic.
+The published HTTP port binds to `127.0.0.1` by default. These bundled examples
+are intentionally HTTP-only, derive the forwarding scheme from Nginx's own
+connection, and explicitly disable application HTTP-to-HTTPS redirects. Before
+changing `VISTARA_BIND_ADDRESS` or serving user traffic, replace the local
+listener with a TLS-aware edge integration and re-enable
+`Security__Transport__RedirectHttpToHttps`.
 
 ## Validation
 

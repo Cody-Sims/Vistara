@@ -13,6 +13,7 @@ x-api-environment: &api-environment
   Security__Hosts__AllowedHosts__3: ${VISTARA_PUBLIC_HOST:-vistara.example.invalid}
   Security__Proxy__KnownProxies__0: 172.31.0.10
   Security__Proxy__ForwardLimit: "1"
+  Security__Transport__RedirectHttpToHttps: "false"
   Platform__Authentication__ApiKeys__CurrentPepperVersion: v1
   Platform__Authentication__ApiKeys__Peppers__v1: ${VISTARA_API_PEPPER:-}
   Platform__Authentication__Jwt__Issuers__0__ProfileId: ${VISTARA_OIDC_PROFILE:-local}
