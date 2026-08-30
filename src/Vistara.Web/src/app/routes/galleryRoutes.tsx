@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Navigate, type RouteObject } from 'react-router-dom';
-import { LoginPage } from '../../features/session';
+import { LoginPage, RequireSession } from '../../features/session';
+import { SettingsPage } from '../../features/settings';
 import { platformClient } from '../apiClients';
 import { ApplicationFrame } from '../ApplicationFrame';
 import {
@@ -27,11 +28,18 @@ export function galleryRoutes(
   additionalRoutes: RouteObject[] = [],
   liveFeatures = true,
 ): RouteObject[] {
+  const preview = !liveFeatures || staticPreview;
   const feature = (title: string, element: ReactNode) =>
-    staticPreview || !liveFeatures ? (
+    preview ? (
       <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
     ) : (
       element
+    );
+  const guarded = (title: string, element: ReactNode) =>
+    preview ? (
+      <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
+    ) : (
+      <RequireSession>{element}</RequireSession>
     );
 
   return [
@@ -103,12 +111,7 @@ export function galleryRoutes(
         },
         {
           path: 'settings',
-          element: (
-            <RoutePlaceholderPage
-              title="Settings"
-              staticPreview={staticPreview}
-            />
-          ),
+          element: guarded('Settings', <SettingsPage />),
         },
         ...additionalRoutes,
         {
