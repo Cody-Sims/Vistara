@@ -78,15 +78,10 @@ internal static class PerformanceHarness
         await ReportWriter.WriteAsync(options.OutputPath, report, CancellationToken.None);
         PrintSummary(options.OutputPath, results, prerequisites);
 
-        bool failed = results.Any(result =>
-            result.Required && result.Status == BudgetStatus.Failed);
-        bool requiredUnavailable = options.RequireReference &&
-            results.Any(result =>
-                result.Required &&
-                result.Status is BudgetStatus.Unavailable or BudgetStatus.Skipped);
-        bool prerequisiteFailed = prerequisites.Any(result =>
-            result.Status == BudgetStatus.Failed);
-        return failed || requiredUnavailable || prerequisiteFailed ? 1 : 0;
+        return ExitCodeEvaluator.ShouldFail(
+            results,
+            prerequisites,
+            options.RequireReference) ? 1 : 0;
     }
 
     private static void PrintSummary(

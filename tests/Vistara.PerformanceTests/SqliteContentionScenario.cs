@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Vistara.Domain.Jobs;
@@ -7,6 +8,11 @@ using Vistara.Persistence.Model;
 
 namespace Vistara.PerformanceTests;
 
+internal sealed record SqliteContentionResult(
+    int BusyErrors,
+    int OperationErrors,
+    string Detail);
+
 internal static class SqliteContentionScenario
 {
     private const int UploadClients = 8;
@@ -15,76 +21,109 @@ internal static class SqliteContentionScenario
     private static readonly DateTimeOffset UtcNow =
         new(2026, 8, 28, 12, 0, 0, TimeSpan.Zero);
 
-    internal static async Task<(int BusyErrors, int OperationErrors)> RunAsync(
+    internal static async Task<SqliteContentionResult> RunAsync(
         ProjectPaths paths,
         CancellationToken cancellationToken)
     {
         string databasePath = Path.Combine(paths.ArtifactsDirectory, "sqlite-contention.db");
         DeleteDatabase(databasePath);
-        string connectionString =
-            $"Data Source={databasePath};Default Timeout=5;Pooling=False";
-        var vistaraOptions = new DbContextOptionsBuilder<VistaraDbContext>()
-            .UseSqlite(connectionString)
-            .Options;
-        var jobOptions = new DbContextOptionsBuilder<JobDbContext>()
-            .UseSqlite(connectionString)
-            .Options;
-
-        await using (var context = new VistaraDbContext(
-                         vistaraOptions,
-                         new FixedTenantScope(TestIds.Tenant)))
+        try
         {
-            await context.Database.EnsureCreatedAsync(cancellationToken);
-            await context.Database.ExecuteSqlRawAsync(
-                "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;",
-                cancellationToken);
-            await SeedTenantAsync(context, cancellationToken);
-        }
+            string connectionString =
+                $"Data Source={databasePath};Default Timeout=5;Pooling=False";
+            var vistaraOptions = new DbContextOptionsBuilder<VistaraDbContext>()
+                .UseSqlite(connectionString)
+                .Options;
+            var jobOptions = new DbContextOptionsBuilder<JobDbContext>()
+                .UseSqlite(connectionString)
+                .Options;
 
-        int busyErrors = 0;
-        int operationErrors = 0;
-        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Task[] uploadTasks = Enumerable.Range(0, UploadClients)
-            .Select(client => RunUploadClientAsync(
-                client,
-                start.Task,
-                vistaraOptions,
-                () => Interlocked.Increment(ref busyErrors),
-                () => Interlocked.Increment(ref operationErrors),
-                cancellationToken))
-            .ToArray();
-        Task jobTask = RunJobWorkerAsync(
-            start.Task,
-            jobOptions,
-            () => Interlocked.Increment(ref busyErrors),
-            () => Interlocked.Increment(ref operationErrors),
-            cancellationToken);
-        start.SetResult();
-        await Task.WhenAll(uploadTasks.Append(jobTask));
-
-        await using (var context = new VistaraDbContext(
-                         vistaraOptions,
-                         new FixedTenantScope(TestIds.Tenant)))
-        {
-            int uploadCount = await context.UploadSessions.CountAsync(cancellationToken);
-            int jobCount = await context.Jobs.CountAsync(cancellationToken);
-            if (uploadCount != UploadClients * UploadsPerClient || jobCount != Jobs)
+            await using (var context = new VistaraDbContext(
+                             vistaraOptions,
+                             new FixedTenantScope(TestIds.Tenant)))
             {
-                operationErrors++;
+                await context.Database.EnsureCreatedAsync(cancellationToken);
+                await context.Database.ExecuteSqlRawAsync(
+                    "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;",
+                    cancellationToken);
+                await SeedTenantAsync(context, cancellationToken);
             }
-        }
 
-        SqliteConnection.ClearAllPools();
-        DeleteDatabase(databasePath);
-        return (busyErrors, operationErrors);
+            int busyErrors = 0;
+            int operationErrors = 0;
+            var errorDetails = new ConcurrentQueue<string>();
+            void RecordBusy(Exception exception)
+            {
+                Interlocked.Increment(ref busyErrors);
+                errorDetails.Enqueue(ExceptionSummary.Create("SQLite busy", exception));
+            }
+
+            void RecordError(Exception exception)
+            {
+                Interlocked.Increment(ref operationErrors);
+                errorDetails.Enqueue(ExceptionSummary.Create(
+                    "Contention operation failed",
+                    exception));
+            }
+
+            var start = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            Task[] uploadTasks = Enumerable.Range(0, UploadClients)
+                .Select(client => RunUploadClientAsync(
+                    client,
+                    start.Task,
+                    vistaraOptions,
+                    RecordBusy,
+                    RecordError,
+                    cancellationToken))
+                .ToArray();
+            Task jobTask = RunJobWorkerAsync(
+                start.Task,
+                jobOptions,
+                RecordBusy,
+                RecordError,
+                cancellationToken);
+            start.SetResult();
+            await Task.WhenAll(uploadTasks.Append(jobTask));
+
+            await using (var context = new VistaraDbContext(
+                             vistaraOptions,
+                             new FixedTenantScope(TestIds.Tenant)))
+            {
+                int uploadCount =
+                    await context.UploadSessions.CountAsync(cancellationToken);
+                int jobCount = await context.Jobs.CountAsync(cancellationToken);
+                if (uploadCount != UploadClients * UploadsPerClient ||
+                    jobCount != Jobs)
+                {
+                    RecordError(new InvalidOperationException(
+                        $"Persisted {uploadCount}/{UploadClients * UploadsPerClient} " +
+                        $"uploads and {jobCount}/{Jobs} jobs."));
+                }
+            }
+
+            string detail = busyErrors == 0 && operationErrors == 0
+                ? $"Persisted {UploadClients * UploadsPerClient} upload sessions " +
+                  $"and {Jobs} jobs without SQLITE_BUSY or operation failures."
+                : string.Join(" | ", errorDetails.Take(3));
+            return new SqliteContentionResult(
+                busyErrors,
+                operationErrors,
+                detail);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabase(databasePath);
+        }
     }
 
     private static async Task RunUploadClientAsync(
         int client,
         Task start,
         DbContextOptions<VistaraDbContext> options,
-        Action onBusy,
-        Action onError,
+        Action<Exception> onBusy,
+        Action<Exception> onError,
         CancellationToken cancellationToken)
     {
         await start;
@@ -119,11 +158,11 @@ internal static class SqliteContentionScenario
             }
             catch (Exception exception) when (IsBusy(exception))
             {
-                onBusy();
+                onBusy(exception);
             }
-            catch (Exception)
+            catch (Exception exception)
             {
-                onError();
+                onError(exception);
             }
         }
     }
@@ -131,8 +170,8 @@ internal static class SqliteContentionScenario
     private static async Task RunJobWorkerAsync(
         Task start,
         DbContextOptions<JobDbContext> options,
-        Action onBusy,
-        Action onError,
+        Action<Exception> onBusy,
+        Action<Exception> onError,
         CancellationToken cancellationToken)
     {
         await start;
@@ -160,16 +199,17 @@ internal static class SqliteContentionScenario
                     "00-performance");
                 if ((await queue.EnqueueAsync(job, cancellationToken)).IsFailure)
                 {
-                    onError();
+                    onError(new InvalidOperationException(
+                        $"Enqueuing performance job {index} failed."));
                 }
             }
             catch (Exception exception) when (IsBusy(exception))
             {
-                onBusy();
+                onBusy(exception);
             }
-            catch (Exception)
+            catch (Exception exception)
             {
-                onError();
+                onError(exception);
             }
         }
 
@@ -188,16 +228,17 @@ internal static class SqliteContentionScenario
                 Jobs);
             if ((await queue.LeaseAsync(request, cancellationToken)).IsFailure)
             {
-                onError();
+                onError(new InvalidOperationException(
+                    "Leasing the seeded performance jobs failed."));
             }
         }
         catch (Exception exception) when (IsBusy(exception))
         {
-            onBusy();
+            onBusy(exception);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            onError();
+            onError(exception);
         }
     }
 

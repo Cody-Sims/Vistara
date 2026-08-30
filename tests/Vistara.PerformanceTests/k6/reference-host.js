@@ -9,13 +9,16 @@ const authorization = __ENV.VISTARA_AUTHORIZATION || '';
 const derivativeUrl = __ENV.VISTARA_DERIVATIVE_URL || '';
 const derivativeAuthorization = __ENV.VISTARA_DERIVATIVE_AUTHORIZATION || '';
 const runUploads = (__ENV.VISTARA_RUN_UPLOADS || '').toLowerCase() === 'true';
+const uploadRunId = __ENV.VISTARA_UPLOAD_RUN_ID || '';
 const managementPath = __ENV.VISTARA_MANAGEMENT_PATH || '/api/v1/assets?limit=60';
+const managementMinimumItems = Number.parseInt(
+  __ENV.VISTARA_MANAGEMENT_MIN_ITEMS || '60',
+  10);
 const summaryPath = __ENV.VISTARA_K6_SUMMARY ||
   'tests/Vistara.PerformanceTests/artifacts/k6-reference-summary.json';
 
 const managementDuration = new Trend('vistara_management_duration', true);
 const derivativeWaiting = new Trend('vistara_derivative_waiting', true);
-const uploadFlowDuration = new Trend('vistara_upload_flow_duration', true);
 const uploadErrors = new Counter('vistara_upload_errors');
 const referenceErrors = new Counter('vistara_reference_errors');
 
@@ -44,21 +47,21 @@ if (derivativeUrl) {
 }
 
 if (runUploads) {
-  scenarios.upload_job_concurrency = {
+  scenarios.upload_cleanup_concurrency = {
     executor: 'constant-vus',
-    exec: 'uploadAndCommit',
+    exec: 'uploadAndAbort',
     vus: 4,
     duration: __ENV.VISTARA_K6_DURATION || '30s',
   };
 }
 
 const thresholds = {
-  vistara_management_duration: ['p(95)<200'],
+  vistara_management_duration: ['p(95)<=200'],
   vistara_reference_errors: ['count==0'],
   http_req_failed: ['rate<0.01'],
 };
 if (derivativeUrl) {
-  thresholds.vistara_derivative_waiting = ['p(95)<100'];
+  thresholds.vistara_derivative_waiting = ['p(95)<=100'];
 }
 if (runUploads) {
   thresholds.vistara_upload_errors = ['count==0'];
@@ -76,7 +79,31 @@ export function setup() {
       'VISTARA_BASE_URL and VISTARA_AUTHORIZATION are required; no fallback host is used.');
   }
 
-  return { baseUrl, authorization };
+  if (!Number.isInteger(managementMinimumItems) || managementMinimumItems < 1) {
+    throw new Error('VISTARA_MANAGEMENT_MIN_ITEMS must be a positive integer.');
+  }
+
+  if (runUploads && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/.test(uploadRunId)) {
+    throw new Error(
+      'VISTARA_UPLOAD_RUN_ID is required for uploads and must be a stable 1-40 character identifier.');
+  }
+
+  let derivativeTarget = '';
+  if (derivativeUrl) {
+    derivativeTarget = absoluteUrl(baseUrl, derivativeUrl);
+    const response = http.get(derivativeTarget, {
+      headers: derivativeAuthorization
+        ? { Authorization: derivativeAuthorization }
+        : {},
+      tags: { budget: 'warm-derivative-preflight' },
+    });
+    if (!validDerivative(response)) {
+      throw new Error(
+        `VISTARA_DERIVATIVE_URL did not return a non-empty immutable image (status ${response.status}).`);
+    }
+  }
+
+  return { baseUrl, authorization, derivativeTarget };
 }
 
 export function managementRead(data) {
@@ -86,10 +113,17 @@ export function managementRead(data) {
     tags: { budget: 'warm-management-get' },
   });
   managementDuration.add(response.timings.duration);
+  const document = responseJson(response);
   const valid = check(response, {
     'management read is 200': (value) => value.status === 200,
     'management read has JSON': (value) =>
-      (value.headers['Content-Type'] || '').includes('application/json'),
+      header(value, 'content-type').includes('application/json'),
+    'management read returns the populated asset page': () =>
+      Array.isArray(document && document.items) &&
+      document.items.length >= managementMinimumItems,
+    'management read has another page on the reference dataset': () =>
+      typeof (document && document.nextCursor) === 'string' &&
+      document.nextCursor.length > 0,
   });
   if (!valid) {
     referenceErrors.add(1);
@@ -97,10 +131,7 @@ export function managementRead(data) {
 }
 
 export function warmDerivative(data) {
-  const target = derivativeUrl.startsWith('http')
-    ? derivativeUrl
-    : `${data.baseUrl}${derivativeUrl}`;
-  const response = http.get(target, {
+  const response = http.get(data.derivativeTarget, {
     headers: derivativeAuthorization
       ? { Authorization: derivativeAuthorization }
       : {},
@@ -108,22 +139,19 @@ export function warmDerivative(data) {
   });
   derivativeWaiting.add(response.timings.waiting);
   const valid = check(response, {
-    'warm derivative is 200': (value) => value.status === 200,
-    'warm derivative is immutable': (value) =>
-      (value.headers['Cache-Control'] || '').includes('immutable'),
+    'warm derivative is a non-empty immutable image': validDerivative,
   });
   if (!valid) {
     referenceErrors.add(1);
   }
 }
 
-export function uploadAndCommit(data) {
+export function uploadAndAbort(data) {
   uploadErrors.add(0);
-  const started = Date.now();
   const image = encoding.b64decode(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
     'std');
-  const key = `perf-${__VU}-${__ITER}-${Date.now()}`;
+  const key = `perf-${uploadRunId}-${__VU}-${__ITER}`;
   const create = http.post(
     `${data.baseUrl}/api/v1/uploads`,
     JSON.stringify({
@@ -146,43 +174,47 @@ export function uploadAndCommit(data) {
   }
 
   const session = create.json();
-  const contentUrl = session.plan && session.plan.contentUrl;
-  if (!contentUrl) {
+  const uploadId = session && session.uploadId;
+  const plan = session && session.plan;
+  let expectedVersion = header(create, 'etag');
+  if (!uploadId || !plan || !expectedVersion) {
     uploadErrors.add(1);
     return;
   }
 
-  const content = http.put(
-    contentUrl.startsWith('http') ? contentUrl : `${data.baseUrl}${contentUrl}`,
-    image,
-    {
-      headers: {
-        Authorization: data.authorization,
-        'Content-Type': 'image/png',
-      },
+  const request = uploadRequest(data, plan, expectedVersion);
+  if (!request) {
+    uploadErrors.add(1);
+  } else {
+    const content = http.request(request.method, request.url, image, {
+      headers: request.headers,
       tags: { budget: 'upload-content' },
     });
-  if (!check(content, { 'proxy content succeeds': (value) => [200, 204].includes(value.status) })) {
-    uploadErrors.add(1);
-    return;
+    if (!check(content, {
+      'declared image bytes reach the issued upload target': (value) =>
+        [200, 201, 204].includes(value.status),
+    })) {
+      uploadErrors.add(1);
+    } else if (request.updatesSessionVersion) {
+      expectedVersion = header(content, 'etag') || expectedVersion;
+    }
   }
 
-  const commit = http.post(
-    `${data.baseUrl}/api/v1/uploads/${session.uploadId}/commit`,
+  const cleanup = http.del(
+    `${data.baseUrl}/api/v1/uploads/${uploadId}`,
     null,
     {
       headers: {
         Authorization: data.authorization,
-        'Idempotency-Key': `${key}-commit`,
-        'If-Match': header(content, 'etag') || header(create, 'etag'),
+        'If-Match': expectedVersion,
       },
-      tags: { budget: 'upload-commit' },
+      tags: { budget: 'upload-cleanup' },
     });
-  if (!check(commit, { 'upload commit queues work': (value) => [200, 202].includes(value.status) })) {
+  if (!check(cleanup, {
+    'performance upload staging is aborted': (value) => value.status === 204,
+  })) {
     uploadErrors.add(1);
   }
-
-  uploadFlowDuration.add(Date.now() - started);
 }
 
 export function handleSummary(data) {
@@ -202,7 +234,7 @@ export function handleSummary(data) {
       status: metricValue(data, 'vistara_reference_errors', 'count') === 0
         ? 'passed'
         : 'failed',
-      detail: `Measured ${baseUrl} without substituting a fallback host; invalid responses are counted.`,
+      detail: `Measured a populated asset page and immutable derivative on ${baseUrl}; upload runs abort their staging sessions.`,
     }],
   };
   return {
@@ -230,4 +262,50 @@ function header(response, name) {
   const target = name.toLowerCase();
   const key = Object.keys(response.headers).find((value) => value.toLowerCase() === target);
   return key ? response.headers[key] : '';
+}
+
+function absoluteUrl(origin, path) {
+  return path.startsWith('http') ? path : `${origin}${path}`;
+}
+
+function responseJson(response) {
+  try {
+    return response.json();
+  } catch (_) {
+    return null;
+  }
+}
+
+function validDerivative(response) {
+  return response.status === 200 &&
+    header(response, 'content-type').toLowerCase().startsWith('image/') &&
+    header(response, 'cache-control').toLowerCase().includes('immutable') &&
+    response.body &&
+    response.body.length > 0;
+}
+
+function uploadRequest(data, plan, expectedVersion) {
+  if (plan.contentUrl) {
+    return {
+      method: 'PUT',
+      url: absoluteUrl(data.baseUrl, plan.contentUrl),
+      headers: {
+        Authorization: data.authorization,
+        'Content-Type': 'image/png',
+        'If-Match': expectedVersion,
+      },
+      updatesSessionVersion: true,
+    };
+  }
+
+  if (plan.request && plan.request.method && plan.request.url) {
+    return {
+      method: plan.request.method,
+      url: absoluteUrl(data.baseUrl, plan.request.url),
+      headers: plan.request.headers || {},
+      updatesSessionVersion: false,
+    };
+  }
+
+  return null;
 }

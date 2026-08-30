@@ -23,7 +23,10 @@
     "VISTARA_AUTHORIZATION": "required",
     "VISTARA_DERIVATIVE_URL": "required for CDN-warm derivative",
     "VISTARA_DERIVATIVE_AUTHORIZATION": "optional; public CDN runs should omit it",
-    "VISTARA_RUN_UPLOADS": "set true for upload/job concurrency",
-    "VISTARA_GALLERY_URL": "required for Chromium frontend budgets"
+    "VISTARA_RUN_UPLOADS": "set true for upload concurrency with abort cleanup",
+    "VISTARA_UPLOAD_RUN_ID": "required with uploads; stable unique CI run identifier",
+    "VISTARA_MANAGEMENT_MIN_ITEMS": "optional; defaults to 60",
+    "VISTARA_GALLERY_URL": "required populated /library URL for Chromium frontend budgets",
+    "VISTARA_BROWSER_AUTHORIZATION": "optional bearer/API-key header for the gallery and API requests"
   }
 }

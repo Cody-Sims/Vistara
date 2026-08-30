@@ -68,10 +68,18 @@ internal static class SmokeScenarios
                 detail));
         }
 
-        (int busyErrors, int operationErrors) =
+        SqliteContentionResult contention =
             await SqliteContentionScenario.RunAsync(paths, cancellationToken);
-        measurements["sqlite-busy-errors"] = Measurement.Available(busyErrors);
-        measurements["upload-job-errors"] = Measurement.Available(operationErrors);
+        measurements["sqlite-busy-errors"] =
+            Measurement.Available(contention.BusyErrors);
+        measurements["upload-job-errors"] =
+            Measurement.Available(contention.OperationErrors);
+        prerequisites.Add(new PrerequisiteResult(
+            "SQLite upload and job contention",
+            contention.BusyErrors == 0 && contention.OperationErrors == 0
+                ? BudgetStatus.Passed
+                : BudgetStatus.Failed,
+            contention.Detail));
 
         foreach ((string id, Measurement measurement) in
                  await FrontendBudgetScenario.MeasureAsync(paths, cancellationToken))

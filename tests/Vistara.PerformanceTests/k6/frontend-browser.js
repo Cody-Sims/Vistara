@@ -2,6 +2,7 @@ import { browser } from 'k6/browser';
 import { Trend } from 'k6/metrics';
 
 const galleryUrl = __ENV.VISTARA_GALLERY_URL || '';
+const browserAuthorization = __ENV.VISTARA_BROWSER_AUTHORIZATION || '';
 const summaryPath = __ENV.VISTARA_K6_BROWSER_SUMMARY ||
   'tests/Vistara.PerformanceTests/artifacts/k6-browser-summary.json';
 
@@ -21,10 +22,10 @@ export const options = {
     },
   },
   thresholds: {
-    browser_web_vital_lcp: ['p(75)<2500'],
-    browser_web_vital_inp: ['p(75)<200'],
-    browser_web_vital_cls: ['p(75)<0.1'],
-    vistara_initial_image_kib: ['max<500'],
+    browser_web_vital_lcp: ['p(75)<=2500'],
+    browser_web_vital_inp: ['p(75)<=200'],
+    browser_web_vital_cls: ['p(75)<=0.1'],
+    vistara_initial_image_kib: ['max<=500'],
     vistara_thumbnail_nodes: ['max<=400'],
     vistara_high_priority_images: ['max<=1'],
     vistara_scroll_long_task_ms: ['max<=50'],
@@ -39,39 +40,74 @@ export default async function () {
 
   const page = await browser.newPage();
   try {
+    if (browserAuthorization) {
+      await page.setExtraHTTPHeaders({
+        Authorization: browserAuthorization,
+      });
+    }
+
     await page.goto(galleryUrl, { waitUntil: 'networkidle' });
-    const observation = await page.evaluate(async () => {
+    await page.waitForSelector('[aria-label="Library timeline"]', {
+      state: 'visible',
+    });
+    await page.waitForSelector('[data-asset-id] img', { state: 'visible' });
+
+    const initial = await page.evaluate(() => {
+      const resources = performance.getEntriesByType('resource');
+      const visibleImageBytes = resources
+        .filter((entry) => entry.initiatorType === 'img')
+        .reduce(
+          (total, entry) =>
+            total + (entry.transferSize || entry.encodedBodySize || 0),
+          0);
+      const memory = performance.memory && performance.memory.usedJSHeapSize;
+      return {
+        visibleImageKiB: visibleImageBytes / 1024,
+        assetNodes: document.querySelectorAll('[data-asset-id]').length,
+        thumbnailNodes: document.querySelectorAll('[data-asset-id] img').length,
+        highPriorityImages:
+          document.querySelectorAll('[data-asset-id] img[fetchpriority="high"]').length,
+        jsHeapMiB: memory ? memory / 1024 / 1024 : null,
+      };
+    });
+    if (
+      initial.assetNodes === 0 ||
+      initial.thumbnailNodes === 0 ||
+      initial.visibleImageKiB <= 0
+    ) {
+      throw new Error(
+        'The gallery did not render populated asset cards with transferred image bytes.');
+    }
+
+    await page.locator('button[aria-label="List view"]').click();
+    await page.locator('button[aria-label="Grid view"]').click();
+    const longestTaskMs = await page.evaluate(async () => {
       const tasks = [];
       const observer = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
           tasks.push(entry.duration);
         }
       });
-      observer.observe({ type: 'longtask', buffered: true });
-      window.scrollTo(0, document.body.scrollHeight);
+      observer.observe({ type: 'longtask' });
+      const scroller = document.querySelector('[aria-label="Library timeline"]');
+      if (!(scroller instanceof HTMLElement) || scroller.scrollHeight <= scroller.clientHeight) {
+        observer.disconnect();
+        throw new Error('The populated library timeline is not scrollable.');
+      }
+
+      scroller.scrollTo(0, scroller.scrollHeight);
       await new Promise((resolve) =>
         requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      await new Promise((resolve) => setTimeout(resolve, 100));
       observer.disconnect();
-
-      const resources = performance.getEntriesByType('resource');
-      const visibleImageBytes = resources
-        .filter((entry) => entry.initiatorType === 'img')
-        .reduce((total, entry) => total + (entry.transferSize || 0), 0);
-      const memory = performance.memory && performance.memory.usedJSHeapSize;
-      return {
-        visibleImageKiB: visibleImageBytes / 1024,
-        thumbnailNodes: document.querySelectorAll('img').length,
-        highPriorityImages: document.querySelectorAll('img[fetchpriority="high"]').length,
-        longestTaskMs: tasks.length ? Math.max(...tasks) : 0,
-        jsHeapMiB: memory ? memory / 1024 / 1024 : null,
-      };
+      return tasks.length ? Math.max(...tasks) : 0;
     });
-    imageKiB.add(observation.visibleImageKiB);
-    thumbnailNodes.add(observation.thumbnailNodes);
-    highPriorityImages.add(observation.highPriorityImages);
-    scrollLongTask.add(observation.longestTaskMs);
-    if (observation.jsHeapMiB !== null) {
-      jsHeapMiB.add(observation.jsHeapMiB);
+    imageKiB.add(initial.visibleImageKiB);
+    thumbnailNodes.add(initial.thumbnailNodes);
+    highPriorityImages.add(initial.highPriorityImages);
+    scrollLongTask.add(longestTaskMs);
+    if (initial.jsHeapMiB !== null) {
+      jsHeapMiB.add(initial.jsHeapMiB);
     }
   } finally {
     await page.close();
@@ -93,7 +129,7 @@ export function handleSummary(data) {
     prerequisites: [{
       name: 'k6 Chromium browser',
       status: 'passed',
-      detail: `Measured ${galleryUrl} with browser performance entries.`,
+      detail: `Measured populated library asset cards, initial image resources, view interactions, and timeline scrolling at ${galleryUrl}.`,
     }],
   };
   return {

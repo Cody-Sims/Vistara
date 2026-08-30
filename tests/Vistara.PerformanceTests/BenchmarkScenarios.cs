@@ -3,6 +3,7 @@ using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Reports;
 using BenchmarkDotNet.Running;
+using Perfolizer.Mathematics.OutlierDetection;
 
 namespace Vistara.PerformanceTests;
 
@@ -24,7 +25,8 @@ internal static class BenchmarkScenarios
                 .WithWarmupCount(3)
                 .WithIterationCount(8)
                 .WithInvocationCount(1)
-                .WithUnrollFactor(1))
+                .WithUnrollFactor(1)
+                .WithOutlierMode(OutlierMode.DontRemove))
             .WithArtifactsPath(artifacts);
 
         bool transformAvailable;
@@ -43,70 +45,83 @@ internal static class BenchmarkScenarios
                 exception);
         }
 
-        Summary management = BenchmarkRunner.Run<ManagementReadBenchmarks>(config);
-        Measurement managementMeasurement = MeasurementFromSummary(management);
-        var measurements = new Dictionary<string, Measurement>(StringComparer.Ordinal)
+        string originalWorkingDirectory = Environment.CurrentDirectory;
+        try
         {
-            ["management-query-p95-ms"] =
-                managementMeasurement,
-            ["metadata-page-brotli-kib"] =
-                Measurement.Skipped("Use smoke mode for compressed response size."),
-        };
-        var prerequisites = new List<PrerequisiteResult>
-        {
-            new(
-                "BenchmarkDotNet management read",
-                managementMeasurement.Value is not null
-                    ? BudgetStatus.Passed
-                    : BudgetStatus.Unavailable,
-                managementMeasurement.Value is not null
-                    ? "RelationalAssetQueryStore ran against a seeded SQLite database."
-                    : managementMeasurement.UnavailableReason ??
-                      "BenchmarkDotNet did not produce a management measurement."),
-        };
+            Environment.CurrentDirectory = paths.ProjectDirectory;
+            Summary management =
+                BenchmarkRunner.Run<ManagementReadBenchmarks>(config);
+            Measurement managementMeasurement = MeasurementFromSummary(management);
+            var measurements =
+                new Dictionary<string, Measurement>(StringComparer.Ordinal)
+                {
+                    ["management-query-p95-ms"] = managementMeasurement,
+                    ["metadata-page-brotli-kib"] =
+                        Measurement.Skipped(
+                            "Use smoke mode for compressed response size."),
+                };
+            var prerequisites = new List<PrerequisiteResult>
+            {
+                new(
+                    "BenchmarkDotNet management read",
+                    managementMeasurement.Value is not null
+                        ? BudgetStatus.Passed
+                        : BudgetStatus.Unavailable,
+                    managementMeasurement.Value is not null
+                        ? "RelationalAssetQueryStore ran against a seeded SQLite database."
+                        : managementMeasurement.UnavailableReason ??
+                          "BenchmarkDotNet did not produce a management measurement."),
+            };
 
-        if (transformAvailable)
-        {
-            Summary transform = BenchmarkRunner.Run<ColdTransformBenchmarks>(config);
-            Measurement transformMeasurement = MeasurementFromSummary(transform);
-            measurements["cold-transform-p95-ms"] = transformMeasurement;
-            measurements["transform-managed-allocation-mib"] =
-                Measurement.Skipped(
-                    "MemoryDiagnoser output is available in the BenchmarkDotNet artifact.");
-            prerequisites.Add(new PrerequisiteResult(
-                "BenchmarkDotNet libvips transform",
-                transformMeasurement.Value is not null
-                    ? BudgetStatus.Passed
-                    : BudgetStatus.Unavailable,
-                transformMeasurement.Value is not null
-                    ? "NetVipsImageProcessor transformed a fresh 2 MP JPEG to 1200 px WebP."
-                    : transformMeasurement.UnavailableReason ??
-                      "BenchmarkDotNet did not produce a transform measurement."));
-        }
-        else
-        {
-            string detail = transformUnavailable!;
-            measurements["cold-transform-p95-ms"] = Measurement.Unavailable(detail);
-            measurements["transform-managed-allocation-mib"] =
-                Measurement.Unavailable(detail);
-            prerequisites.Add(new PrerequisiteResult(
-                "BenchmarkDotNet libvips transform",
-                BudgetStatus.Unavailable,
-                detail));
-        }
+            if (transformAvailable)
+            {
+                Summary transform =
+                    BenchmarkRunner.Run<ColdTransformBenchmarks>(config);
+                Measurement transformMeasurement = MeasurementFromSummary(transform);
+                measurements["cold-transform-p95-ms"] = transformMeasurement;
+                measurements["transform-managed-allocation-mib"] =
+                    Measurement.Skipped(
+                        "MemoryDiagnoser output is available in the BenchmarkDotNet artifact.");
+                prerequisites.Add(new PrerequisiteResult(
+                    "BenchmarkDotNet libvips transform",
+                    transformMeasurement.Value is not null
+                        ? BudgetStatus.Passed
+                        : BudgetStatus.Unavailable,
+                    transformMeasurement.Value is not null
+                        ? "NetVipsImageProcessor transformed a fresh 2 MP JPEG to 1200 px WebP."
+                        : transformMeasurement.UnavailableReason ??
+                          "BenchmarkDotNet did not produce a transform measurement."));
+            }
+            else
+            {
+                string detail = transformUnavailable!;
+                measurements["cold-transform-p95-ms"] =
+                    Measurement.Unavailable(detail);
+                measurements["transform-managed-allocation-mib"] =
+                    Measurement.Unavailable(detail);
+                prerequisites.Add(new PrerequisiteResult(
+                    "BenchmarkDotNet libvips transform",
+                    BudgetStatus.Unavailable,
+                    detail));
+            }
 
-        const string referenceDetail =
-            "Reference HTTP and browser budgets require the committed k6 scenarios.";
-        foreach (string id in BudgetCatalog.All
-                     .Select(budget => budget.Id)
-                     .Where(id => !measurements.ContainsKey(id)))
-        {
-            measurements[id] = Measurement.Unavailable(referenceDetail);
-        }
+            const string referenceDetail =
+                "Reference HTTP and browser budgets require the committed k6 scenarios.";
+            foreach (string id in BudgetCatalog.All
+                         .Select(budget => budget.Id)
+                         .Where(id => !measurements.ContainsKey(id)))
+            {
+                measurements[id] = Measurement.Unavailable(referenceDetail);
+            }
 
-        return Task.FromResult<(
-            IReadOnlyDictionary<string, Measurement>,
-            IReadOnlyList<PrerequisiteResult>)>((measurements, prerequisites));
+            return Task.FromResult<(
+                IReadOnlyDictionary<string, Measurement>,
+                IReadOnlyList<PrerequisiteResult>)>((measurements, prerequisites));
+        }
+        finally
+        {
+            Environment.CurrentDirectory = originalWorkingDirectory;
+        }
     }
 
     private static Measurement MeasurementFromSummary(Summary summary)

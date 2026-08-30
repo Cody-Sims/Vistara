@@ -6,7 +6,9 @@ internal static class HarnessSelfTests
     {
         PercentileUsesNearestRank();
         RequiredMeasurementOverBudgetFails();
+        InvalidAvailableMeasurementIsRejected();
         MissingPrerequisiteIsUnavailable();
+        RequiredPrerequisiteUnavailableFails();
         BenchmarkTypesAreRunnable();
     }
 
@@ -32,6 +34,33 @@ internal static class HarnessSelfTests
         Require(
             result.Status == BudgetStatus.Unavailable,
             "Missing prerequisites must not be reported as passing.");
+    }
+
+    private static void InvalidAvailableMeasurementIsRejected()
+    {
+        bool rejected = false;
+        try
+        {
+            _ = Measurement.Available(-1);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            rejected = true;
+        }
+
+        Require(rejected, "Negative performance measurements must be rejected.");
+    }
+
+    private static void RequiredPrerequisiteUnavailableFails()
+    {
+        bool failed = ExitCodeEvaluator.ShouldFail(
+            [],
+            [new PrerequisiteResult(
+                "reference host",
+                BudgetStatus.Unavailable,
+                "Reference host is not configured.")],
+            requireReference: true);
+        Require(failed, "Release validation must fail on unavailable prerequisites.");
     }
 
     private static void BenchmarkTypesAreRunnable()

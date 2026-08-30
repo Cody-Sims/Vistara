@@ -22,7 +22,18 @@ internal sealed record Measurement(
     string? UnavailableReason,
     string? SkippedReason)
 {
-    internal static Measurement Available(double value) => new(value, null, null);
+    internal static Measurement Available(double value)
+    {
+        if (!double.IsFinite(value) || value < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(value),
+                value,
+                "Performance measurements must be finite and non-negative.");
+        }
+
+        return new Measurement(value, null, null);
+    }
 
     internal static Measurement Unavailable(string reason) => new(null, reason, null);
 
@@ -107,6 +118,25 @@ internal sealed record PrerequisiteResult(
     string Name,
     BudgetStatus Status,
     string Detail);
+
+internal static class ExitCodeEvaluator
+{
+    internal static bool ShouldFail(
+        IReadOnlyList<BudgetResult> budgets,
+        IReadOnlyList<PrerequisiteResult> prerequisites,
+        bool requireReference) =>
+        budgets.Any(result =>
+            result.Required && result.Status == BudgetStatus.Failed) ||
+        prerequisites.Any(result => result.Status == BudgetStatus.Failed) ||
+        requireReference &&
+        (
+            budgets.Any(result =>
+                result.Required &&
+                result.Status is BudgetStatus.Unavailable or BudgetStatus.Skipped) ||
+            prerequisites.Any(result =>
+                result.Status is BudgetStatus.Unavailable or BudgetStatus.Skipped)
+        );
+}
 
 internal sealed record PerformanceEnvironment(
     string Framework,
