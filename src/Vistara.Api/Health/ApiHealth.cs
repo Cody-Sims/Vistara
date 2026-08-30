@@ -1,6 +1,5 @@
 using System.Data;
 using System.Data.Common;
-using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
@@ -40,31 +39,113 @@ public static class ApiHealthServiceCollectionExtensions
 public static class ApiHealthEndpointRouteBuilderExtensions
 {
     public static IEndpointRouteBuilder MapVistaraApiHealthEndpoints(
-        this IEndpointRouteBuilder endpoints)
+        this IEndpointRouteBuilder endpoints) =>
+        endpoints.MapVistaraApiHealthEndpoints(includeLiveness: true);
+
+    /// <summary>
+    /// Maps the health routes. Hosts whose route table already owns
+    /// <c>/health/live</c> map the dependency routes only; liveness is still
+    /// answered by <see cref="ApiHealthApplicationBuilderExtensions.UseVistaraApiHealth"/>.
+    /// </summary>
+    public static IEndpointRouteBuilder MapVistaraApiHealthEndpoints(
+        this IEndpointRouteBuilder endpoints,
+        bool includeLiveness)
     {
         ArgumentNullException.ThrowIfNull(endpoints);
-        endpoints.MapGet(
-                "/health/live",
-                static (ApiHealthService health, CancellationToken cancellationToken) =>
-                    health.CheckAsync(
-                        HealthEndpointKind.Liveness,
-                        cancellationToken))
-            .AllowAnonymous();
+        if (includeLiveness)
+        {
+            endpoints.MapGet(
+                    "/health/live",
+                    static (HttpContext context) => Write(
+                        context,
+                        HealthEndpointKind.Liveness))
+                .AllowAnonymous();
+        }
+
         endpoints.MapGet(
                 "/health/ready",
-                static (ApiHealthService health, CancellationToken cancellationToken) =>
-                    health.CheckAsync(
-                        HealthEndpointKind.Readiness,
-                        cancellationToken))
+                static (HttpContext context) => Write(
+                    context,
+                    HealthEndpointKind.Readiness))
             .AllowAnonymous();
         endpoints.MapGet(
                 "/health/startup",
-                static (ApiHealthService health, CancellationToken cancellationToken) =>
-                    health.CheckAsync(
-                        HealthEndpointKind.Startup,
-                        cancellationToken))
+                static (HttpContext context) => Write(
+                    context,
+                    HealthEndpointKind.Startup))
             .AllowAnonymous();
         return endpoints;
+    }
+
+    private static Task Write(
+        HttpContext context,
+        HealthEndpointKind endpoint) =>
+        ApiHealthService
+            .Resolve(context.RequestServices)
+            .WriteAsync(context, endpoint, context.RequestAborted);
+}
+
+public static class ApiHealthApplicationBuilderExtensions
+{
+    /// <summary>
+    /// Answers the health paths ahead of rate limiting, authentication, and
+    /// tenant resolution so probes keep working while dependencies are
+    /// degraded, and advertises the dependency routes on the route table.
+    /// </summary>
+    public static IApplicationBuilder UseVistaraApiHealth(
+        this IApplicationBuilder application)
+    {
+        ArgumentNullException.ThrowIfNull(application);
+        if (application is IEndpointRouteBuilder endpoints)
+        {
+            endpoints.MapVistaraApiHealthEndpoints(includeLiveness: false);
+        }
+
+        return application.UseMiddleware<ApiHealthMiddleware>();
+    }
+}
+
+internal sealed class ApiHealthMiddleware(RequestDelegate next)
+{
+    private readonly RequestDelegate _next =
+        next ?? throw new ArgumentNullException(nameof(next));
+
+    public Task InvokeAsync(HttpContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (!HttpMethods.IsGet(context.Request.Method) ||
+            !TryResolve(context.Request.Path, out HealthEndpointKind endpoint))
+        {
+            return _next(context);
+        }
+
+        return ApiHealthService
+            .Resolve(context.RequestServices)
+            .WriteAsync(context, endpoint, context.RequestAborted);
+    }
+
+    private static bool TryResolve(PathString path, out HealthEndpointKind endpoint)
+    {
+        if (path.Equals("/health/live", StringComparison.OrdinalIgnoreCase))
+        {
+            endpoint = HealthEndpointKind.Liveness;
+            return true;
+        }
+
+        if (path.Equals("/health/ready", StringComparison.OrdinalIgnoreCase))
+        {
+            endpoint = HealthEndpointKind.Readiness;
+            return true;
+        }
+
+        if (path.Equals("/health/startup", StringComparison.OrdinalIgnoreCase))
+        {
+            endpoint = HealthEndpointKind.Startup;
+            return true;
+        }
+
+        endpoint = default;
+        return false;
     }
 }
 
@@ -167,20 +248,40 @@ public sealed class ApiHealthService(SafeHealthEvaluator evaluator)
     private readonly SafeHealthEvaluator _evaluator =
         evaluator ?? throw new ArgumentNullException(nameof(evaluator));
 
-    public async Task<ContentHttpResult> CheckAsync(
+    /// <summary>
+    /// Resolves the composed health service, or an evaluator over whatever
+    /// probes are registered, so health never fails with a server error when
+    /// runtime composition is incomplete.
+    /// </summary>
+    internal static ApiHealthService Resolve(IServiceProvider services)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        return services.GetService<ApiHealthService>() ??
+            new ApiHealthService(
+                new SafeHealthEvaluator(
+                    services.GetServices<IHealthDependencyProbe>()));
+    }
+
+    public async Task WriteAsync(
+        HttpContext context,
         HealthEndpointKind endpoint,
         CancellationToken cancellationToken)
     {
         HealthReport report = await _evaluator.EvaluateAsync(
             endpoint,
             cancellationToken);
-        return TypedResults.Text(
+        context.Response.StatusCode = StatusFor(report);
+        context.Response.ContentType = "application/json";
+        context.Response.Headers.CacheControl = "no-store";
+        await context.Response.WriteAsync(
             HealthReportJson.Serialize(report),
-            "application/json",
-            statusCode: report.State == HealthState.Healthy
-                ? StatusCodes.Status200OK
-                : StatusCodes.Status503ServiceUnavailable);
+            cancellationToken);
     }
+
+    private static int StatusFor(HealthReport report) =>
+        report.State == HealthState.Healthy
+            ? StatusCodes.Status200OK
+            : StatusCodes.Status503ServiceUnavailable;
 }
 
 internal abstract class ApiHealthProbe(
