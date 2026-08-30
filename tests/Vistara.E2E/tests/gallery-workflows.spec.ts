@@ -6,7 +6,9 @@ import { readRuntimeState } from '../support/state.js';
 const runtime = readRuntimeState();
 
 test.describe('integrated gallery workflows', () => {
-  test('uploads, browses, organizes, shares, restores, and preserves navigation state', async ({
+  test('uploads, browses, organizes, shares, restores, and preserves navigation state', {
+    tag: '@smoke',
+  }, async ({
     browser,
     browserName,
     page,
