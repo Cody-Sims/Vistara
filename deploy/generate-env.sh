@@ -19,7 +19,9 @@ random_urlsafe() {
 umask 077
 cat >"$output" <<EOF
 VISTARA_IMAGE_TAG=local
+VISTARA_BIND_ADDRESS=127.0.0.1
 VISTARA_HTTP_PORT=8080
+VISTARA_PUBLIC_HOST=vistara.example.invalid
 VISTARA_API_PEPPER=$(openssl rand -base64 32 | tr -d '\n')
 VISTARA_OIDC_PROFILE=local
 VISTARA_OIDC_ISSUER=https://issuer.example.invalid

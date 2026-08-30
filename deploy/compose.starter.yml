@@ -7,6 +7,12 @@ x-api-environment: &api-environment
   Media__Storage__Provider: Local
   Media__Storage__Local__RootPath: /var/lib/vistara/media
   Media__Imaging__Provider: NetVips
+  Security__Hosts__AllowedHosts__0: localhost
+  Security__Hosts__AllowedHosts__1: 127.0.0.1
+  Security__Hosts__AllowedHosts__2: "[::1]"
+  Security__Hosts__AllowedHosts__3: ${VISTARA_PUBLIC_HOST:-vistara.example.invalid}
+  Security__Proxy__KnownProxies__0: 172.31.0.10
+  Security__Proxy__ForwardLimit: "1"
   Platform__Authentication__ApiKeys__CurrentPepperVersion: v1
   Platform__Authentication__ApiKeys__Peppers__v1: ${VISTARA_API_PEPPER:-}
   Platform__Authentication__Jwt__Issuers__0__ProfileId: ${VISTARA_OIDC_PROFILE:-local}
@@ -42,6 +48,7 @@ services:
     tmpfs:
       - /tmp:size=64m,mode=1770,uid=1654,gid=1654,exec
     restart: "no"
+    networks: [backend]
     deploy:
       resources:
         limits:
@@ -58,8 +65,6 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    ports:
-      - "${VISTARA_HTTP_PORT:-8080}:8080"
     volumes:
       - sqlite-data:/var/lib/vistara/data
       - local-media:/var/lib/vistara/media
@@ -72,6 +77,7 @@ services:
       retries: 12
       start_period: 20s
     restart: unless-stopped
+    networks: [backend]
     deploy:
       resources:
         limits:
@@ -107,6 +113,7 @@ services:
       retries: 4
       start_period: 20s
     restart: unless-stopped
+    networks: [backend]
     deploy:
       mode: replicated
       replicas: 1
@@ -114,6 +121,50 @@ services:
         limits:
           cpus: "2.0"
           memory: 1G
+
+  proxy:
+    image: nginxinc/nginx-unprivileged:1.29.1-alpine3.22@sha256:27985295bdb22a1ef8f712863210bd5877c0f3006494a593e86b3fe0fa55467e
+    entrypoint: ["nginx"]
+    command: ["-g", "daemon off;"]
+    user: "101:101"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./nginx/vistara.conf:/etc/nginx/conf.d/default.conf:ro
+    tmpfs:
+      - /tmp:size=32m,mode=1770,uid=101,gid=101
+      - /var/cache/nginx:size=32m,mode=1770,uid=101,gid=101
+    ports:
+      - "${VISTARA_BIND_ADDRESS:-127.0.0.1}:${VISTARA_HTTP_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8080/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      edge:
+      backend:
+        ipv4_address: 172.31.0.10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+
+networks:
+  edge:
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
 
 volumes:
   sqlite-data:

@@ -46,6 +46,9 @@ LABEL org.opencontainers.image.title="Vistara migrations" \
 
 ENV DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp/.net
 
+RUN mkdir --parents /var/lib/vistara/data && \
+    chown "$APP_UID:$APP_UID" /var/lib/vistara/data
+
 COPY --from=build --chmod=0555 /out/vistara-migrate-sqlite /app/
 COPY --from=build --chmod=0555 /out/vistara-migrate-postgres /app/
 COPY --chmod=0555 deploy/containers/migration-entrypoint.sh /usr/local/bin/vistara-migrate

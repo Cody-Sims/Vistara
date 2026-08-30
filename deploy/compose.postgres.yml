@@ -15,6 +15,12 @@ x-s3-environment: &s3-environment
   Media__Imaging__Provider: NetVips
 
 x-api-auth-environment: &api-auth-environment
+  Security__Hosts__AllowedHosts__0: localhost
+  Security__Hosts__AllowedHosts__1: 127.0.0.1
+  Security__Hosts__AllowedHosts__2: "[::1]"
+  Security__Hosts__AllowedHosts__3: ${VISTARA_PUBLIC_HOST:-vistara.example.invalid}
+  Security__Proxy__KnownProxies__0: 172.30.0.10
+  Security__Proxy__ForwardLimit: "1"
   Platform__Authentication__ApiKeys__CurrentPepperVersion: v1
   Platform__Authentication__ApiKeys__Peppers__v1: ${VISTARA_API_PEPPER:-}
   Platform__Authentication__Jwt__Issuers__0__ProfileId: ${VISTARA_OIDC_PROFILE:-local}
@@ -239,7 +245,7 @@ services:
       - /tmp:size=32m,mode=1770,uid=101,gid=101
       - /var/cache/nginx:size=32m,mode=1770,uid=101,gid=101
     ports:
-      - "${VISTARA_HTTP_PORT:-8080}:8080"
+      - "${VISTARA_BIND_ADDRESS:-127.0.0.1}:${VISTARA_HTTP_PORT:-8080}:8080"
     depends_on:
       api:
         condition: service_healthy
@@ -250,7 +256,10 @@ services:
       retries: 6
       start_period: 10s
     restart: unless-stopped
-    networks: [edge, backend]
+    networks:
+      edge:
+      backend:
+        ipv4_address: 172.30.0.10
     deploy:
       resources:
         limits:
@@ -261,6 +270,9 @@ networks:
   edge:
   backend:
     internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
 
 volumes:
   postgres-data:
