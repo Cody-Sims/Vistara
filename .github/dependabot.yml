@@ -1,0 +1,76 @@
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: tuesday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: Update
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+      day: tuesday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: Update
+    groups:
+      dotnet:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: /src/Vistara.Web
+    schedule:
+      interval: weekly
+      day: tuesday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: Update
+    groups:
+      web:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: /tests/Vistara.E2E
+    schedule:
+      interval: weekly
+      day: tuesday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: Update
+    groups:
+      end-to-end:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: /eng
+    schedule:
+      interval: weekly
+      day: tuesday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: Update
+    groups:
+      tooling:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directory: /deploy/containers
+    schedule:
+      interval: weekly
+      day: tuesday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: Update
