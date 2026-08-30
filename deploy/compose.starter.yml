@@ -1,0 +1,120 @@
+name: vistara-starter
+
+x-api-environment: &api-environment
+  ASPNETCORE_ENVIRONMENT: Production
+  ConnectionStrings__Vistara: Data Source=/var/lib/vistara/data/vistara.db;Cache=Shared
+  Persistence__Provider: Sqlite
+  Media__Storage__Provider: Local
+  Media__Storage__Local__RootPath: /var/lib/vistara/media
+  Media__Imaging__Provider: NetVips
+  Platform__Authentication__ApiKeys__CurrentPepperVersion: v1
+  Platform__Authentication__ApiKeys__Peppers__v1: ${VISTARA_API_PEPPER:-}
+  Platform__Authentication__Jwt__Issuers__0__ProfileId: ${VISTARA_OIDC_PROFILE:-local}
+  Platform__Authentication__Jwt__Issuers__0__Issuer: ${VISTARA_OIDC_ISSUER:-https://issuer.example.invalid}
+  Platform__Authentication__Jwt__Issuers__0__Audience: ${VISTARA_OIDC_AUDIENCE:-vistara-api}
+  Platform__Authentication__Jwt__Issuers__0__MetadataAddress: ${VISTARA_OIDC_METADATA_ADDRESS:-https://issuer.example.invalid/.well-known/openid-configuration}
+  Platform__Authentication__Jwt__Issuers__0__AllowedAlgorithms__0: RS256
+
+x-app-security: &app-security
+  user: "1654:1654"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  init: true
+
+services:
+  migrate:
+    image: vistara-migrations:${VISTARA_IMAGE_TAG:-local}
+    build:
+      context: ..
+      dockerfile: deploy/containers/migration.Dockerfile
+    user: "1654:1654"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      MIGRATION_PROVIDER: Sqlite
+      ConnectionStrings__Vistara: Data Source=/var/lib/vistara/data/vistara.db;Cache=Shared
+    volumes:
+      - sqlite-data:/var/lib/vistara/data
+    tmpfs:
+      - /tmp:size=64m,mode=1770,uid=1654,gid=1654,exec
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  api:
+    <<: *app-security
+    image: vistara-api:${VISTARA_IMAGE_TAG:-local}
+    build:
+      context: ..
+      dockerfile: deploy/containers/api.Dockerfile
+    environment: *api-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${VISTARA_HTTP_PORT:-8080}:8080"
+    volumes:
+      - sqlite-data:/var/lib/vistara/data
+      - local-media:/var/lib/vistara/media
+    tmpfs:
+      - /tmp:size=64m,mode=1770,uid=1654,gid=1654
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health/live HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '204' <&3"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  worker:
+    <<: *app-security
+    image: vistara-worker:${VISTARA_IMAGE_TAG:-local}
+    build:
+      context: ..
+      dockerfile: deploy/containers/worker.Dockerfile
+    environment:
+      <<: *api-environment
+      DOTNET_ENVIRONMENT: Production
+      Worker__InstanceId: starter-worker
+      Worker__Jobs__MaximumConcurrency: "1"
+      Worker__ImagingLimits__MaximumConcurrentTransforms: "1"
+      Worker__ImagingLimits__ScratchDirectory: /var/lib/vistara/scratch
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - sqlite-data:/var/lib/vistara/data
+      - local-media:/var/lib/vistara/media
+    tmpfs:
+      - /tmp:size=64m,mode=1770,uid=1654,gid=1654
+      - /var/lib/vistara/scratch:size=512m,mode=1770,uid=1654,gid=1654
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+      start_period: 20s
+    restart: unless-stopped
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+volumes:
+  sqlite-data:
+  local-media:
