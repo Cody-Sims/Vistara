@@ -69,6 +69,34 @@
   background: var(--color-surface-raised);
 }
 
+.dropZone {
+  transition:
+    border-color var(--duration-fast) ease-out,
+    background-color var(--duration-fast) ease-out,
+    scale var(--duration-fast) ease-out;
+}
+
+.dropZone[data-drag-active="true"] {
+  border-color: var(--color-accent-strong);
+  border-style: solid;
+  background: var(--color-accent-soft);
+  scale: 1.01;
+}
+
+.dropZone[data-drag-active="true"] .dropIcon {
+  background: var(--color-accent-strong);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dropZone {
+    transition: none;
+  }
+
+  .dropZone[data-drag-active="true"] {
+    scale: 1;
+  }
+}
+
 .dropIcon {
   display: grid;
   place-items: center;

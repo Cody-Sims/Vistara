@@ -100,4 +100,25 @@ describe('responsive image delivery', () => {
       '/media/viewer-2400.webp',
     );
   });
+
+  it('serves a shared asset that carries no gallery status', () => {
+    const shared = {
+      title: 'Alpine lake',
+      width: 4000,
+      height: 3000,
+      renditions: asset.renditions,
+    };
+
+    expect(buildResponsiveImage(shared, 'share', true)).toEqual({
+      alt: 'Alpine lake',
+      src: '/media/viewer-2400.webp',
+      srcSet:
+        '/media/grid-512.jpg 512w, /media/grid-1024.webp 1024w, /media/viewer-2400.webp 2400w',
+      sizes: '(max-width: 40rem) 100vw, (max-width: 70rem) 50vw, 33vw',
+      loading: 'eager',
+      fetchPriority: 'high',
+      width: 4000,
+      height: 3000,
+    });
+  });
 });

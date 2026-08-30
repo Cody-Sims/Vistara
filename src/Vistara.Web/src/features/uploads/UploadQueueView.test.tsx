@@ -132,4 +132,43 @@ describe('uploads view', () => {
     window.dispatchEvent(completeEvent);
     expect(completeEvent.defaultPrevented).toBe(false);
   });
+
+  it('shows drag feedback while images hover the drop zone', () => {
+    const { queue } = createQueue();
+    render(<UploadQueueView queue={queue} />);
+
+    const dropZone = screen.getByRole('button', {
+      name: /Choose or drop images here/,
+    });
+
+    expect(dropZone).toHaveAttribute('data-drag-active', 'false');
+
+    fireEvent.dragEnter(dropZone, { dataTransfer: { files: [] } });
+    fireEvent.dragOver(dropZone, { dataTransfer: { files: [] } });
+
+    expect(dropZone).toHaveAttribute('data-drag-active', 'true');
+    expect(screen.getByText('Release to add these images.')).toBeInTheDocument();
+
+    fireEvent.dragLeave(dropZone);
+
+    expect(dropZone).toHaveAttribute('data-drag-active', 'false');
+  });
+
+  it('clears drag feedback once files are dropped', () => {
+    const { queue } = createQueue();
+    render(<UploadQueueView queue={queue} />);
+
+    const dropZone = screen.getByRole('button', {
+      name: /Choose or drop images here/,
+    });
+    const file = new File(['x'], 'dropped.jpg', { type: 'image/jpeg' });
+
+    fireEvent.dragOver(dropZone, { dataTransfer: { files: [file] } });
+    fireEvent.drop(dropZone, { dataTransfer: { files: [file] } });
+
+    expect(dropZone).toHaveAttribute('data-drag-active', 'false');
+    expect(screen.getByLabelText('Upload queue')).toHaveTextContent(
+      'dropped.jpg',
+    );
+  });
 });
