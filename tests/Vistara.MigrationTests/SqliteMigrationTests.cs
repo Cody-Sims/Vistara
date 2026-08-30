@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Vistara.Persistence.Sharing;
 using Xunit;
 
 namespace Vistara.MigrationTests;
@@ -207,6 +208,97 @@ public sealed class SqliteMigrationTests
         Assert.Equal(
             expected.Tables.Select(table => table.Name).Order(StringComparer.Ordinal),
             actual.Tables.Keys.Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task Prior_latest_with_data_upgrades_hydrates_and_rolls_back_sharing_schema()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var context =
+            MigrationTestSupport.CreateSqliteContext(connection);
+        IMigrator migrator = context.GetService<IMigrator>();
+
+        await migrator.MigrateAsync(
+            MigrationTestSupport.SqliteWorkerTenantCatalogMigration);
+        await ExecuteAsync(
+            connection,
+            TenantInsert(
+                "01991a54-6c00-7000-8000-000000000001",
+                "01991a54-6c00-7000-8000-000000000001",
+                "existing"));
+        await ExecuteAsync(
+            connection,
+            """
+            INSERT INTO shares (
+                id, tenant_id, created_by_user_id, token_hash, target_kind,
+                snapshot_json, permissions, created_at_utc, version)
+            VALUES (
+                '01991a54-6c00-7000-8000-000000000010',
+                '01991a54-6c00-7000-8000-000000000001',
+                '01991a54-6c00-7000-8000-000000000011',
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                'Snapshot', '[]', 1, '2026-08-30T00:00:00Z', 1);
+            """);
+
+        await migrator.MigrateAsync();
+        Assert.Equal(
+            1L,
+            await ExecuteScalarAsync(
+                connection,
+                "SELECT COUNT(*) FROM shares;"));
+
+        await ExecuteAsync(
+            connection,
+            """
+            INSERT INTO sharing_shares (
+                id, tenant_id, created_by_actor_id, name, target_type,
+                album_id, assets_json, permissions, metadata_exposure,
+                pepper_version_id, token_digest_hex, password_hash,
+                created_at_utc, expires_at_utc, revoked_at_utc,
+                revoked_by_actor_id, version, request_hash)
+            VALUES (
+                '01991A54-6C00-7000-8000-000000000020',
+                '01991A54-6C00-7000-8000-000000000001',
+                '01991A54-6C00-7000-8000-000000000021',
+                'Migrated share', 'Snapshot', NULL,
+                '[{"assetId":"01991a54-6c00-7000-8000-000000000022","revisionId":"01991a54-6c00-7000-8000-000000000023","revisionNumber":7,"title":"Captured title","description":null,"takenAtUtc":null,"width":640,"height":480,"renditions":[]}]',
+                1, 'None', 'v1',
+                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                'pbkdf2-sha512$v1$10000$salt$hash',
+                '2026-08-30T01:00:00Z', '2026-09-30T01:00:00Z',
+                NULL, NULL, 1,
+                'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc');
+            """);
+
+        var sharingOptions = new DbContextOptionsBuilder<SharingDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using (var sharing = new SharingDbContext(sharingOptions))
+        {
+            var store = new RelationalShareStore(sharing);
+            var hydrated = await store.FindAsync(
+                Guid.Parse("01991a54-6c00-7000-8000-000000000001"),
+                Guid.Parse("01991a54-6c00-7000-8000-000000000020"),
+                CancellationToken.None);
+
+            Assert.NotNull(hydrated);
+            Assert.Equal("Migrated share", hydrated.Name);
+            Assert.Equal(7, Assert.Single(hydrated.Assets).RevisionNumber);
+            Assert.NotNull(hydrated.PasswordHash);
+        }
+
+        await migrator.MigrateAsync(
+            MigrationTestSupport.SqliteWorkerTenantCatalogMigration);
+        Assert.False(await TableExistsAsync(connection, "sharing_shares"));
+        Assert.Equal(
+            1L,
+            await ExecuteScalarAsync(
+                connection,
+                "SELECT COUNT(*) FROM shares;"));
+
+        await migrator.MigrateAsync();
+        Assert.True(await TableExistsAsync(connection, "sharing_shares"));
     }
 
     private static void AssertTableMatchesModel(

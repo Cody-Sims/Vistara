@@ -24,6 +24,8 @@ public sealed class SqliteMigrationVerificationTests
         "20260829183036_ReconcileLegacyUploadJobQuota";
     private const string WorkerTenantCatalogMigration =
         "20260830044737_AddWorkerTenantCatalog";
+    private const string SharingPersistenceMigration =
+        "20260830101756_AddSharingPersistence";
 
     private static readonly string[] ExpectedMigrations =
     [
@@ -33,6 +35,7 @@ public sealed class SqliteMigrationVerificationTests
         LegacyDataMigration,
         LegacyUploadQuotaMigration,
         WorkerTenantCatalogMigration,
+        SharingPersistenceMigration,
     ];
 
     private static readonly string[] ExpectedTables =
@@ -75,6 +78,10 @@ public sealed class SqliteMigrationVerificationTests
         "share_assets",
         "share_sessions",
         "shares",
+        "sharing_idempotency",
+        "sharing_rate_limits",
+        "sharing_sessions",
+        "sharing_shares",
         "tags",
         "tenant_memberships",
         "tenants",
@@ -153,6 +160,10 @@ public sealed class SqliteMigrationVerificationTests
             script,
             StringComparison.Ordinal);
         Assert.Contains(
+            SharingPersistenceMigration,
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "CREATE TEMP TABLE legacy_upload_job_decisions",
             script,
             StringComparison.Ordinal);
@@ -175,7 +186,7 @@ public sealed class SqliteMigrationVerificationTests
         IMigrator migrator = context.GetService<IMigrator>();
 
         string rollback = migrator.GenerateScript(
-            WorkerTenantCatalogMigration,
+            SharingPersistenceMigration,
             Migration.InitialDatabase);
         foreach (string table in ExpectedTables)
         {

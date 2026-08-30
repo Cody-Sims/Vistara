@@ -73,6 +73,8 @@ public static class PostgresTenantRowSecurity
             "share_assets",
             "share_sessions",
             "shares",
+            "sharing_sessions",
+            "sharing_shares",
             "tags",
             "tenant_memberships",
             "tenants",

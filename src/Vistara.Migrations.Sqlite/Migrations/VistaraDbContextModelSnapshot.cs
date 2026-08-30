@@ -2959,6 +2959,221 @@ namespace Vistara.Migrations.Sqlite.Migrations
                         });
                 });
 
+            modelBuilder.Entity("Vistara.Persistence.Sharing.SharingIdempotencyRow", b =>
+                {
+                    b.Property<string>("KeyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("key_hash");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("request_hash");
+
+                    b.Property<Guid>("ShareId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("share_id");
+
+                    b.HasKey("KeyHash");
+
+                    b.ToTable("sharing_idempotency", (string)null);
+                });
+
+            modelBuilder.Entity("Vistara.Persistence.Sharing.SharingRateLimitRow", b =>
+                {
+                    b.Property<string>("KeyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("key_hash");
+
+                    b.Property<int>("RequestCount")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("request_count");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("version");
+
+                    b.Property<DateTime>("WindowStartedAtUtc")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("window_started_at_utc");
+
+                    b.HasKey("KeyHash");
+
+                    b.ToTable("sharing_rate_limits", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_sharing_rate_limits_count", "\"request_count\" > 0");
+
+                            t.HasCheckConstraint("ck_sharing_rate_limits_version", "\"version\" >= 1");
+                        });
+                });
+
+            modelBuilder.Entity("Vistara.Persistence.Sharing.SharingSessionRow", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT")
+                        .HasColumnName("id");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<string>("DigestHex")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("digest_hex");
+
+                    b.Property<DateTime>("ExpiresAtUtc")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("expires_at_utc");
+
+                    b.Property<string>("PepperVersionId")
+                        .IsRequired()
+                        .HasMaxLength(8)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("pepper_version_id");
+
+                    b.Property<Guid>("ShareId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("share_id");
+
+                    b.Property<long>("ShareVersion")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("share_version");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("tenant_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PepperVersionId", "DigestHex")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "ExpiresAtUtc");
+
+                    b.HasIndex("TenantId", "ShareId");
+
+                    b.ToTable("sharing_sessions", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_sharing_sessions_version", "\"share_version\" >= 1");
+                        });
+                });
+
+            modelBuilder.Entity("Vistara.Persistence.Sharing.SharingShareRow", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT")
+                        .HasColumnName("id");
+
+                    b.Property<Guid?>("AlbumId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("album_id");
+
+                    b.Property<string>("AssetsJson")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("assets_json");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<Guid>("CreatedByActorId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("created_by_actor_id");
+
+                    b.Property<DateTime?>("ExpiresAtUtc")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("expires_at_utc");
+
+                    b.Property<string>("MetadataExposure")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("metadata_exposure");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("name");
+
+                    b.Property<string>("PasswordHash")
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("password_hash");
+
+                    b.Property<string>("PepperVersionId")
+                        .IsRequired()
+                        .HasMaxLength(8)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("pepper_version_id");
+
+                    b.Property<int>("Permissions")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("permissions");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("request_hash");
+
+                    b.Property<DateTime?>("RevokedAtUtc")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("revoked_at_utc");
+
+                    b.Property<Guid?>("RevokedByActorId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("revoked_by_actor_id");
+
+                    b.Property<string>("TargetType")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("target_type");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("tenant_id");
+
+                    b.Property<string>("TokenDigestHex")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("token_digest_hex");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("version");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PepperVersionId", "TokenDigestHex")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "ExpiresAtUtc");
+
+                    b.HasIndex("TenantId", "RevokedAtUtc");
+
+                    b.HasIndex("TenantId", "CreatedAtUtc", "Id");
+
+                    b.ToTable("sharing_shares", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_sharing_shares_permissions", "(\"permissions\" & 1) = 1 AND \"permissions\" BETWEEN 1 AND 7");
+
+                            t.HasCheckConstraint("ck_sharing_shares_version", "\"version\" >= 1");
+                        });
+                });
+
             modelBuilder.Entity("Vistara.Persistence.Uploads.QuotaUsageRow", b =>
                 {
                     b.Property<Guid>("TenantId")
@@ -3554,6 +3769,16 @@ namespace Vistara.Migrations.Sqlite.Migrations
                         .HasForeignKey("TenantId", "ActivatedRevisionId")
                         .HasPrincipalKey("TenantId", "Id")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("Vistara.Persistence.Sharing.SharingSessionRow", b =>
+                {
+                    b.HasOne("Vistara.Persistence.Sharing.SharingShareRow", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId", "ShareId")
+                        .HasPrincipalKey("TenantId", "Id")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Vistara.Persistence.Uploads.QuotaUsageRow", b =>

@@ -21,82 +21,12 @@ public sealed class SharingDbContext(
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        modelBuilder.Entity<SharingShareRow>(entity =>
-        {
-            entity.ToTable("sharing_shares", table =>
-            {
-                table.HasCheckConstraint(
-                    "ck_sharing_shares_version",
-                    "\"version\" >= 1");
-                table.HasCheckConstraint(
-                    "ck_sharing_shares_permissions",
-                    "(\"permissions\" & 1) = 1 AND \"permissions\" BETWEEN 1 AND 7");
-            });
-            entity.HasKey(row => row.Id);
-            entity.HasIndex(row => new
-            {
-                row.PepperVersionId,
-                row.TokenDigestHex,
-            }).IsUnique();
-            entity.HasIndex(row => new
-            {
-                row.TenantId,
-                row.CreatedAtUtc,
-                row.Id,
-            });
-            entity.Property(row => row.Name).HasMaxLength(200);
-            entity.Property(row => row.TargetType).HasMaxLength(16);
-            entity.Property(row => row.MetadataExposure).HasMaxLength(16);
-            entity.Property(row => row.PepperVersionId).HasMaxLength(8);
-            entity.Property(row => row.TokenDigestHex).HasMaxLength(64);
-            entity.Property(row => row.PasswordHash).HasMaxLength(1024);
-            entity.Property(row => row.RequestHash).HasMaxLength(64);
-            entity.Property(row => row.AssetsJson).HasColumnType("text");
-            entity.Property(row => row.Version).IsConcurrencyToken();
-        });
-        modelBuilder.Entity<SharingIdempotencyRow>(entity =>
-        {
-            entity.ToTable("sharing_idempotency");
-            entity.HasKey(row => row.KeyHash);
-            entity.Property(row => row.KeyHash).HasMaxLength(64);
-            entity.Property(row => row.RequestHash).HasMaxLength(64);
-        });
-        modelBuilder.Entity<SharingSessionRow>(entity =>
-        {
-            entity.ToTable("sharing_sessions", table =>
-                table.HasCheckConstraint(
-                    "ck_sharing_sessions_version",
-                    "\"share_version\" >= 1"));
-            entity.HasKey(row => row.Id);
-            entity.HasIndex(row => new
-            {
-                row.PepperVersionId,
-                row.DigestHex,
-            }).IsUnique();
-            entity.HasIndex(row => row.ExpiresAtUtc);
-            entity.Property(row => row.PepperVersionId).HasMaxLength(8);
-            entity.Property(row => row.DigestHex).HasMaxLength(64);
-            entity.HasOne<SharingShareRow>()
-                .WithMany()
-                .HasForeignKey(row => row.ShareId)
-                .OnDelete(DeleteBehavior.Cascade);
-        });
-        modelBuilder.Entity<SharingRateLimitRow>(entity =>
-        {
-            entity.ToTable("sharing_rate_limits", table =>
-            {
-                table.HasCheckConstraint(
-                    "ck_sharing_rate_limits_count",
-                    "\"request_count\" > 0");
-                table.HasCheckConstraint(
-                    "ck_sharing_rate_limits_version",
-                    "\"version\" >= 1");
-            });
-            entity.HasKey(row => row.KeyHash);
-            entity.Property(row => row.KeyHash).HasMaxLength(64);
-            entity.Property(row => row.Version).IsConcurrencyToken();
-        });
+        SharingPersistenceContributor.Configure(modelBuilder);
+        ApplyPortableConventions(modelBuilder);
+    }
 
+    private static void ApplyPortableConventions(ModelBuilder modelBuilder)
+    {
         var dateConverter = new ValueConverter<DateTimeOffset, DateTime>(
             value => value.UtcDateTime,
             value => new DateTimeOffset(
@@ -142,6 +72,112 @@ public sealed class SharingDbContext(
         }
 
         return builder.ToString();
+    }
+}
+
+internal static class SharingPersistenceContributor
+{
+    internal static void Configure(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<SharingShareRow>(entity =>
+        {
+            entity.ToTable("sharing_shares", table =>
+            {
+                table.HasCheckConstraint(
+                    "ck_sharing_shares_version",
+                    "\"version\" >= 1");
+                table.HasCheckConstraint(
+                    "ck_sharing_shares_permissions",
+                    "(\"permissions\" & 1) = 1 AND \"permissions\" BETWEEN 1 AND 7");
+            });
+            entity.HasKey(row => row.Id);
+            entity.HasAlternateKey(row => new { row.TenantId, row.Id });
+            entity.HasIndex(row => new
+            {
+                row.PepperVersionId,
+                row.TokenDigestHex,
+            }).IsUnique();
+            entity.HasIndex(row => new
+            {
+                row.TenantId,
+                row.CreatedAtUtc,
+                row.Id,
+            });
+            entity.HasIndex(row => new
+            {
+                row.TenantId,
+                row.ExpiresAtUtc,
+            });
+            entity.HasIndex(row => new
+            {
+                row.TenantId,
+                row.RevokedAtUtc,
+            });
+            entity.Property(row => row.Name).HasMaxLength(200);
+            entity.Property(row => row.TargetType).HasMaxLength(16);
+            entity.Property(row => row.MetadataExposure).HasMaxLength(16);
+            entity.Property(row => row.PepperVersionId).HasMaxLength(8);
+            entity.Property(row => row.TokenDigestHex).HasMaxLength(64);
+            entity.Property(row => row.PasswordHash).HasMaxLength(1024);
+            entity.Property(row => row.RequestHash).HasMaxLength(64);
+            entity.Property(row => row.AssetsJson).HasColumnType("text");
+            entity.Property(row => row.Version).IsConcurrencyToken();
+        });
+        modelBuilder.Entity<SharingIdempotencyRow>(entity =>
+        {
+            entity.ToTable("sharing_idempotency");
+            entity.HasKey(row => row.KeyHash);
+            entity.Property(row => row.KeyHash).HasMaxLength(64);
+            entity.Property(row => row.RequestHash).HasMaxLength(64);
+        });
+        modelBuilder.Entity<SharingSessionRow>(entity =>
+        {
+            entity.ToTable("sharing_sessions", table =>
+                table.HasCheckConstraint(
+                    "ck_sharing_sessions_version",
+                    "\"share_version\" >= 1"));
+            entity.HasKey(row => row.Id);
+            entity.HasIndex(row => new
+            {
+                row.PepperVersionId,
+                row.DigestHex,
+            }).IsUnique();
+            entity.HasIndex(row => new
+            {
+                row.TenantId,
+                row.ExpiresAtUtc,
+            });
+            entity.Property(row => row.PepperVersionId).HasMaxLength(8);
+            entity.Property(row => row.DigestHex).HasMaxLength(64);
+            entity.HasOne<SharingShareRow>()
+                .WithMany()
+                .HasForeignKey(row => new
+                {
+                    row.TenantId,
+                    row.ShareId,
+                })
+                .HasPrincipalKey(row => new
+                {
+                    row.TenantId,
+                    row.Id,
+                })
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+        modelBuilder.Entity<SharingRateLimitRow>(entity =>
+        {
+            entity.ToTable("sharing_rate_limits", table =>
+            {
+                table.HasCheckConstraint(
+                    "ck_sharing_rate_limits_count",
+                    "\"request_count\" > 0");
+                table.HasCheckConstraint(
+                    "ck_sharing_rate_limits_version",
+                    "\"version\" >= 1");
+            });
+            entity.HasKey(row => row.KeyHash);
+            entity.Property(row => row.KeyHash).HasMaxLength(64);
+            entity.Property(row => row.Version).IsConcurrencyToken();
+        });
     }
 }
 

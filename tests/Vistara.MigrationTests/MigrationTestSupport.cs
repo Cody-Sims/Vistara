@@ -32,6 +32,10 @@ internal static class MigrationTestSupport
         "20260830044737_AddWorkerTenantCatalog";
     internal const string PostgresWorkerTenantCatalogMigration =
         "20260830044748_AddWorkerTenantCatalog";
+    internal const string SqliteSharingPersistenceMigration =
+        "20260830101756_AddSharingPersistence";
+    internal const string PostgresSharingPersistenceMigration =
+        "20260830101824_AddSharingPersistence";
 
     internal static readonly string[] SqliteMigrations =
     [
@@ -41,6 +45,7 @@ internal static class MigrationTestSupport
         SqliteLegacyDataMigration,
         SqliteLegacyUploadQuotaMigration,
         SqliteWorkerTenantCatalogMigration,
+        SqliteSharingPersistenceMigration,
     ];
 
     internal static readonly string[] PostgresMigrations =
@@ -51,6 +56,7 @@ internal static class MigrationTestSupport
         PostgresLegacyDataMigration,
         PostgresLegacyUploadQuotaMigration,
         PostgresWorkerTenantCatalogMigration,
+        PostgresSharingPersistenceMigration,
     ];
 
     private static readonly Guid TenantId =

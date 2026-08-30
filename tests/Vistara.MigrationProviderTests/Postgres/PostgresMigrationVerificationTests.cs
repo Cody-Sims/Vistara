@@ -21,6 +21,8 @@ public sealed class PostgresMigrationVerificationTests
         "20260829183622_ReconcileLegacyUploadJobQuota";
     private const string WorkerTenantCatalogMigration =
         "20260830044748_AddWorkerTenantCatalog";
+    private const string SharingPersistenceMigration =
+        "20260830101824_AddSharingPersistence";
     private const int ReplacedCheckConstraints = 3;
     private const int MigrationBackfillPolicies = 13;
 
@@ -32,6 +34,7 @@ public sealed class PostgresMigrationVerificationTests
         LegacyDataMigration,
         LegacyUploadQuotaMigration,
         WorkerTenantCatalogMigration,
+        SharingPersistenceMigration,
     ];
 
     [Fact]
@@ -90,6 +93,10 @@ public sealed class PostgresMigrationVerificationTests
             StringComparison.Ordinal);
         Assert.Contains(
             WorkerTenantCatalogMigration,
+            idempotentScript,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            SharingPersistenceMigration,
             idempotentScript,
             StringComparison.Ordinal);
         Assert.Contains(

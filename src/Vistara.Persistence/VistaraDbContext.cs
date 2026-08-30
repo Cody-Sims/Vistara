@@ -10,6 +10,7 @@ using Vistara.Persistence.Jobs;
 using Vistara.Persistence.Media;
 using Vistara.Persistence.Model;
 using Vistara.Persistence.Outbox;
+using Vistara.Persistence.Sharing;
 using Vistara.Persistence.Uploads;
 
 namespace Vistara.Persistence;
@@ -107,6 +108,7 @@ public sealed class VistaraDbContext(
         OutboxPersistenceContributor.Configure(modelBuilder, this);
         ConfigureGallery(modelBuilder);
         ConfigureSharing(modelBuilder);
+        SharingPersistenceContributor.Configure(modelBuilder);
         ConfigureLifecycle(modelBuilder);
         ApplyTenantFilters(modelBuilder);
         ApplyPortableConventions(modelBuilder);
@@ -1030,7 +1032,8 @@ public sealed class VistaraDbContext(
     private void ApplyTenantFilters(ModelBuilder modelBuilder)
     {
         foreach (IMutableEntityType entityType in modelBuilder.Model.GetEntityTypes()
-                     .Where(type => typeof(ITenantOwnedRow).IsAssignableFrom(type.ClrType)))
+                     .Where(type =>
+                         type.FindProperty(nameof(ITenantOwnedRow.TenantId)) is not null))
         {
             ParameterExpression parameter = Expression.Parameter(entityType.ClrType, "row");
             MemberExpression tenantId = Expression.Property(
@@ -1125,6 +1128,8 @@ public sealed class VistaraDbContext(
             OutboxMessageRow row => row.TenantId,
             EventLogRow row => row.TenantId,
             OutboxSequenceRow row => row.TenantId,
+            SharingShareRow row => row.TenantId,
+            SharingSessionRow row => row.TenantId,
             _ => Guid.Empty,
         };
         return tenantId != Guid.Empty;

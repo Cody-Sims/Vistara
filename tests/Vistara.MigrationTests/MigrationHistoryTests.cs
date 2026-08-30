@@ -40,10 +40,67 @@ public sealed class MigrationHistoryTests
 
         AssertRollbackDropsEveryTable(
             sqlite,
-            MigrationTestSupport.SqliteWorkerTenantCatalogMigration);
+            MigrationTestSupport.SqliteSharingPersistenceMigration);
         AssertRollbackDropsEveryTable(
             postgres,
-            MigrationTestSupport.PostgresWorkerTenantCatalogMigration);
+            MigrationTestSupport.PostgresSharingPersistenceMigration);
+    }
+
+    [Fact]
+    public void Canonical_model_contains_the_current_sharing_persistence_schema()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        using var context = MigrationTestSupport.CreateSqliteContext(connection);
+        IModel model = MigrationTestSupport.GetDesignModel(context);
+        IRelationalModel relationalModel = model.GetRelationalModel();
+
+        ITable shares = relationalModel.Tables.Single(
+            table => table.Name == "sharing_shares");
+        Assert.Equal(
+            ["id"],
+            shares.PrimaryKey!.Columns.Select(column => column.Name));
+        Assert.Contains(
+            shares.UniqueConstraints,
+            constraint => constraint.Columns
+                .Select(column => column.Name)
+                .SequenceEqual(["tenant_id", "id"]));
+        Assert.Contains(
+            shares.Indexes,
+            index =>
+                index.IsUnique &&
+                index.Columns.Select(column => column.Name)
+                    .SequenceEqual(["pepper_version_id", "token_digest_hex"]));
+        Assert.Contains(
+            shares.Indexes,
+            index => index.Columns.Select(column => column.Name)
+                .SequenceEqual(["tenant_id", "expires_at_utc"]));
+        Assert.Contains(
+            shares.Indexes,
+            index => index.Columns.Select(column => column.Name)
+                .SequenceEqual(["tenant_id", "revoked_at_utc"]));
+
+        ITable sessions = relationalModel.Tables.Single(
+            table => table.Name == "sharing_sessions");
+        Assert.Contains(
+            sessions.ForeignKeyConstraints,
+            foreignKey =>
+                foreignKey.Columns.Select(column => column.Name)
+                    .SequenceEqual(["tenant_id", "share_id"]) &&
+                foreignKey.PrincipalColumns.Select(column => column.Name)
+                    .SequenceEqual(["tenant_id", "id"]));
+        Assert.Contains(
+            sessions.Indexes,
+            index => index.Columns.Select(column => column.Name)
+                .SequenceEqual(["tenant_id", "expires_at_utc"]));
+
+        Assert.Contains(
+            relationalModel.Tables,
+            table => table.Name == "sharing_idempotency");
+        Assert.Contains(
+            relationalModel.Tables,
+            table => table.Name == "sharing_rate_limits");
+        Assert.True(IsConcurrencyToken(model, "sharing_shares", "version"));
+        Assert.True(IsConcurrencyToken(model, "sharing_rate_limits", "version"));
     }
 
     private static void AssertSnapshotOwnedByMigrationAssembly(
@@ -75,4 +132,16 @@ public sealed class MigrationHistoryTests
                 rollback);
         }
     }
+
+    private static bool IsConcurrencyToken(
+        IModel model,
+        string tableName,
+        string columnName) =>
+        model.GetEntityTypes()
+            .SelectMany(entity => entity.GetProperties())
+            .Any(property =>
+                property.IsConcurrencyToken &&
+                property.GetColumnName(
+                    StoreObjectIdentifier.Table(tableName, schema: null)) ==
+                columnName);
 }
