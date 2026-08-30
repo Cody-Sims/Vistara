@@ -45,11 +45,42 @@ public sealed class SecurityMiddlewareTests
         Assert.Contains("img-src 'self' data: blob:", spa.Header("Content-Security-Policy"));
         Assert.Contains("media-src 'self' blob:", media.Header("Content-Security-Policy"));
         Assert.Equal(expectsHsts, spa.Headers.ContainsKey("Strict-Transport-Security"));
+        if (expectsHsts)
+        {
+            Assert.Equal(
+                "max-age=31536000; includeSubDomains",
+                spa.Header("Strict-Transport-Security"));
+        }
+
         Assert.Equal(
             environment == Environments.Development,
             spa.Header("Content-Security-Policy").Contains(
                 "'unsafe-eval'",
                 StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("Development", HttpStatusCode.OK)]
+    [InlineData("Production", HttpStatusCode.PermanentRedirect)]
+    public async Task Plain_http_is_redirected_only_outside_development(
+        string environment,
+        HttpStatusCode expectedStatus)
+    {
+        await using SecurityTestHost host = SecurityTestHost.Create(environment);
+
+        TestResponse response = await host.SendAsync(
+            "GET",
+            "/api/v1/probe?value=one",
+            isHttps: false);
+
+        Assert.Equal(expectedStatus, response.StatusCode);
+        Assert.False(response.Headers.ContainsKey("Strict-Transport-Security"));
+        if (environment == Environments.Production)
+        {
+            Assert.Equal(
+                "https://vistara.example.test/api/v1/probe?value=one",
+                response.Header("Location"));
+        }
     }
 
     [Fact]
@@ -97,11 +128,34 @@ public sealed class SecurityMiddlewareTests
             new Dictionary<string, string>
             {
                 ["Origin"] = "https://vistara.example.test",
-            });
+            },
+            isHttps: true);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.False(response.Headers.ContainsKey("Access-Control-Allow-Origin"));
         Assert.True(response.Headers.ContainsKey("Strict-Transport-Security"));
+    }
+
+    [Fact]
+    public async Task Cors_does_not_run_before_plain_http_is_redirected()
+    {
+        await using SecurityTestHost host = SecurityTestHost.Create(
+            Environments.Production);
+
+        TestResponse response = await host.SendAsync(
+            "POST",
+            "/api/v1/probe",
+            new Dictionary<string, string>
+            {
+                ["Origin"] = "https://vistara.example.test",
+            },
+            isHttps: false);
+
+        Assert.Equal(HttpStatusCode.PermanentRedirect, response.StatusCode);
+        Assert.Equal(
+            "https://vistara.example.test/api/v1/probe",
+            response.Header("Location"));
+        Assert.False(response.Headers.ContainsKey("Access-Control-Allow-Origin"));
     }
 
     [Fact]
@@ -154,6 +208,22 @@ public sealed class SecurityMiddlewareTests
     }
 
     [Fact]
+    public async Task Existing_non_seekable_bad_request_content_is_preserved()
+    {
+        await using SecurityTestHost host = SecurityTestHost.Create(
+            Environments.Production);
+
+        TestResponse response = await host.SendAsync(
+            "GET",
+            "/api/v1/existing-bad-request",
+            useNonSeekableResponseBody: true);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("existing-bad-request", response.Body);
+        Assert.Equal("text/plain", response.Header("Content-Type"));
+    }
+
+    [Fact]
     public async Task Request_body_and_rate_limits_fail_with_safe_problem_details()
     {
         await using SecurityTestHost host = SecurityTestHost.Create(
@@ -177,6 +247,176 @@ public sealed class SecurityMiddlewareTests
         Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
         Assert.Equal("rate_limit.exceeded", limited.ProblemCode());
         Assert.True(limited.Headers.ContainsKey("Retry-After"));
+    }
+
+    [Fact]
+    public async Task Direct_clients_have_independent_rate_limit_partitions()
+    {
+        await using SecurityTestHost host = SecurityTestHost.Create(
+            Environments.Production,
+            new Dictionary<string, string?>
+            {
+                ["Security:Limits:RequestsPerWindow"] = "1",
+            });
+
+        TestResponse first = await host.SendAsync(
+            "GET",
+            "/api/v1/probe",
+            remoteIpAddress: IPAddress.Parse("198.51.100.10"));
+        TestResponse second = await host.SendAsync(
+            "GET",
+            "/api/v1/probe",
+            remoteIpAddress: IPAddress.Parse("198.51.100.11"));
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+    }
+
+    [Fact]
+    public async Task Untrusted_forwarded_for_cannot_change_the_rate_limit_partition()
+    {
+        await using SecurityTestHost host = SecurityTestHost.Create(
+            Environments.Production,
+            new Dictionary<string, string?>
+            {
+                ["Security:Limits:RequestsPerWindow"] = "1",
+            });
+        IPAddress untrustedPeer = IPAddress.Parse("198.51.100.20");
+
+        TestResponse first = await host.SendAsync(
+            "GET",
+            "/api/v1/probe",
+            new Dictionary<string, string>
+            {
+                ["X-Forwarded-For"] = "203.0.113.10",
+            },
+            remoteIpAddress: untrustedPeer);
+        TestResponse second = await host.SendAsync(
+            "GET",
+            "/api/v1/probe",
+            new Dictionary<string, string>
+            {
+                ["X-Forwarded-For"] = "203.0.113.11",
+            },
+            remoteIpAddress: untrustedPeer);
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, second.StatusCode);
+    }
+
+    [Fact]
+    public async Task Loopback_is_not_a_trusted_proxy_unless_it_is_configured()
+    {
+        await using SecurityTestHost host = SecurityTestHost.Create(
+            Environments.Production,
+            new Dictionary<string, string?>
+            {
+                ["Security:Limits:RequestsPerWindow"] = "1",
+            });
+        IPAddress loopbackPeer = IPAddress.Loopback;
+
+        TestResponse first = await host.SendAsync(
+            "GET",
+            "/api/v1/probe",
+            new Dictionary<string, string>
+            {
+                ["X-Forwarded-For"] = "203.0.113.30",
+            },
+            remoteIpAddress: loopbackPeer);
+        TestResponse second = await host.SendAsync(
+            "GET",
+            "/api/v1/probe",
+            new Dictionary<string, string>
+            {
+                ["X-Forwarded-For"] = "203.0.113.31",
+            },
+            remoteIpAddress: loopbackPeer);
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, second.StatusCode);
+    }
+
+    [Fact]
+    public async Task Trusted_proxy_forwarded_clients_have_independent_rate_limit_partitions()
+    {
+        await using SecurityTestHost host = SecurityTestHost.Create(
+            Environments.Production,
+            new Dictionary<string, string?>
+            {
+                ["Security:Limits:RequestsPerWindow"] = "1",
+                ["Security:Proxy:KnownProxies:0"] = "192.0.2.10",
+            });
+        IPAddress trustedProxy = IPAddress.Parse("192.0.2.10");
+
+        TestResponse first = await host.SendAsync(
+            "GET",
+            "/api/v1/probe",
+            new Dictionary<string, string>
+            {
+                ["X-Forwarded-For"] = "203.0.113.20",
+            },
+            remoteIpAddress: trustedProxy);
+        TestResponse second = await host.SendAsync(
+            "GET",
+            "/api/v1/probe",
+            new Dictionary<string, string>
+            {
+                ["X-Forwarded-For"] = "203.0.113.21",
+            },
+            remoteIpAddress: trustedProxy);
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+    }
+
+    [Fact]
+    public async Task Forwarded_host_is_accepted_only_from_a_trusted_proxy_and_is_filtered()
+    {
+        var proxySettings = new Dictionary<string, string?>
+        {
+            ["Security:Proxy:KnownProxies:0"] = "192.0.2.10",
+        };
+        await using SecurityTestHost host = SecurityTestHost.Create(
+            Environments.Production,
+            proxySettings);
+
+        TestResponse untrusted = await host.SendAsync(
+            "GET",
+            "/api/v1/probe",
+            new Dictionary<string, string>
+            {
+                ["X-Forwarded-Host"] = "vistara.example.test",
+                ["X-Forwarded-Proto"] = "https",
+            },
+            isHttps: false,
+            remoteIpAddress: IPAddress.Parse("198.51.100.40"),
+            host: "attacker.example.test");
+        TestResponse trusted = await host.SendAsync(
+            "GET",
+            "/api/v1/probe",
+            new Dictionary<string, string>
+            {
+                ["X-Forwarded-Host"] = "vistara.example.test",
+                ["X-Forwarded-Proto"] = "https",
+            },
+            isHttps: false,
+            remoteIpAddress: IPAddress.Parse("192.0.2.10"),
+            host: "internal-proxy");
+        TestResponse rejectedForwardedHost = await host.SendAsync(
+            "GET",
+            "/api/v1/probe",
+            new Dictionary<string, string>
+            {
+                ["X-Forwarded-Host"] = "attacker.example.test",
+                ["X-Forwarded-Proto"] = "https",
+            },
+            isHttps: false,
+            remoteIpAddress: IPAddress.Parse("192.0.2.10"),
+            host: "internal-proxy");
+
+        Assert.Equal(HttpStatusCode.BadRequest, untrusted.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, trusted.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, rejectedForwardedHost.StatusCode);
     }
 
     [Fact]
@@ -207,6 +447,30 @@ public sealed class SecurityMiddlewareTests
             HttpStatusCode.RequestHeaderFieldsTooLarge,
             headers.StatusCode);
         Assert.Equal("request.headers_too_large", headers.ProblemCode());
+    }
+
+    [Fact]
+    public async Task Request_header_count_is_bounded()
+    {
+        await using SecurityTestHost host = SecurityTestHost.Create(
+            Environments.Production,
+            new Dictionary<string, string?>
+            {
+                ["Security:Limits:MaxRequestHeaderCount"] = "1",
+            });
+
+        TestResponse response = await host.SendAsync(
+            "GET",
+            "/api/v1/probe",
+            new Dictionary<string, string>
+            {
+                ["X-Extra"] = "value",
+            });
+
+        Assert.Equal(
+            HttpStatusCode.RequestHeaderFieldsTooLarge,
+            response.StatusCode);
+        Assert.Equal("request.headers_too_large", response.ProblemCode());
     }
 
     [Fact]
@@ -261,6 +525,67 @@ public sealed class SecurityMiddlewareTests
             () => host.StartAsync());
     }
 
+    [Theory]
+    [InlineData("*")]
+    [InlineData("https://vistara.example.test")]
+    [InlineData("vistara.example.test:443")]
+    public async Task Startup_rejects_unsafe_allowed_hosts(string allowedHost)
+    {
+        HostApplicationBuilder builder = Host.CreateApplicationBuilder(
+            new HostApplicationBuilderSettings
+            {
+                DisableDefaults = true,
+                EnvironmentName = Environments.Production,
+            });
+        builder.Configuration.AddInMemoryCollection(
+            new Dictionary<string, string?>
+            {
+                ["Security:Hosts:AllowedHosts:0"] = allowedHost,
+            });
+        builder.Services.AddVistaraApiSecurity(
+            builder.Configuration,
+            builder.Environment);
+        using IHost host = builder.Build();
+
+        OptionsValidationException error =
+            await Assert.ThrowsAsync<OptionsValidationException>(
+                () => host.StartAsync());
+
+        Assert.Contains("host", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(allowedHost, error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Security:Proxy:KnownProxies:0", "not-an-ip-address")]
+    [InlineData("Security:Proxy:KnownNetworks:0", "192.0.2.0/not-a-prefix")]
+    public async Task Startup_rejects_invalid_trusted_proxy_configuration(
+        string key,
+        string value)
+    {
+        HostApplicationBuilder builder = Host.CreateApplicationBuilder(
+            new HostApplicationBuilderSettings
+            {
+                DisableDefaults = true,
+                EnvironmentName = Environments.Production,
+            });
+        builder.Configuration.AddInMemoryCollection(
+            new Dictionary<string, string?>
+            {
+                [key] = value,
+            });
+        builder.Services.AddVistaraApiSecurity(
+            builder.Configuration,
+            builder.Environment);
+        using IHost host = builder.Build();
+
+        OptionsValidationException error =
+            await Assert.ThrowsAsync<OptionsValidationException>(
+                () => host.StartAsync());
+
+        Assert.Contains("proxy", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(value, error.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Request_logging_never_emits_sensitive_headers_urls_or_metadata()
     {
@@ -277,6 +602,7 @@ public sealed class SecurityMiddlewareTests
                 ["Authorization"] = "Bearer test-authorization-marker",
                 ["X-API-Key"] = "test-api-key-marker",
                 ["X-Private-Metadata"] = "private-header-value",
+                ["X-Forwarded-For"] = "203.0.113.77",
             });
 
         string output = string.Join('\n', logs.Messages);
@@ -286,6 +612,8 @@ public sealed class SecurityMiddlewareTests
         Assert.DoesNotContain("test-authorization-marker", output, StringComparison.Ordinal);
         Assert.DoesNotContain("test-api-key-marker", output, StringComparison.Ordinal);
         Assert.DoesNotContain("private-header-value", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("198.51.100.10", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("203.0.113.77", output, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -307,6 +635,7 @@ public sealed class SecurityMiddlewareTests
     [Fact]
     public async Task Hosting_composition_hook_applies_security_to_the_real_pipeline()
     {
+        var logs = new RecordingLoggerProvider();
         WebApplicationBuilder builder = WebApplication.CreateBuilder(
             new WebApplicationOptions
             {
@@ -314,9 +643,22 @@ public sealed class SecurityMiddlewareTests
                 EnvironmentName = Environments.Production,
             });
         builder.Configuration.Sources.Clear();
+        builder.Configuration.AddInMemoryCollection(
+            new Dictionary<string, string?>
+            {
+                ["Security:Hosts:AllowedHosts:0"] = "public.example.test",
+                ["Security:Limits:MaxRequestBodyBytes"] = "16",
+                ["Security:Proxy:KnownProxies:0"] = "127.0.0.1",
+            });
         builder.Logging.ClearProviders();
+        builder.Logging.AddProvider(logs);
         await using WebApplication app = builder.Build();
-        app.MapGet("/probe", () => Results.Text("ok"));
+        app.MapPost(
+                "/api/v1/startup-bind",
+                (ProbeBody body) => Results.Json(body))
+            .WithDisplayName("unsafe-body-binding");
+        app.MapGet("/api/v1/startup-probe", () => Results.Text("ok"))
+            .WithDisplayName("safe-startup-probe");
         app.Urls.Add("http://127.0.0.1:0");
 
         await app.StartAsync();
@@ -330,13 +672,80 @@ public sealed class SecurityMiddlewareTests
         {
             BaseAddress = new Uri(address),
         };
-        using HttpResponseMessage response = await client.GetAsync("/probe");
+        using var oversizedRequest = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/api/v1/startup-bind");
+        oversizedRequest.Headers.TryAddWithoutValidation(
+            "Origin",
+            "https://public.example.test");
+        oversizedRequest.Headers.TryAddWithoutValidation(
+            "X-Forwarded-For",
+            "203.0.113.90");
+        oversizedRequest.Headers.TryAddWithoutValidation(
+            "X-Forwarded-Host",
+            "public.example.test");
+        oversizedRequest.Headers.TryAddWithoutValidation(
+            "X-Forwarded-Proto",
+            "https");
+        oversizedRequest.Content = new StringContent(
+            """{"value":"too-long"}""",
+            Encoding.UTF8,
+            "application/json");
+        using HttpResponseMessage oversizedResponse =
+            await client.SendAsync(oversizedRequest);
+        string oversizedBody = await oversizedResponse.Content.ReadAsStringAsync();
+        using var malformedRequest = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/api/v1/startup-bind");
+        malformedRequest.Headers.Host = "public.example.test";
+        malformedRequest.Headers.TryAddWithoutValidation(
+            "X-Forwarded-Proto",
+            "https");
+        malformedRequest.Content = new StringContent(
+            """{"value":""",
+            Encoding.UTF8,
+            "application/json");
+        using HttpResponseMessage malformedResponse =
+            await client.SendAsync(malformedRequest);
+        string malformedBody = await malformedResponse.Content.ReadAsStringAsync();
+        using var routedRequest = new HttpRequestMessage(
+            HttpMethod.Get,
+            "/api/v1/startup-probe?sig=startup-sensitive-query");
+        routedRequest.Headers.Host = "public.example.test";
+        routedRequest.Headers.TryAddWithoutValidation(
+            "X-Forwarded-Proto",
+            "https");
+        using HttpResponseMessage routedResponse =
+            await client.SendAsync(routedRequest);
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(
+            HttpStatusCode.RequestEntityTooLarge,
+            oversizedResponse.StatusCode);
+        using (JsonDocument document = JsonDocument.Parse(oversizedBody))
+        {
+            Assert.Equal(
+                "request.body_too_large",
+                document.RootElement.GetProperty("code").GetString());
+        }
+        Assert.Equal(HttpStatusCode.BadRequest, malformedResponse.StatusCode);
+        using (JsonDocument document = JsonDocument.Parse(malformedBody))
+        {
+            Assert.Equal(
+                "request.malformed",
+                document.RootElement.GetProperty("code").GetString());
+        }
+        Assert.Equal(HttpStatusCode.OK, routedResponse.StatusCode);
         Assert.Equal(
             "nosniff",
-            Assert.Single(response.Headers.GetValues(
+            Assert.Single(oversizedResponse.Headers.GetValues(
                 "X-Content-Type-Options")));
+        string output = string.Join('\n', logs.Messages);
+        Assert.Contains("safe-startup-probe", output, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "startup-sensitive-query",
+            output,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("203.0.113.90", output, StringComparison.Ordinal);
         await app.StopAsync();
     }
 
@@ -358,12 +767,20 @@ public sealed class SecurityMiddlewareTests
             .GetRequiredService<IOptions<LoggerFilterOptions>>()
             .Value;
 
-        Assert.Contains(
-            filters.Rules,
-            rule =>
-                rule.CategoryName ==
-                    "Microsoft.AspNetCore.Hosting.Diagnostics" &&
-                rule.LogLevel == LogLevel.Warning);
+        string[] requestDataCategories =
+        [
+            "Microsoft.AspNetCore.Hosting.Diagnostics",
+            "Microsoft.AspNetCore.HttpOverrides.ForwardedHeadersMiddleware",
+            "Microsoft.AspNetCore.HttpsPolicy.HttpsRedirectionMiddleware",
+        ];
+        foreach (string category in requestDataCategories)
+        {
+            Assert.Contains(
+                filters.Rules,
+                rule =>
+                    rule.CategoryName == category &&
+                    rule.LogLevel == LogLevel.Warning);
+        }
     }
 
     private sealed record ProbeBody(string Value);
@@ -441,6 +858,17 @@ public sealed class SecurityMiddlewareTests
                         throw new InvalidOperationException(
                             "sensitive failure detail")))
                 .AllowAnonymous();
+            app.MapGet(
+                    "/api/v1/existing-bad-request",
+                    async context =>
+                    {
+                        context.Response.StatusCode =
+                            StatusCodes.Status400BadRequest;
+                        context.Response.ContentType = "text/plain";
+                        await context.Response.WriteAsync(
+                            "existing-bad-request");
+                    })
+                .AllowAnonymous();
             app.MapGet("/app.js", () => Results.Text("spa-script"))
                 .AllowAnonymous();
             app.MapGet("/media/example.webp", () => Results.Text("media-body"))
@@ -453,9 +881,12 @@ public sealed class SecurityMiddlewareTests
             string method,
             string path,
             IReadOnlyDictionary<string, string>? headers = null,
-            bool isHttps = false,
+            bool isHttps = true,
             string? contentType = null,
-            string? body = null)
+            string? body = null,
+            IPAddress? remoteIpAddress = null,
+            bool useNonSeekableResponseBody = false,
+            string host = "vistara.example.test")
         {
             await using AsyncServiceScope scope = _app.Services.CreateAsyncScope();
             var context = new DefaultHttpContext
@@ -464,13 +895,18 @@ public sealed class SecurityMiddlewareTests
             };
             context.Request.Method = method;
             context.Request.Scheme = isHttps ? "https" : "http";
-            context.Request.Host = new HostString("vistara.example.test");
+            context.Request.Host = new HostString(host);
+            context.Connection.RemoteIpAddress =
+                remoteIpAddress ?? IPAddress.Parse("198.51.100.10");
             int queryIndex = path.IndexOf('?', StringComparison.Ordinal);
             context.Request.Path = queryIndex < 0 ? path : path[..queryIndex];
             context.Request.QueryString = queryIndex < 0
                 ? QueryString.Empty
                 : new QueryString(path[queryIndex..]);
-            context.Response.Body = new MemoryStream();
+            var responseStream = new MemoryStream();
+            context.Response.Body = useNonSeekableResponseBody
+                ? new NonSeekableWriteStream(responseStream)
+                : responseStream;
             if (headers is not null)
             {
                 foreach ((string name, string value) in headers)
@@ -488,9 +924,9 @@ public sealed class SecurityMiddlewareTests
             }
 
             await _pipeline(context);
-            context.Response.Body.Position = 0;
+            responseStream.Position = 0;
             string responseBody = await new StreamReader(
-                    context.Response.Body,
+                    responseStream,
                     Encoding.UTF8)
                 .ReadToEndAsync();
             return new TestResponse(
@@ -504,9 +940,48 @@ public sealed class SecurityMiddlewareTests
         private static Dictionary<string, string?> ValidSettings() => new()
         {
             ["Security:Cors:AllowedOrigins:0"] = AllowedOrigin,
+            ["Security:Hosts:AllowedHosts:0"] = "vistara.example.test",
             ["Security:Limits:MaxRequestBodyBytes"] = "52428800",
             ["Security:Limits:RequestsPerWindow"] = "100",
         };
+
+        private sealed class NonSeekableWriteStream(Stream inner) : Stream
+        {
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => true;
+            public override long Length => throw new NotSupportedException();
+            public override long Position
+            {
+                get => throw new NotSupportedException();
+                set => throw new NotSupportedException();
+            }
+
+            public override void Flush() => inner.Flush();
+
+            public override Task FlushAsync(CancellationToken cancellationToken) =>
+                inner.FlushAsync(cancellationToken);
+
+            public override void Write(
+                byte[] buffer,
+                int offset,
+                int count) =>
+                inner.Write(buffer, offset, count);
+
+            public override ValueTask WriteAsync(
+                ReadOnlyMemory<byte> buffer,
+                CancellationToken cancellationToken = default) =>
+                inner.WriteAsync(buffer, cancellationToken);
+
+            public override long Seek(long offset, SeekOrigin origin) =>
+                throw new NotSupportedException();
+
+            public override void SetLength(long value) =>
+                throw new NotSupportedException();
+
+            public override int Read(byte[] buffer, int offset, int count) =>
+                throw new NotSupportedException();
+        }
 
         private sealed class FakeCredentialAuthenticators :
             IPlatformCookieAuthenticator,

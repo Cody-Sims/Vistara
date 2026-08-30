@@ -74,8 +74,20 @@ internal sealed class VistaraSecurityMiddleware(
                 }
             }
 
-            await next(context);
-            await NormalizeMalformedResponseAsync(context);
+            Stream responseBody = context.Response.Body;
+            var trackingBody = new SecurityResponseBody(responseBody);
+            context.Response.Body = trackingBody;
+            try
+            {
+                await next(context);
+                await NormalizeMalformedResponseAsync(
+                    context,
+                    trackingBody.BytesWritten);
+            }
+            finally
+            {
+                context.Response.Body = responseBody;
+            }
         }
         catch (BadHttpRequestException error)
             when (!context.Response.HasStarted)
@@ -124,15 +136,11 @@ internal sealed class VistaraSecurityMiddleware(
             environment.IsDevelopment()
                 ? SecurityHeaderValues.DevelopmentContentSecurityPolicy
                 : SecurityHeaderValues.ProductionContentSecurityPolicy;
-        if (!environment.IsDevelopment())
-        {
-            context.Response.Headers["Strict-Transport-Security"] =
-                "max-age=31536000; includeSubDomains";
-        }
     }
 
     private static async Task NormalizeMalformedResponseAsync(
-        HttpContext context)
+        HttpContext context,
+        long responseBytesWritten)
     {
         if (context.Response.StatusCode != StatusCodes.Status400BadRequest ||
             context.Response.HasStarted ||
@@ -140,7 +148,8 @@ internal sealed class VistaraSecurityMiddleware(
                 context.Response.ContentType,
                 ProblemContentType,
                 StringComparison.OrdinalIgnoreCase) ||
-            !ResponseBodyIsEmpty(context.Response))
+            responseBytesWritten != 0 ||
+            context.Response.ContentLength is > 0)
         {
             return;
         }
@@ -151,11 +160,72 @@ internal sealed class VistaraSecurityMiddleware(
             "request.malformed",
             "The request is malformed");
     }
+}
 
-    private static bool ResponseBodyIsEmpty(HttpResponse response) =>
-        response.Body.CanSeek
-            ? response.Body.Length == 0
-            : response.ContentLength is null or 0;
+internal sealed class SecurityResponseBody(Stream inner) : Stream
+{
+    internal long BytesWritten { get; private set; }
+
+    public override bool CanRead => inner.CanRead;
+    public override bool CanSeek => inner.CanSeek;
+    public override bool CanWrite => inner.CanWrite;
+    public override long Length => inner.Length;
+    public override long Position
+    {
+        get => inner.Position;
+        set => inner.Position = value;
+    }
+
+    public override void Flush() => inner.Flush();
+
+    public override Task FlushAsync(CancellationToken cancellationToken) =>
+        inner.FlushAsync(cancellationToken);
+
+    public override int Read(byte[] buffer, int offset, int count) =>
+        inner.Read(buffer, offset, count);
+
+    public override long Seek(long offset, SeekOrigin origin) =>
+        inner.Seek(offset, origin);
+
+    public override void SetLength(long value) => inner.SetLength(value);
+
+    public override void Write(byte[] buffer, int offset, int count)
+    {
+        inner.Write(buffer, offset, count);
+        BytesWritten += count;
+    }
+
+    public override void Write(ReadOnlySpan<byte> buffer)
+    {
+        inner.Write(buffer);
+        BytesWritten += buffer.Length;
+    }
+
+    public override void WriteByte(byte value)
+    {
+        inner.WriteByte(value);
+        BytesWritten++;
+    }
+
+    public override async Task WriteAsync(
+        byte[] buffer,
+        int offset,
+        int count,
+        CancellationToken cancellationToken)
+    {
+        await inner.WriteAsync(
+            buffer.AsMemory(offset, count),
+            cancellationToken);
+        BytesWritten += count;
+    }
+
+    public override async ValueTask WriteAsync(
+        ReadOnlyMemory<byte> buffer,
+        CancellationToken cancellationToken = default)
+    {
+        await inner.WriteAsync(buffer, cancellationToken);
+        BytesWritten += buffer.Length;
+    }
 }
 
 internal static class SecurityHeaderValues
@@ -410,19 +480,7 @@ internal sealed class SecurityCorsPolicy
             return true;
         }
 
-        return string.Equals(
-                request.Scheme,
-                Uri.UriSchemeHttp,
-                StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(
-                origin.Scheme,
-                Uri.UriSchemeHttps,
-                StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(
-                request.Host.Host,
-                origin.IdnHost,
-                StringComparison.OrdinalIgnoreCase) &&
-            (request.Host.Port ?? 443) == origin.Port;
+        return false;
     }
 
     private static void ApplyCorsHeaders(HttpContext context, string origin)
