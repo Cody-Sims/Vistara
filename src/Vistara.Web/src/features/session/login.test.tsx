@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { VistaraApiError } from '../../api/generated/client';
 import type { Capabilities, SessionSnapshot } from '../../api/platform';
 import { LoginPage } from './LoginPage';
+import { safeDestination } from './safeDestination';
 import { SessionProvider } from './SessionProvider';
 
 const session: SessionSnapshot = {
@@ -207,5 +208,18 @@ describe('sign-in page', () => {
     expect(
       await screen.findByRole('heading', { name: 'Library' }),
     ).toBeInTheDocument();
+  });
+
+  it('only follows same-origin destinations', () => {
+    expect(safeDestination('/settings?tab=account')).toBe(
+      '/settings?tab=account',
+    );
+    expect(safeDestination('/library#top')).toBe('/library#top');
+    expect(safeDestination(null)).toBe('/library');
+    expect(safeDestination('')).toBe('/library');
+    expect(safeDestination('https://example.invalid/library')).toBe('/library');
+    expect(safeDestination('//example.invalid/library')).toBe('/library');
+    expect(safeDestination('/\\example.invalid/library')).toBe('/library');
+    expect(safeDestination('  /library')).toBe('/library');
   });
 });

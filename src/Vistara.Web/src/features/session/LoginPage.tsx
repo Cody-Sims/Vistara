@@ -4,6 +4,7 @@ import { VistaraApiError } from '../../api/generated/client';
 import type { Capabilities } from '../../api/platform';
 import { BrandMark } from '../../brand';
 import { Skeleton } from '../../components';
+import { safeDestination } from './safeDestination';
 import { useSession } from './sessionContext';
 import styles from './LoginPage.module.css';
 
@@ -228,13 +229,4 @@ function describeFailure(error: unknown): string {
   }
 
   return 'Sign-in is unavailable right now. Check your connection and try again.';
-}
-
-/** Only same-origin absolute paths are followed after sign-in. */
-function safeDestination(value: string | null): string {
-  if (!value || !value.startsWith('/') || value.startsWith('//')) {
-    return '/library';
-  }
-
-  return value;
 }

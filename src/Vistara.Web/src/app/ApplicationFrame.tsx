@@ -120,19 +120,20 @@ function RouteTransitionStatus() {
   const location = useLocation();
   const navigation = useNavigation();
   const navigationType = useNavigationType();
-  const handledLocation = useRef(location.key);
+  const handledPathname = useRef(location.pathname);
   const [pageTitle, setPageTitle] = useState('');
 
   useEffect(() => {
     if (
       navigation.state !== 'idle' ||
       navigationType === 'REPLACE' ||
-      handledLocation.current === location.key
+      handledPathname.current === location.pathname
     ) {
+      handledPathname.current = location.pathname;
       return;
     }
 
-    handledLocation.current = location.key;
+    handledPathname.current = location.pathname;
     let observer: MutationObserver | undefined;
 
     const focusHeading = () => {
@@ -159,7 +160,7 @@ function RouteTransitionStatus() {
     }
 
     return () => observer?.disconnect();
-  }, [location.key, navigation.state, navigationType]);
+  }, [location.pathname, navigation.state, navigationType]);
 
   return (
     <span

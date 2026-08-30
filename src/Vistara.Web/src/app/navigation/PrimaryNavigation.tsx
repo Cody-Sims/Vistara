@@ -96,6 +96,7 @@ function AccountControl({ compact = false }: { readonly compact?: boolean }) {
   const [open, setOpen] = useState(false);
   const menuId = useId();
   const container = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
 
   if (session.status === 'loading') {
     return (
@@ -138,6 +139,7 @@ function AccountControl({ compact = false }: { readonly compact?: boolean }) {
         if (event.key === 'Escape' && open) {
           event.stopPropagation();
           setOpen(false);
+          trigger.current?.focus();
         }
       }}
     >
@@ -146,6 +148,7 @@ function AccountControl({ compact = false }: { readonly compact?: boolean }) {
         type="button"
         aria-expanded={open}
         aria-controls={menuId}
+        ref={trigger}
         onClick={() => setOpen((current) => !current)}
       >
         <NavigationIcon name="user" />

@@ -161,4 +161,21 @@ describe('application shell', () => {
       screen.queryByRole('complementary', { name: 'Static preview notice' }),
     ).not.toBeInTheDocument();
   });
+
+  it('leaves focus alone when only the query string changes', async () => {
+    const router = createAppRouter({ initialEntries: ['/library'] });
+
+    render(<RouterProvider router={router} />);
+    await screen.findByRole('heading', { name: 'Library' });
+
+    const search = screen.getAllByRole('link', { name: /Search/ })[0]!;
+    search.focus();
+
+    await router.navigate('/library?view=list');
+
+    await waitFor(() =>
+      expect(router.state.location.search).toBe('?view=list'),
+    );
+    expect(search).toHaveFocus();
+  });
 });

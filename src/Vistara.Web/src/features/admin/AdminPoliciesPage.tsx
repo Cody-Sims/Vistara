@@ -44,7 +44,7 @@ function toDraft(policies: PolicySettings): PolicyDraft {
 
 export function AdminPoliciesPage({ client }: AdminPoliciesPageProps) {
   const load = useCallback(() => client.getPolicies(), [client]);
-  const { state, reload } = useAdminResource<PolicySettings>(load);
+  const { state, reload, refresh } = useAdminResource<PolicySettings>(load);
   const [draft, setDraft] = useState<PolicyDraft>();
   const [loadedVersion, setLoadedVersion] = useState<number>();
   const [save, setSave] = useState<SaveState>({ kind: 'idle' });
@@ -76,6 +76,7 @@ export function AdminPoliciesPage({ client }: AdminPoliciesPageProps) {
         },
         { ifMatch: state.etag ?? `"${state.value.version}"` },
       );
+      await refresh();
       setSave({ kind: 'saved' });
     } catch (error) {
       setSave(

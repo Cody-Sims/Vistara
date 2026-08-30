@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import type {
   AuditEvent,
@@ -59,8 +59,14 @@ export function AdminAuditPage({ client }: AdminAuditPageProps) {
   const [extending, setExtending] = useState(false);
   const [failure, setFailure] = useState('');
   const [pageKey, setPageKey] = useState('');
+  const generation = useRef(0);
 
   const key = `${action}|${outcome}`;
+
+  useEffect(() => {
+    generation.current += 1;
+  }, [key]);
+
   if (pageKey !== key) {
     setPageKey(key);
     setExtra([]);
@@ -78,6 +84,7 @@ export function AdminAuditPage({ client }: AdminAuditPageProps) {
       return;
     }
 
+    const requested = generation.current;
     setExtending(true);
     setFailure('');
     try {
@@ -87,10 +94,16 @@ export function AdminAuditPage({ client }: AdminAuditPageProps) {
         ...(outcome ? { outcome } : {}),
         ...(action ? { action } : {}),
       });
+      if (generation.current !== requested) {
+        return;
+      }
+
       setExtra((current) => [...current, ...response.data.items]);
       setExtraCursor(response.data.nextCursor);
     } catch {
-      setFailure('Earlier events could not be loaded. Try again in a moment.');
+      if (generation.current === requested) {
+        setFailure('Earlier events could not be loaded. Try again in a moment.');
+      }
     } finally {
       setExtending(false);
     }

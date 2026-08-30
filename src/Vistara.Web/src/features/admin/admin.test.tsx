@@ -9,6 +9,7 @@ import type {
   AuditEvent,
   PolicySettings,
   StorageOverview,
+  UpdatePolicySettingsRequest,
 } from '../../api/platform';
 import { AdminAuditPage } from './AdminAuditPage';
 import { AdminJobsPage } from './AdminJobsPage';
@@ -364,6 +365,36 @@ describe('administration: policies', () => {
     );
   });
 
+  it('saves twice in a row with the version returned by the reload', async () => {
+    const user = userEvent.setup();
+    const updatePolicies =
+      vi.fn<
+        (
+          request: UpdatePolicySettingsRequest,
+          options: { ifMatch: string },
+        ) => Promise<{ data: PolicySettings }>
+      >(async () => ({ data: policies }));
+    const getPolicies = vi
+      .fn()
+      .mockResolvedValueOnce({ data: policies, etag: '"7"' })
+      .mockResolvedValue({
+        data: { ...policies, version: 8 },
+        etag: '"8"',
+      });
+    renderRoute(
+      <AdminPoliciesPage client={{ getPolicies, updatePolicies }} />,
+    );
+
+    await screen.findByLabelText('Trash retention (days)');
+    await user.click(screen.getByRole('button', { name: 'Save policies' }));
+    await waitFor(() => expect(getPolicies).toHaveBeenCalledTimes(2));
+
+    await user.click(screen.getByRole('button', { name: 'Save policies' }));
+
+    await waitFor(() => expect(updatePolicies).toHaveBeenCalledTimes(2));
+    expect(updatePolicies.mock.calls[1]![1]).toEqual({ ifMatch: '"8"' });
+  });
+
   it('refuses to overwrite a policy that changed elsewhere', async () => {
     const user = userEvent.setup();
     renderRoute(
@@ -477,5 +508,35 @@ describe('administration: audit', () => {
     expect(
       await screen.findByText('No audit events match these filters.'),
     ).toBeInTheDocument();
+  });
+
+  it('drops a slow earlier-events page when the filter changed', async () => {
+    const user = userEvent.setup();
+    let releaseFirst: ((value: unknown) => void) | undefined;
+    const listAuditEvents = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: { items: [auditEvents[0]!], nextCursor: 'cursor-2' },
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseFirst = resolve;
+          }),
+      )
+      .mockResolvedValue({ data: { items: [auditEvents[1]!] } });
+    renderRoute(<AdminAuditPage client={{ listAuditEvents }} />, '/admin/audit');
+
+    await user.click(
+      await screen.findByRole('button', { name: 'Show earlier events' }),
+    );
+    await user.selectOptions(screen.getByLabelText('Outcome'), 'denied');
+
+    releaseFirst?.({
+      data: { items: [{ ...auditEvents[0]!, id: 'stale', action: 'stale.event' }] },
+    });
+
+    await screen.findByText('asset.purged');
+    expect(screen.queryByText('stale.event')).not.toBeInTheDocument();
   });
 });

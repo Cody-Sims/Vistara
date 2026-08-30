@@ -183,4 +183,19 @@ describe('primary navigation', () => {
       within(rail).queryByRole('link', { name: 'Sign in' }),
     ).not.toBeInTheDocument();
   });
+
+  it('returns focus to the account button when the menu is dismissed', async () => {
+    const user = userEvent.setup();
+    renderNavigation('/library', client('Member'));
+
+    const [account] = await screen.findAllByRole('button', {
+      name: /Ada Lovelace/,
+    });
+    await user.click(account!);
+    await user.tab();
+    await user.keyboard('{Escape}');
+
+    expect(account).toHaveFocus();
+    expect(account).toHaveAttribute('aria-expanded', 'false');
+  });
 });

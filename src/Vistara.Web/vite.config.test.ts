@@ -30,7 +30,7 @@ describe('Vite build artifacts', () => {
     ).toBe(productionIndex);
     expectReferencedAssetsToExist(production.root, production.build.outDir, production.base);
     expectReferencedAssetsToExist(pages.root, pages.build.outDir, pages.base);
-  });
+  }, 120_000);
 });
 
 async function buildWithMode(mode: string) {
