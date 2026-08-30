@@ -21,7 +21,7 @@
 }
 
 .header p {
-  color: var(--color-muted);
+  color: var(--color-text-muted);
 }
 
 .eyebrow {
@@ -99,7 +99,7 @@
 .placeholder {
   display: grid;
   place-items: center;
-  color: var(--color-muted);
+  color: var(--color-text-muted);
 }
 
 .card h2 {
@@ -139,7 +139,7 @@
 
 .empty {
   border: 1px dashed var(--color-border);
-  color: var(--color-muted);
+  color: var(--color-text-muted);
   text-align: center;
 }
 

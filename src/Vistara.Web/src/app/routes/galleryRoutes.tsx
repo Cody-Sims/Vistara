@@ -99,6 +99,15 @@ export function galleryRoutes(
           path: 'trash',
           element: feature('Trash', <TrashRoute />),
         },
+        {
+          path: 'settings',
+          element: (
+            <RoutePlaceholderPage
+              title="Settings"
+              staticPreview={staticPreview}
+            />
+          ),
+        },
         ...additionalRoutes,
         {
           path: '*',

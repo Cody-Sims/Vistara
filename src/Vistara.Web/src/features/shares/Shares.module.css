@@ -94,7 +94,7 @@
 .panelHeading p,
 .publicHeader p,
 .publicNotice p {
-  color: var(--color-muted);
+  color: var(--color-text-muted);
 }
 
 .policy,
@@ -203,7 +203,7 @@
 .badge[data-status='expired'],
 .badge[data-status='revoked'] {
   background: var(--color-surface-raised);
-  color: var(--color-muted);
+  color: var(--color-text-muted);
 }
 
 .details,
@@ -221,7 +221,7 @@
 
 .details dt,
 .assetMetadata dt {
-  color: var(--color-muted);
+  color: var(--color-text-muted);
 }
 
 .details dd,

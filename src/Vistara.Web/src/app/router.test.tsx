@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -69,7 +69,9 @@ describe('application shell', () => {
 
     const navigation = router.navigate('/slow');
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Loading page');
+    expect(
+      await screen.findByRole('status', { name: 'Page loading' }),
+    ).toHaveTextContent('Loading page');
 
     finishLoading?.();
     await navigation;
@@ -77,6 +79,21 @@ describe('application shell', () => {
     expect(
       await screen.findByRole('heading', { name: 'Loaded route' }),
     ).toBeInTheDocument();
+  });
+
+  it('announces and focuses the destination heading after route changes', async () => {
+    const router = createAppRouter({ initialEntries: ['/library'] });
+
+    render(<RouterProvider router={router} />);
+    await screen.findByRole('heading', { name: 'Library' });
+
+    await router.navigate('/albums');
+
+    const heading = await screen.findByRole('heading', { name: 'Albums' });
+    await waitFor(() => expect(heading).toHaveFocus());
+    expect(
+      screen.getByRole('status', { name: 'Current page' }),
+    ).toHaveTextContent('Albums');
   });
 
   it('renders a useful boundary when a route loader fails', async () => {
@@ -123,10 +140,11 @@ describe('application shell', () => {
     ).toHaveTextContent(
       'Static preview only—no API, authentication, uploads, persistence, or worker processing.',
     );
-    expect(screen.getByRole('link', { name: 'Vistara library' })).toHaveAttribute(
-      'href',
-      '/Vistara/library',
-    );
+    for (const brandLink of screen.getAllByRole('link', {
+      name: 'Vistara library',
+    })) {
+      expect(brandLink).toHaveAttribute('href', '/Vistara/library');
+    }
   });
 
   it('does not show the static preview notice in the normal application', async () => {

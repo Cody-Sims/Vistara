@@ -32,7 +32,7 @@ describe('accessibility audit foundations', () => {
           minimum: 4.5,
         },
         {
-          foreground: '--color-muted',
+          foreground: '--color-text-muted',
           background: '--color-canvas',
           minimum: 4.5,
         },

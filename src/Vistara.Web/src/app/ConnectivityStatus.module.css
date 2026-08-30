@@ -1,0 +1,42 @@
+.status {
+  display: inline-flex;
+  min-block-size: var(--target-min);
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 640;
+}
+
+.indicator {
+  inline-size: 0.5rem;
+  block-size: 0.5rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.online .indicator {
+  color: var(--color-accent);
+  box-shadow: 0 0 0 0.2rem var(--color-accent-soft);
+}
+
+.offline {
+  color: var(--color-warning);
+}
+
+@media (max-width: 34rem) {
+  .status {
+    position: absolute;
+    overflow: hidden;
+    inline-size: 1px;
+    block-size: 1px;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+@media (forced-colors: active) {
+  .indicator {
+    border: 1px solid currentColor;
+  }
+}

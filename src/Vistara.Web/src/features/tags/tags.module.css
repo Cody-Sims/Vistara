@@ -20,7 +20,7 @@
 }
 
 .header p {
-  color: var(--color-muted);
+  color: var(--color-text-muted);
 }
 
 .eyebrow {
@@ -114,7 +114,7 @@
 }
 
 .filter small {
-  color: var(--color-muted);
+  color: var(--color-text-muted);
 }
 
 .swatch {
