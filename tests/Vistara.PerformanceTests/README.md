@@ -17,7 +17,9 @@ adapter when native codecs are available, concurrent SQLite upload/job
 persistence, and built frontend bundle sizes. Missing native codecs or a
 production web build are reported as unavailable instead of being substituted
 with synthetic success. Smoke mode permits unavailable reference-only budgets
-so contributors can run it without external infrastructure.
+so contributors can run it without external infrastructure. The production
+bundle remains in `src/Vistara.Web/dist` when the separate Pages preview is
+built into `src/Vistara.Web/dist-pages`.
 
 ## Reference host
 

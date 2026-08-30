@@ -17,6 +17,7 @@ TestResults/
 # Frontend dependencies and output
 **/node_modules/
 **/dist/
+**/dist-pages/
 **/.vite/
 **/playwright-report/
 **/test-results/

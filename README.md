@@ -22,7 +22,7 @@ node eng/validate-agent-workflows.mjs
 node --test eng/tests/*.test.mjs
 ```
 
-`npm --prefix src/Vistara.Web run build:pages` creates a GitHub Pages artifact under `src/Vistara.Web/dist`. That artifact is a static preview only; it has no API, authentication, uploads, persistence, or worker processing.
+`npm --prefix src/Vistara.Web run build:pages` creates a GitHub Pages artifact under `src/Vistara.Web/dist-pages`, separately from the production bundle in `src/Vistara.Web/dist`. The Pages artifact is a static preview only; it has no API, authentication, uploads, persistence, or worker processing.
 
 ## Layout
 
