@@ -25,6 +25,19 @@ empty settings evaluate to `NULL`, so policies fail closed. `FORCE ROW LEVEL
 SECURITY` also applies policies to the table owner; PostgreSQL superusers and
 roles granted `BYPASSRLS` must not be used by the runtime.
 
+## Worker tenant routing
+
+`worker_tenant_catalog` is an intentionally non-RLS routing table. It contains
+only the routed tenant ID, worker eligibility, tenant version, and update time;
+it contains no user, credential, media, or tenant-content metadata. Its
+migration reads `tenants` through a temporary migration-scoped RLS policy, then
+removes that policy.
+
+Production deployments with separate database roles create the conventional
+`vistara_worker` role before applying migrations and grant the worker login
+membership in it. The catalog migration grants that role `SELECT` on this table
+only. It grants no tenant-table access and never grants `BYPASSRLS`.
+
 Provider-specific storage uses PostgreSQL `uuid`, `bigint`, `boolean`, and
 `timestamp with time zone` types. SQLite-specific affinities remain isolated
 to its independent migration history.
@@ -33,7 +46,7 @@ Verification:
 
 ```bash
 dotnet ef migrations list --project src/Vistara.Migrations.Postgres
-dotnet test src/Vistara.Migrations.Postgres/Verification/Vistara.Migrations.Postgres.Verification.csproj
+dotnet test tests/Vistara.MigrationProviderTests/Postgres/Vistara.MigrationProviderTests.Postgres.csproj
 ```
 
 The verification project checks normal and idempotent empty-database scripts,

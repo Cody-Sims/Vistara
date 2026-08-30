@@ -122,6 +122,15 @@ public sealed class SqliteMigrationTests
                 "existing"));
         await ExecuteAsync(
             connection,
+            TenantInsert(
+                "01991a54-6c00-7000-8000-000000000002",
+                "01991a54-6c00-7000-8000-000000000002",
+                "suspended",
+                status: "Suspended",
+                version: 7,
+                updatedAtUtc: "2026-08-29T01:00:00Z"));
+        await ExecuteAsync(
+            connection,
             """
             INSERT INTO quota_reservations (
                 id, tenant_id, reserved_bytes, reserved_objects,
@@ -143,6 +152,32 @@ public sealed class SqliteMigrationTests
             await ExecuteScalarAsync(
                 connection,
                 "SELECT COUNT(*) FROM tenants WHERE slug = 'existing';"));
+        Assert.Equal(
+            1L,
+            await ExecuteScalarAsync(
+                connection,
+                """
+                SELECT COUNT(*)
+                FROM worker_tenant_catalog
+                WHERE routed_tenant_id =
+                          '01991a54-6c00-7000-8000-000000000001'
+                  AND worker_enabled = 1
+                  AND version = 1
+                  AND updated_at_utc = '2026-08-29T00:00:00Z';
+                """));
+        Assert.Equal(
+            1L,
+            await ExecuteScalarAsync(
+                connection,
+                """
+                SELECT COUNT(*)
+                FROM worker_tenant_catalog
+                WHERE routed_tenant_id =
+                          '01991a54-6c00-7000-8000-000000000002'
+                  AND worker_enabled = 0
+                  AND version = 7
+                  AND updated_at_utc = '2026-08-29T01:00:00Z';
+                """));
         Assert.Equal(
             1L,
             await ExecuteScalarAsync(
@@ -229,14 +264,20 @@ public sealed class SqliteMigrationTests
             MigrationTestSupport.Count(actual.CreateSql, " CHECK ("));
     }
 
-    private static string TenantInsert(string id, string tenantId, string slug) =>
+    private static string TenantInsert(
+        string id,
+        string tenantId,
+        string slug,
+        string status = "Active",
+        long version = 1,
+        string updatedAtUtc = "2026-08-29T00:00:00Z") =>
         $$"""
          INSERT INTO tenants (
              id, tenant_id, slug, name, status, settings_json, quotas_json,
              created_at_utc, updated_at_utc, version)
          VALUES (
-             '{{id}}', '{{tenantId}}', '{{slug}}', 'Tenant', 'Active', '{}', '{}',
-             '2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z', 1);
+             '{{id}}', '{{tenantId}}', '{{slug}}', 'Tenant', '{{status}}', '{}', '{}',
+             '2026-08-29T00:00:00Z', '{{updatedAtUtc}}', {{version}});
          """;
 
     private static async Task ExecuteAsync(

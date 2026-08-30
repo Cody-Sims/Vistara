@@ -35,6 +35,10 @@ public sealed partial class PostgresMigrationTests
             MigrationTestSupport.PostgresLegacyUploadQuotaMigration,
             script,
             StringComparison.Ordinal);
+        Assert.Contains(
+            MigrationTestSupport.PostgresWorkerTenantCatalogMigration,
+            script,
+            StringComparison.Ordinal);
         Assert.Contains("__EFMigrationsHistory", script, StringComparison.Ordinal);
         Assert.Contains("DO $EF$", script, StringComparison.Ordinal);
         Assert.Contains("uuid", script, StringComparison.Ordinal);
@@ -101,7 +105,7 @@ public sealed partial class PostgresMigrationTests
         using var context = MigrationTestSupport.CreatePostgresContext();
         string script = context.GetService<IMigrator>().GenerateScript(
             MigrationTestSupport.InitialMigration,
-            MigrationTestSupport.PostgresLegacyUploadQuotaMigration);
+            MigrationTestSupport.PostgresWorkerTenantCatalogMigration);
 
         Assert.Contains(
             "CREATE POLICY \"vistara_migration_20260829034648\"",
@@ -130,6 +134,14 @@ public sealed partial class PostgresMigrationTests
             StringComparison.Ordinal);
         Assert.Contains(
             "DROP POLICY \"vistara_migration_20260829183622\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "CREATE POLICY \"vistara_migration_20260830044748\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "DROP POLICY \"vistara_migration_20260830044748\"",
             script,
             StringComparison.Ordinal);
         Assert.DoesNotContain(
@@ -186,6 +198,31 @@ public sealed partial class PostgresMigrationTests
             script,
             StringComparison.Ordinal);
         Assert.Contains(
+            "INSERT INTO worker_tenant_catalog",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "tenant.status = 'Active'",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "GRANT SELECT ON TABLE \"worker_tenant_catalog\" TO \"vistara_worker\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            MigrationTestSupport.Count(
+                script,
+                "GRANT SELECT ON TABLE \"worker_tenant_catalog\" TO \"vistara_worker\""));
+        Assert.DoesNotContain(
+            "GRANT ALL",
+            script,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            "ON TABLE \"tenants\" TO \"vistara_worker\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "replace(key_row.id::text, '-', '') ||",
             script,
             StringComparison.Ordinal);
@@ -214,6 +251,10 @@ public sealed partial class PostgresMigrationTests
             script,
             "vistara_migration_20260829183622",
             "CREATE TEMP TABLE legacy_upload_job_decisions");
+        AssertMigrationPolicySurrounds(
+            script,
+            "vistara_migration_20260830044748",
+            "INSERT INTO worker_tenant_catalog");
     }
 
     [Fact]
@@ -246,12 +287,26 @@ public sealed partial class PostgresMigrationTests
             model.Tables.Single(table => table.Name == "public_derivative_routes")
                 .Columns.Select(column => column.Name)
                 .Order(StringComparer.Ordinal));
+        Assert.Equal(
+            [
+                "routed_tenant_id",
+                "updated_at_utc",
+                "version",
+                "worker_enabled",
+            ],
+            model.Tables.Single(table => table.Name == "worker_tenant_catalog")
+                .Columns.Select(column => column.Name)
+                .Order(StringComparer.Ordinal));
         Assert.DoesNotContain(
             "CREATE POLICY \"tenant_isolation\" ON \"authentication_routes\"",
             script,
             StringComparison.Ordinal);
         Assert.DoesNotContain(
             "CREATE POLICY \"tenant_isolation\" ON \"public_derivative_routes\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "CREATE POLICY \"tenant_isolation\" ON \"worker_tenant_catalog\"",
             script,
             StringComparison.Ordinal);
     }

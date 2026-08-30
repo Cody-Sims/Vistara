@@ -7,14 +7,21 @@ using Vistara.Domain.Assets;
 using Vistara.Domain.Identity;
 using Vistara.Domain.Tenancy;
 using Vistara.Domain.Uploads;
+using Vistara.Persistence.Jobs;
 using Vistara.Persistence.Model;
 
 namespace Vistara.Persistence.Repositories;
 
-public sealed class TenantRepository(VistaraDbContext context) : ITenantRepository
+public sealed class TenantRepository : ITenantRepository
 {
-    private readonly VistaraDbContext _context =
-        context ?? throw new ArgumentNullException(nameof(context));
+    private readonly VistaraDbContext _context;
+    private readonly WorkerTenantCatalogWriter _workerTenantCatalog;
+
+    public TenantRepository(VistaraDbContext context)
+    {
+        _context = context ?? throw new ArgumentNullException(nameof(context));
+        _workerTenantCatalog = new WorkerTenantCatalogWriter(_context);
+    }
 
     public async ValueTask<Tenant?> FindByIdAsync(
         TenantId id,
@@ -40,6 +47,7 @@ public sealed class TenantRepository(VistaraDbContext context) : ITenantReposito
     public async ValueTask AddAsync(Tenant tenant, CancellationToken cancellationToken)
     {
         _context.Tenants.Add(DomainMapper.ToRow(tenant));
+        _workerTenantCatalog.Add(tenant);
         await _context.SaveChangesAsync(cancellationToken);
     }
 
@@ -55,6 +63,10 @@ public sealed class TenantRepository(VistaraDbContext context) : ITenantReposito
         EnsureVersion(current.Version, expectedVersion, "tenant");
         Copy(DomainMapper.ToRow(tenant), current);
         SetOriginalVersion(current, expectedVersion);
+        await _workerTenantCatalog.UpdateAsync(
+            tenant,
+            expectedVersion,
+            cancellationToken);
         await _context.SaveChangesAsync(cancellationToken);
     }
 

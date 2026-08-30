@@ -72,20 +72,16 @@ public sealed class WorkerTenantRuntimeCompositionTests
         await context.SaveChangesAsync();
         await context.Database.ExecuteSqlInterpolatedAsync(
             $"""
-             INSERT INTO authentication_routes (
-                 lookup_digest,
-                 kind,
+             INSERT INTO worker_tenant_catalog (
                  routed_tenant_id,
-                 principal_id,
-                 credential_id,
-                 created_at_utc)
+                 worker_enabled,
+                 updated_at_utc,
+                 version)
              VALUES (
-                 {"worker-catalog-route"},
-                 {"ApiKey"},
                  {tenantId},
-                 {Guid.CreateVersion7()},
-                 {Guid.CreateVersion7()},
-                 {Now})
+                 {true},
+                 {Now},
+                 {1})
              """);
     }
 

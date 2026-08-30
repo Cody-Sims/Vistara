@@ -813,6 +813,35 @@ namespace Vistara.Migrations.Sqlite.Migrations
                         });
                 });
 
+            modelBuilder.Entity("Vistara.Persistence.Jobs.WorkerTenantCatalogRow", b =>
+                {
+                    b.Property<Guid>("RoutedTenantId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("routed_tenant_id");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("version");
+
+                    b.Property<bool>("WorkerEnabled")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("worker_enabled");
+
+                    b.HasKey("RoutedTenantId");
+
+                    b.HasIndex("WorkerEnabled", "RoutedTenantId");
+
+                    b.ToTable("worker_tenant_catalog", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_worker_tenant_catalog_version", "\"version\" >= 1");
+                        });
+                });
+
             modelBuilder.Entity("Vistara.Persistence.Media.PublicDerivativeRouteRow", b =>
                 {
                     b.Property<string>("LookupDigest")
@@ -3125,6 +3154,15 @@ namespace Vistara.Migrations.Sqlite.Migrations
                         .WithOne()
                         .HasForeignKey("Vistara.Persistence.Ingest.IngestOperationRow", "TenantId", "UploadSessionId")
                         .HasPrincipalKey("Vistara.Persistence.Model.UploadSessionRow", "TenantId", "Id")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Vistara.Persistence.Jobs.WorkerTenantCatalogRow", b =>
+                {
+                    b.HasOne("Vistara.Persistence.Model.TenantRow", null)
+                        .WithOne()
+                        .HasForeignKey("Vistara.Persistence.Jobs.WorkerTenantCatalogRow", "RoutedTenantId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

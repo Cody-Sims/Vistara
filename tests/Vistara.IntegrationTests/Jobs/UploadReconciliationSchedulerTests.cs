@@ -149,20 +149,16 @@ public sealed class UploadReconciliationSchedulerTests
 
         await database.Database.ExecuteSqlInterpolatedAsync(
             $"""
-             INSERT INTO authentication_routes (
-                 lookup_digest,
-                 kind,
+             INSERT INTO worker_tenant_catalog (
                  routed_tenant_id,
-                 principal_id,
-                 credential_id,
-                 created_at_utc)
+                 worker_enabled,
+                 updated_at_utc,
+                 version)
              VALUES (
-                 {$"worker-{slug}"},
-                 {"ApiKey"},
                  {tenantId},
-                 {Guid.CreateVersion7()},
-                 {Guid.CreateVersion7()},
-                 {now})
+                 {true},
+                 {now},
+                 {1})
              """);
     }
 

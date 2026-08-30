@@ -19,8 +19,10 @@ public sealed class PostgresMigrationVerificationTests
         "20260829130313_NormalizeLegacyRuntimeData";
     private const string LegacyUploadQuotaMigration =
         "20260829183622_ReconcileLegacyUploadJobQuota";
+    private const string WorkerTenantCatalogMigration =
+        "20260830044748_AddWorkerTenantCatalog";
     private const int ReplacedCheckConstraints = 3;
-    private const int MigrationBackfillPolicies = 12;
+    private const int MigrationBackfillPolicies = 13;
 
     private static readonly string[] ExpectedMigrations =
     [
@@ -29,6 +31,7 @@ public sealed class PostgresMigrationVerificationTests
         RuntimeReconciliationMigration,
         LegacyDataMigration,
         LegacyUploadQuotaMigration,
+        WorkerTenantCatalogMigration,
     ];
 
     [Fact]
@@ -83,6 +86,10 @@ public sealed class PostgresMigrationVerificationTests
             StringComparison.Ordinal);
         Assert.Contains(
             LegacyUploadQuotaMigration,
+            idempotentScript,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            WorkerTenantCatalogMigration,
             idempotentScript,
             StringComparison.Ordinal);
         Assert.Contains(

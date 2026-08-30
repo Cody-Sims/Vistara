@@ -22,6 +22,8 @@ public sealed class SqliteMigrationVerificationTests
         "20260829130302_NormalizeLegacyRuntimeData";
     private const string LegacyUploadQuotaMigration =
         "20260829183036_ReconcileLegacyUploadJobQuota";
+    private const string WorkerTenantCatalogMigration =
+        "20260830044737_AddWorkerTenantCatalog";
 
     private static readonly string[] ExpectedMigrations =
     [
@@ -30,6 +32,7 @@ public sealed class SqliteMigrationVerificationTests
         RuntimeReconciliationMigration,
         LegacyDataMigration,
         LegacyUploadQuotaMigration,
+        WorkerTenantCatalogMigration,
     ];
 
     private static readonly string[] ExpectedTables =
@@ -80,6 +83,7 @@ public sealed class SqliteMigrationVerificationTests
         "upload_reconciliation_checkpoints",
         "upload_sessions",
         "users",
+        "worker_tenant_catalog",
     ];
 
     [Fact]
@@ -145,6 +149,10 @@ public sealed class SqliteMigrationVerificationTests
             script,
             StringComparison.Ordinal);
         Assert.Contains(
+            WorkerTenantCatalogMigration,
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "CREATE TEMP TABLE legacy_upload_job_decisions",
             script,
             StringComparison.Ordinal);
@@ -167,7 +175,7 @@ public sealed class SqliteMigrationVerificationTests
         IMigrator migrator = context.GetService<IMigrator>();
 
         string rollback = migrator.GenerateScript(
-            LegacyDataMigration,
+            WorkerTenantCatalogMigration,
             Migration.InitialDatabase);
         foreach (string table in ExpectedTables)
         {

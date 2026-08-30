@@ -79,6 +79,7 @@ public sealed class PersistenceModelTests
                 "upload_reconciliation_checkpoints",
                 "upload_sessions",
                 "users",
+                "worker_tenant_catalog",
             ],
             tableNames);
     }

@@ -55,6 +55,8 @@ public sealed class VistaraDbContext(
     public DbSet<IngestOperationRow> IngestOperations => Set<IngestOperationRow>();
     public DbSet<AuditEventRow> AuditEvents => Set<AuditEventRow>();
     public DbSet<JobRow> Jobs => Set<JobRow>();
+    internal DbSet<WorkerTenantCatalogRow> WorkerTenantCatalog =>
+        Set<WorkerTenantCatalogRow>();
     public DbSet<AlbumRow> Albums => Set<AlbumRow>();
     public DbSet<AlbumItemRow> AlbumItems => Set<AlbumItemRow>();
     public DbSet<TagRow> Tags => Set<TagRow>();
@@ -101,6 +103,7 @@ public sealed class VistaraDbContext(
         ConfigureUploads(modelBuilder);
         ConfigureIngest(modelBuilder);
         ConfigureJobs(modelBuilder);
+        WorkerTenantCatalogPersistenceContributor.Configure(modelBuilder);
         OutboxPersistenceContributor.Configure(modelBuilder, this);
         ConfigureGallery(modelBuilder);
         ConfigureSharing(modelBuilder);
