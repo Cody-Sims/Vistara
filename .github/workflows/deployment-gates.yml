@@ -50,3 +50,63 @@ jobs:
           path: artifacts/migration-lock/*.log
           if-no-files-found: ignore
           retention-days: 7
+
+  compose-startup:
+    name: Compose startup and health
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Generate deployment credentials
+        run: ./deploy/generate-env.sh deploy/.env
+
+      - name: Build deployment images
+        run: >-
+          docker compose --env-file deploy/.env
+          --file deploy/compose.starter.yml build
+
+      - name: Validate Compose topologies
+        run: |
+          set -euo pipefail
+          for file in development starter postgres; do
+            docker compose --env-file deploy/.env \
+              --file "deploy/compose.$file.yml" config --quiet
+          done
+
+      - name: Start and probe the starter topology
+        run: >-
+          ./deploy/containers/tests/compose-startup.sh
+          --file deploy/compose.starter.yml
+          --env-file deploy/.env
+          --project vistara-starter-gate
+          --completed migrate
+          --service api
+          --service worker
+          --service proxy
+          --probe http://127.0.0.1:8080/health/live
+          --probe http://127.0.0.1:8080/health/ready
+          --probe http://127.0.0.1:8080/health/startup
+
+      - name: Start and probe the PostgreSQL topology
+        run: >-
+          ./deploy/containers/tests/compose-startup.sh
+          --file deploy/compose.postgres.yml
+          --env-file deploy/.env
+          --project vistara-postgres-gate
+          --completed migrate
+          --completed minio-bootstrap
+          --service postgres
+          --service minio
+          --service api
+          --service worker
+          --service proxy
+          --probe http://127.0.0.1:8080/health/live
+          --probe http://127.0.0.1:8080/health/ready
+          --probe http://127.0.0.1:8080/health/startup
