@@ -44,6 +44,13 @@ public static class ApiHealthEndpointRouteBuilderExtensions
     {
         ArgumentNullException.ThrowIfNull(endpoints);
         endpoints.MapGet(
+                "/health/live",
+                static (ApiHealthService health, CancellationToken cancellationToken) =>
+                    health.CheckAsync(
+                        HealthEndpointKind.Liveness,
+                        cancellationToken))
+            .AllowAnonymous();
+        endpoints.MapGet(
                 "/health/ready",
                 static (ApiHealthService health, CancellationToken cancellationToken) =>
                     health.CheckAsync(

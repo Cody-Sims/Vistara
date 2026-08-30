@@ -1,4 +1,8 @@
 using Vistara.Observability.Health;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Vistara.Api.Health;
 using Vistara.Application.Derivatives;
@@ -11,6 +15,43 @@ namespace Vistara.IntegrationTests.Health;
 
 public sealed class HealthEvaluationTests
 {
+    [Fact]
+    public async Task Liveness_route_is_anonymous_and_returns_process_health()
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.Services.AddVistaraApiHealth();
+        await using WebApplication app = builder.Build();
+        app.MapVistaraApiHealthEndpoints();
+
+        RouteEndpoint endpoint = Assert.Single(
+            ((IEndpointRouteBuilder)app).DataSources
+                .SelectMany(source => source.Endpoints)
+                .OfType<RouteEndpoint>(),
+            candidate =>
+                candidate.RoutePattern.RawText == "/health/live" &&
+                candidate.Metadata.GetMetadata<HttpMethodMetadata>()!.HttpMethods
+                    .Contains("GET", StringComparer.Ordinal));
+        Assert.NotNull(endpoint.Metadata.GetMetadata<IAllowAnonymous>());
+
+        await using AsyncServiceScope scope = app.Services.CreateAsyncScope();
+        var context = new DefaultHttpContext
+        {
+            RequestServices = scope.ServiceProvider,
+        };
+        context.Request.Method = "GET";
+        context.Request.Path = "/health/live";
+        context.Response.Body = new MemoryStream();
+
+        await endpoint.RequestDelegate!(context);
+        context.Response.Body.Position = 0;
+        string body = await new StreamReader(context.Response.Body)
+            .ReadToEndAsync(CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
+        Assert.Contains("\"name\":\"process\"", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"name\":\"database\"", body, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Readiness_requires_database_schema_storage_and_queue()
     {
@@ -129,6 +170,84 @@ public sealed class HealthEvaluationTests
                 HealthDependency.Imaging,
             ],
             report.Checks.Select(check => check.Dependency));
+    }
+
+    [Fact]
+    public async Task Multiple_dependency_probes_all_run_and_use_worst_state()
+    {
+        DelegateHealthProbe healthyStorage = Healthy(HealthDependency.Storage);
+        var unhealthyStorage = new DelegateHealthProbe(
+            HealthDependency.Storage,
+            _ => ValueTask.FromResult(
+                HealthProbeResult.Unhealthy(
+                    HealthReasonCodes.StorageUnavailable)));
+        var evaluator = new SafeHealthEvaluator(
+        [
+            Healthy(HealthDependency.Database),
+            Healthy(HealthDependency.Schema),
+            healthyStorage,
+            unhealthyStorage,
+            Healthy(HealthDependency.Queue),
+        ]);
+
+        HealthReport report = await evaluator.EvaluateAsync(
+            HealthEndpointKind.Readiness,
+            CancellationToken.None);
+
+        HealthCheckResult storage = Assert.Single(
+            report.Checks,
+            check => check.Dependency == HealthDependency.Storage);
+        Assert.Equal(HealthState.Unhealthy, report.State);
+        Assert.Equal(HealthState.Unhealthy, storage.State);
+        Assert.Equal(
+            HealthReasonCodes.StorageUnavailable,
+            storage.ReasonCode);
+        Assert.Equal(1, healthyStorage.InvocationCount);
+        Assert.Equal(1, unhealthyStorage.InvocationCount);
+    }
+
+    [Fact]
+    public async Task Multiple_probe_failures_choose_a_deterministic_specific_reason()
+    {
+        const string sensitive = "server=private password=secret";
+        var unavailable = new DelegateHealthProbe(
+            HealthDependency.Storage,
+            _ => throw new InvalidOperationException(sensitive));
+        var storageFailure = new DelegateHealthProbe(
+            HealthDependency.Storage,
+            _ => ValueTask.FromResult(
+                HealthProbeResult.Unhealthy(
+                    HealthReasonCodes.StorageUnavailable)));
+        IHealthDependencyProbe[] otherProbes =
+        [
+            Healthy(HealthDependency.Database),
+            Healthy(HealthDependency.Schema),
+            Healthy(HealthDependency.Queue),
+        ];
+
+        HealthReport first = await new SafeHealthEvaluator(
+            [.. otherProbes, unavailable, storageFailure])
+            .EvaluateAsync(HealthEndpointKind.Readiness, CancellationToken.None);
+        HealthReport reversed = await new SafeHealthEvaluator(
+            [.. otherProbes, storageFailure, unavailable])
+            .EvaluateAsync(HealthEndpointKind.Readiness, CancellationToken.None);
+
+        HealthCheckResult firstStorage = Assert.Single(
+            first.Checks,
+            check => check.Dependency == HealthDependency.Storage);
+        HealthCheckResult reversedStorage = Assert.Single(
+            reversed.Checks,
+            check => check.Dependency == HealthDependency.Storage);
+        Assert.Equal(
+            HealthReasonCodes.StorageUnavailable,
+            firstStorage.ReasonCode);
+        Assert.Equal(firstStorage, reversedStorage);
+        Assert.Equal(2, unavailable.InvocationCount);
+        Assert.Equal(2, storageFailure.InvocationCount);
+        Assert.DoesNotContain(
+            sensitive,
+            HealthReportJson.Serialize(first),
+            StringComparison.Ordinal);
     }
 
     [Fact]

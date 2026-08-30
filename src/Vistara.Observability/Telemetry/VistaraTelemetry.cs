@@ -24,12 +24,34 @@ public enum TelemetryOutcome
     Cancelled,
 }
 
+public enum TelemetryCheckpointKind
+{
+    DerivativeOwnershipAcquired,
+    DerivativeSourceVerified,
+    DerivativeOutputTransformed,
+    DerivativeOutputStaged,
+    DerivativeDestinationPublished,
+    DerivativeDestinationVisible,
+    DerivativeReadyCommitted,
+    DerivativeStagingDeleted,
+    DerivativeCleanupCommitted,
+    ReconciliationCandidateRevalidated,
+    ReconciliationMultipartInspected,
+    ReconciliationMultipartAborted,
+    ReconciliationObjectInspected,
+    ReconciliationQuarantined,
+    ReconciliationSessionTransitioned,
+    ReconciliationStagingDeleted,
+    ReconciliationCursorSaved,
+}
+
 public static class TelemetryTagNames
 {
     public const string Area = "vistara.area";
     public const string Operation = "vistara.operation";
     public const string Outcome = "vistara.outcome";
     public const string ReasonCode = "vistara.reason_code";
+    public const string Checkpoint = "vistara.checkpoint";
 }
 
 public static class TelemetryReasonCodes
@@ -83,6 +105,8 @@ public static class VistaraTelemetry
         Metrics.CreateHistogram<double>(
             "vistara.operation.duration",
             unit: "ms");
+    internal static readonly Counter<long> Checkpoints =
+        Metrics.CreateCounter<long>("vistara.checkpoints");
 
     public static TelemetryOperation Start(TelemetryOperationKind operation) =>
         new(operation);
@@ -92,6 +116,19 @@ public static class VistaraTelemetry
         TelemetryOutcome outcome,
         string? reasonCode = null) =>
         TelemetryDimensions.CreateLogState(operation, outcome, reasonCode);
+
+    public static void RecordCheckpoint(TelemetryCheckpointKind checkpoint)
+    {
+        (string area, string name) =
+            TelemetryDimensions.CheckpointNames(checkpoint);
+        Checkpoints.Add(
+            1,
+            new TagList
+            {
+                { TelemetryTagNames.Area, area },
+                { TelemetryTagNames.Checkpoint, name },
+            });
+    }
 }
 
 public sealed class TelemetryOperation : IDisposable
@@ -248,6 +285,47 @@ internal static class TelemetryDimensions
                 ("authorization", "authorization.decision"),
             TelemetryOperationKind.Worker => ("worker", "worker.loop"),
             _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        };
+
+    internal static (string Area, string Checkpoint) CheckpointNames(
+        TelemetryCheckpointKind checkpoint) =>
+        checkpoint switch
+        {
+            TelemetryCheckpointKind.DerivativeOwnershipAcquired =>
+                ("derivatives", "ownership_acquired"),
+            TelemetryCheckpointKind.DerivativeSourceVerified =>
+                ("derivatives", "source_verified"),
+            TelemetryCheckpointKind.DerivativeOutputTransformed =>
+                ("derivatives", "output_transformed"),
+            TelemetryCheckpointKind.DerivativeOutputStaged =>
+                ("derivatives", "output_staged"),
+            TelemetryCheckpointKind.DerivativeDestinationPublished =>
+                ("derivatives", "destination_published"),
+            TelemetryCheckpointKind.DerivativeDestinationVisible =>
+                ("derivatives", "destination_visible"),
+            TelemetryCheckpointKind.DerivativeReadyCommitted =>
+                ("derivatives", "ready_committed"),
+            TelemetryCheckpointKind.DerivativeStagingDeleted =>
+                ("derivatives", "staging_deleted"),
+            TelemetryCheckpointKind.DerivativeCleanupCommitted =>
+                ("derivatives", "cleanup_committed"),
+            TelemetryCheckpointKind.ReconciliationCandidateRevalidated =>
+                ("reconciliation", "candidate_revalidated"),
+            TelemetryCheckpointKind.ReconciliationMultipartInspected =>
+                ("reconciliation", "multipart_inspected"),
+            TelemetryCheckpointKind.ReconciliationMultipartAborted =>
+                ("reconciliation", "multipart_aborted"),
+            TelemetryCheckpointKind.ReconciliationObjectInspected =>
+                ("reconciliation", "object_inspected"),
+            TelemetryCheckpointKind.ReconciliationQuarantined =>
+                ("reconciliation", "quarantined"),
+            TelemetryCheckpointKind.ReconciliationSessionTransitioned =>
+                ("reconciliation", "session_transitioned"),
+            TelemetryCheckpointKind.ReconciliationStagingDeleted =>
+                ("reconciliation", "staging_deleted"),
+            TelemetryCheckpointKind.ReconciliationCursorSaved =>
+                ("reconciliation", "cursor_saved"),
+            _ => throw new ArgumentOutOfRangeException(nameof(checkpoint)),
         };
 
     private static string OutcomeName(TelemetryOutcome outcome) =>

@@ -77,7 +77,7 @@ public sealed class SafeHealthEvaluator
         if (!_probes.TryGetValue(
                 dependency,
                 out IHealthDependencyProbe[]? probes) ||
-            probes.Length != 1)
+            probes.Length == 0)
         {
             return new HealthCheckResult(
                 dependency,
@@ -85,26 +85,50 @@ public sealed class SafeHealthEvaluator
                 HealthReasonCodes.DependencyMissing);
         }
 
-        try
+        var failures = new List<HealthProbeResult>(probes.Length);
+        foreach (IHealthDependencyProbe probe in probes)
         {
-            HealthProbeResult result =
-                await probes[0].CheckAsync(cancellationToken);
+            try
+            {
+                HealthProbeResult result =
+                    await probe.CheckAsync(cancellationToken);
+                if (result.State == HealthState.Unhealthy)
+                {
+                    failures.Add(result);
+                }
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                failures.Add(
+                    HealthProbeResult.Unhealthy(
+                        HealthReasonCodes.DependencyUnavailable));
+            }
+        }
+
+        if (failures.Count == 0)
+        {
             return new HealthCheckResult(
                 dependency,
-                result.State,
-                result.ReasonCode);
+                HealthState.Healthy,
+                HealthReasonCodes.Healthy);
         }
-        catch (OperationCanceledException)
-            when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception)
-        {
-            return new HealthCheckResult(
-                dependency,
-                HealthState.Unhealthy,
-                HealthReasonCodes.DependencyUnavailable);
-        }
+
+        string reasonCode = failures
+            .Select(failure => failure.ReasonCode)
+            .OrderBy(
+                static reason => reason == HealthReasonCodes.DependencyUnavailable
+                    ? 1
+                    : 0)
+            .ThenBy(static reason => reason, StringComparer.Ordinal)
+            .First();
+        return new HealthCheckResult(
+            dependency,
+            HealthState.Unhealthy,
+            reasonCode);
     }
 }

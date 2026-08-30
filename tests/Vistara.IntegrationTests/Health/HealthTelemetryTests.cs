@@ -2,8 +2,10 @@ using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Vistara.Domain.Jobs;
+using Vistara.Application.Derivatives;
 using Vistara.Observability.Telemetry;
 using Vistara.Worker.Health;
+using Vistara.Worker.Features.Reconciliation.Uploads;
 using Xunit;
 
 namespace Vistara.IntegrationTests.Health;
@@ -100,6 +102,75 @@ public sealed class HealthTelemetryTests
             activity.TagObjects.Select(tag => $"{tag.Key}={tag.Value}"));
         Assert.DoesNotContain(jobId.Value.ToString(), tags, StringComparison.Ordinal);
         Assert.DoesNotContain(jobType, tags, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Checkpoints_do_not_emit_generic_operation_measurements()
+    {
+        var measurements = new List<(
+            string Instrument,
+            IReadOnlyDictionary<string, object?> Tags)>();
+        using var meterListener = new MeterListener();
+        meterListener.InstrumentPublished = (instrument, current) =>
+        {
+            if (instrument.Meter.Name == VistaraTelemetry.MeterName)
+            {
+                current.EnableMeasurementEvents(instrument);
+            }
+        };
+        meterListener.SetMeasurementEventCallback<long>(
+            (instrument, _, tags, _) =>
+                measurements.Add((instrument.Name, ToDictionary(tags))));
+        meterListener.SetMeasurementEventCallback<double>(
+            (instrument, _, tags, _) =>
+                measurements.Add((instrument.Name, ToDictionary(tags))));
+        meterListener.Start();
+
+        await new OpenTelemetryDerivativeCheckpointObserver().ReachedAsync(
+            DerivativeCheckpoint.OutputTransformed,
+            CancellationToken.None);
+        await new OpenTelemetryUploadReconciliationCheckpointObserver()
+            .ReachedAsync(
+                ReconciliationCheckpoint.CursorSaved,
+                CancellationToken.None);
+
+        Assert.DoesNotContain(
+            measurements,
+            measurement =>
+                measurement.Instrument == "vistara.operations" ||
+                measurement.Instrument == "vistara.operation.duration");
+        var checkpoints = measurements
+            .Where(measurement =>
+                measurement.Instrument == "vistara.checkpoints")
+            .ToArray();
+        Assert.Equal(2, checkpoints.Length);
+        Assert.Equal(
+            [
+                "derivatives/output_transformed",
+                "reconciliation/cursor_saved",
+            ],
+            checkpoints
+                .Select(measurement =>
+                    $"{measurement.Tags[TelemetryTagNames.Area]}/" +
+                    $"{measurement.Tags["vistara.checkpoint"]}")
+                .Order(StringComparer.Ordinal));
+        Assert.All(
+            checkpoints,
+            measurement =>
+            {
+                Assert.Subset(
+                    new HashSet<string>(StringComparer.Ordinal)
+                    {
+                        TelemetryTagNames.Area,
+                        "vistara.checkpoint",
+                    },
+                    measurement.Tags.Keys.ToHashSet(StringComparer.Ordinal));
+                Assert.DoesNotContain(
+                    measurement.Tags.Values,
+                    value => value?.ToString()?.Contains(
+                        "tenant",
+                        StringComparison.OrdinalIgnoreCase) == true);
+            });
     }
 
     private static Dictionary<string, object?> ToDictionary(

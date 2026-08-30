@@ -215,19 +215,29 @@ public sealed class OpenTelemetryDerivativeCheckpointObserver
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        TelemetryOperationKind operation = checkpoint switch
+        TelemetryCheckpointKind telemetryCheckpoint = checkpoint switch
         {
-            DerivativeCheckpoint.SourceVerified or
+            DerivativeCheckpoint.OwnershipAcquired =>
+                TelemetryCheckpointKind.DerivativeOwnershipAcquired,
+            DerivativeCheckpoint.SourceVerified =>
+                TelemetryCheckpointKind.DerivativeSourceVerified,
             DerivativeCheckpoint.OutputTransformed =>
-                TelemetryOperationKind.Imaging,
-            DerivativeCheckpoint.OutputStaged or
-            DerivativeCheckpoint.DestinationPublished or
-            DerivativeCheckpoint.DestinationVisible or
+                TelemetryCheckpointKind.DerivativeOutputTransformed,
+            DerivativeCheckpoint.OutputStaged =>
+                TelemetryCheckpointKind.DerivativeOutputStaged,
+            DerivativeCheckpoint.DestinationPublished =>
+                TelemetryCheckpointKind.DerivativeDestinationPublished,
+            DerivativeCheckpoint.DestinationVisible =>
+                TelemetryCheckpointKind.DerivativeDestinationVisible,
+            DerivativeCheckpoint.ReadyCommitted =>
+                TelemetryCheckpointKind.DerivativeReadyCommitted,
             DerivativeCheckpoint.StagingDeleted =>
-                TelemetryOperationKind.Storage,
-            _ => TelemetryOperationKind.Database,
+                TelemetryCheckpointKind.DerivativeStagingDeleted,
+            DerivativeCheckpoint.CleanupCommitted =>
+                TelemetryCheckpointKind.DerivativeCleanupCommitted,
+            _ => throw new ArgumentOutOfRangeException(nameof(checkpoint)),
         };
-        using TelemetryOperation scope = VistaraTelemetry.Start(operation);
+        VistaraTelemetry.RecordCheckpoint(telemetryCheckpoint);
         return ValueTask.CompletedTask;
     }
 }
@@ -264,10 +274,28 @@ public sealed class OpenTelemetryUploadReconciliationCheckpointObserver
         ReconciliationCheckpoint checkpoint,
         CancellationToken cancellationToken)
     {
-        _ = checkpoint;
         cancellationToken.ThrowIfCancellationRequested();
-        using TelemetryOperation operation =
-            VistaraTelemetry.Start(TelemetryOperationKind.Reconciliation);
+        TelemetryCheckpointKind telemetryCheckpoint = checkpoint switch
+        {
+            ReconciliationCheckpoint.CandidateRevalidated =>
+                TelemetryCheckpointKind.ReconciliationCandidateRevalidated,
+            ReconciliationCheckpoint.MultipartInspected =>
+                TelemetryCheckpointKind.ReconciliationMultipartInspected,
+            ReconciliationCheckpoint.MultipartAborted =>
+                TelemetryCheckpointKind.ReconciliationMultipartAborted,
+            ReconciliationCheckpoint.ObjectInspected =>
+                TelemetryCheckpointKind.ReconciliationObjectInspected,
+            ReconciliationCheckpoint.Quarantined =>
+                TelemetryCheckpointKind.ReconciliationQuarantined,
+            ReconciliationCheckpoint.SessionTransitioned =>
+                TelemetryCheckpointKind.ReconciliationSessionTransitioned,
+            ReconciliationCheckpoint.StagingDeleted =>
+                TelemetryCheckpointKind.ReconciliationStagingDeleted,
+            ReconciliationCheckpoint.CursorSaved =>
+                TelemetryCheckpointKind.ReconciliationCursorSaved,
+            _ => throw new ArgumentOutOfRangeException(nameof(checkpoint)),
+        };
+        VistaraTelemetry.RecordCheckpoint(telemetryCheckpoint);
         return ValueTask.CompletedTask;
     }
 }
