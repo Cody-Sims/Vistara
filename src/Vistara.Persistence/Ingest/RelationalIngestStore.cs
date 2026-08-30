@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Vistara.Application.Common;
+using Vistara.Application.Common.Storage;
 using Vistara.Application.Uploads.Quotas;
 using Vistara.Persistence.Model;
 using Vistara.Persistence.Uploads;
@@ -337,6 +338,54 @@ public sealed class RelationalIngestStore(
                     "The ingest canonical key is missing."));
     }
 
+    public async ValueTask RefreshDedupedBlobAsync(
+        Guid tenantId,
+        Guid uploadSessionId,
+        long uploadVersion,
+        Guid operationId,
+        BlobIdentity canonicalIdentity,
+        string? providerChecksum,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(canonicalIdentity);
+        _context.ChangeTracker.Clear();
+        await using IDbContextTransaction transaction =
+            await TenantDatabaseTransaction.BeginAsync(
+                _context,
+                tenantId,
+                cancellationToken);
+        UploadSessionRow upload = await _context.UploadSessions
+            .SingleAsync(row => row.Id == uploadSessionId, cancellationToken);
+        IngestOperationRow operation = await _context.IngestOperations
+            .SingleAsync(row => row.OperationId == operationId, cancellationToken);
+        EnsureFence(upload, operation, uploadVersion);
+        if (operation.PromotionMode != "ExistingExactBlob" ||
+            !string.Equals(
+                operation.CanonicalKey,
+                canonicalIdentity.Key.Value,
+                StringComparison.Ordinal) ||
+            operation.StorageProvider is null ||
+            operation.VerifiedSha256 is null ||
+            operation.VerifiedSizeBytes is null)
+        {
+            throw new InvalidOperationException(
+                "The deduplicated canonical refresh does not match its durable plan.");
+        }
+
+        BlobRow blob = await _context.Blobs.SingleAsync(
+            row =>
+                row.Provider == operation.StorageProvider &&
+                row.Sha256 == operation.VerifiedSha256 &&
+                row.SizeBytes == operation.VerifiedSizeBytes &&
+                row.State == "Active",
+            cancellationToken);
+        blob.ObjectKey = canonicalIdentity.Key.Value;
+        blob.ProviderVersion = canonicalIdentity.Version.Value;
+        blob.ProviderChecksum = providerChecksum;
+        await _context.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     public async ValueTask RejectAsync(
         Guid tenantId,
         Guid uploadSessionId,
@@ -344,7 +393,6 @@ public sealed class RelationalIngestStore(
         Guid auditEventId,
         string rejectionCode,
         DateTimeOffset rejectedAtUtc,
-        bool releaseReservation,
         CancellationToken cancellationToken)
     {
         _context.ChangeTracker.Clear();
@@ -372,14 +420,6 @@ public sealed class RelationalIngestStore(
         }
 
         EnsureFence(upload, operation, uploadVersion);
-        if (releaseReservation)
-        {
-            await ReleaseReservationAsync(
-                upload,
-                rejectedAtUtc,
-                cancellationToken);
-        }
-
         long expectedVersion = upload.Version;
         upload.State = "Rejected";
         upload.RejectionCode = rejectionCode;
@@ -479,43 +519,6 @@ public sealed class RelationalIngestStore(
             upload.ExpectedSha256,
             upload.DeclaredContentType,
             upload.StorageContainer ?? "media");
-    }
-
-    private async ValueTask ReleaseReservationAsync(
-        UploadSessionRow upload,
-        DateTimeOffset nowUtc,
-        CancellationToken cancellationToken)
-    {
-        QuotaReservationRow reservation = await _context.QuotaReservations
-            .SingleAsync(
-                row => row.UploadSessionId == upload.Id,
-                cancellationToken);
-        if (reservation.State == "Released")
-        {
-            return;
-        }
-
-        if (reservation.State != "Reserved")
-        {
-            throw new InvalidOperationException(
-                "The rejected upload reservation cannot be released.");
-        }
-
-        QuotaStoreTransitionResult result =
-            await QuotaPersistence.TransitionTrackedAsync(
-            _context,
-            new AtomicQuotaTransition(
-                reservation.Id,
-                QuotaReservationState.Released,
-                reservation.Version,
-                nowUtc),
-            consumedByOperationId: null,
-            cancellationToken);
-        if (result.Status != QuotaStoreTransitionStatus.Transitioned)
-        {
-            throw new DbUpdateConcurrencyException(
-                "The rejected upload reservation changed concurrently.");
-        }
     }
 
     private static PersistedIngestCleanup Cleanup(

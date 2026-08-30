@@ -339,6 +339,27 @@ internal static class QuotaPersistence
             return QuotaStoreTransitionResult.VersionConflict(current, snapshot);
         }
 
+        if (row.UploadSessionId is { } uploadSessionId &&
+            command.TargetState is
+                QuotaReservationState.Released or
+                QuotaReservationState.Expired)
+        {
+            UploadSessionRow? trackedUpload =
+                context.UploadSessions.Local.SingleOrDefault(
+                    upload => upload.Id == uploadSessionId);
+            bool cleanupCompleted =
+                trackedUpload?.CleanupCompletedAtUtc.HasValue ??
+                await context.UploadSessions
+                    .AsNoTracking()
+                    .Where(upload => upload.Id == uploadSessionId)
+                    .Select(upload => upload.CleanupCompletedAtUtc.HasValue)
+                    .SingleOrDefaultAsync(cancellationToken);
+            if (!cleanupCompleted)
+            {
+                return QuotaStoreTransitionResult.InvalidState(current, snapshot);
+            }
+        }
+
         if (current.State != QuotaReservationState.Reserved ||
             (command.TargetState == QuotaReservationState.Expired &&
              command.NowUtc < current.ExpiresAtUtc) ||
@@ -471,7 +492,11 @@ internal static class QuotaPersistence
         QuotaReservationRow[] expired = await context.QuotaReservations
             .Where(row =>
                 row.State == nameof(QuotaReservationState.Reserved) &&
-                row.ExpiresAtUtc <= nowUtc)
+                row.ExpiresAtUtc <= nowUtc &&
+                (row.UploadSessionId == null ||
+                 !context.UploadSessions.Any(upload =>
+                     upload.Id == row.UploadSessionId &&
+                     upload.CleanupCompletedAtUtc == null)))
             .ToArrayAsync(cancellationToken);
         foreach (QuotaReservationRow row in expired)
         {

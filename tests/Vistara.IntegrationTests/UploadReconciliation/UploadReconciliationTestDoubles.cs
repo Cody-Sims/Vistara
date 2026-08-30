@@ -9,6 +9,7 @@ internal sealed class TestReconciliationState(
     : IUploadReconciliationStatePort
 {
     private readonly List<UploadReconciliationCandidate> _candidates = [.. candidates];
+    private readonly Dictionary<Guid, string?> _savedCursors = [];
     private int _revalidationCount;
 
     internal int ReservationReleaseCount { get; private set; }
@@ -28,6 +29,19 @@ internal sealed class TestReconciliationState(
             or UploadReconciliationSessionState.Aborted
             or UploadReconciliationSessionState.Accepted
             or UploadReconciliationSessionState.Quarantined);
+
+    internal UploadReconciliationCandidate Current(Guid uploadSessionId) =>
+        _candidates.Single(item => item.Fence.UploadSessionId == uploadSessionId);
+
+    public ValueTask<string?> LoadCheckpointAsync(
+        Guid tenantId,
+        Guid runId,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(
+            _savedCursors.GetValueOrDefault(runId));
+    }
 
     public ValueTask<UploadReconciliationPage> ScanAsync(
         UploadReconciliationScanRequest request,
@@ -75,7 +89,7 @@ internal sealed class TestReconciliationState(
         return ValueTask.FromResult(current);
     }
 
-    public ValueTask<UploadReconciliationMutationResult> ExpireAndReleaseAsync(
+    public ValueTask<UploadReconciliationMutationResult> ExpireAsync(
         UploadReconciliationFence fence,
         DateTimeOffset utcNow,
         CancellationToken cancellationToken) =>
@@ -84,12 +98,41 @@ internal sealed class TestReconciliationState(
             current => current with
             {
                 State = UploadReconciliationSessionState.Expired,
-                ReservationReleased = true,
             },
-            releaseReservation: true,
+            releaseReservation: false,
             cancellationToken);
 
-    public ValueTask<UploadReconciliationMutationResult> CompleteAbortAndReleaseAsync(
+    public ValueTask<UploadReconciliationMutationResult> PrepareAbortAsync(
+        UploadReconciliationFence fence,
+        DateTimeOffset utcNow,
+        CancellationToken cancellationToken) =>
+        MutateAsync(
+            fence,
+            current => current with
+            {
+                State = UploadReconciliationSessionState.Aborting,
+            },
+            releaseReservation: false,
+            cancellationToken);
+
+    public ValueTask<UploadReconciliationMutationResult>
+        RecordMultipartIssuedForAbortAsync(
+            UploadReconciliationFence fence,
+            MultipartSession session,
+            DateTimeOffset utcNow,
+            CancellationToken cancellationToken) =>
+        MutateAsync(
+            fence,
+            current => current with
+            {
+                State = UploadReconciliationSessionState.Aborting,
+                ProviderUploadId = session.UploadId,
+                MultipartSession = session,
+            },
+            releaseReservation: false,
+            cancellationToken);
+
+    public ValueTask<UploadReconciliationMutationResult> CompleteAbortAsync(
         UploadReconciliationFence fence,
         DateTimeOffset utcNow,
         CancellationToken cancellationToken) =>
@@ -98,9 +141,8 @@ internal sealed class TestReconciliationState(
             current => current with
             {
                 State = UploadReconciliationSessionState.Aborted,
-                ReservationReleased = true,
             },
-            releaseReservation: true,
+            releaseReservation: false,
             cancellationToken);
 
     public ValueTask<UploadReconciliationMutationResult> RecordAbortOutcomeUnknownAsync(
@@ -137,7 +179,28 @@ internal sealed class TestReconciliationState(
         CancellationToken cancellationToken) =>
         MutateAsync(
             fence,
-            current => current,
+            current => current with
+            {
+                ReservationReleased =
+                    current.State == UploadReconciliationSessionState.Accepted
+                        ? current.ReservationReleased
+                        : true,
+            },
+            releaseReservation:
+                Current(fence.UploadSessionId).State !=
+                UploadReconciliationSessionState.Accepted,
+            cancellationToken);
+
+    public ValueTask<UploadReconciliationMutationResult> ResumeIngestAsync(
+        UploadReconciliationFence fence,
+        DateTimeOffset utcNow,
+        CancellationToken cancellationToken) =>
+        MutateAsync(
+            fence,
+            current => current with
+            {
+                State = UploadReconciliationSessionState.Verifying,
+            },
             releaseReservation: false,
             cancellationToken);
 
@@ -152,7 +215,7 @@ internal sealed class TestReconciliationState(
             fence,
             current => current with
             {
-                State = UploadReconciliationSessionState.Accepted,
+                State = UploadReconciliationSessionState.Verifying,
             },
             releaseReservation: false,
             cancellationToken);
@@ -181,6 +244,7 @@ internal sealed class TestReconciliationState(
         CancellationToken cancellationToken)
     {
         SavedCursor = cursor;
+        _savedCursors[runId] = cursor;
         return ValueTask.CompletedTask;
     }
 
@@ -259,6 +323,21 @@ internal sealed class TestReconciliationStorage : IUploadReconciliationStoragePo
             _objects.TryGetValue(key, out UploadReconciliationObjectHead? head)
                 ? UploadReconciliationHeadResult.Found(head)
                 : UploadReconciliationHeadResult.Missing());
+    }
+
+    public ValueTask<UploadReconciliationHeadResult> VerifyAsync(
+        BlobKey key,
+        long expectedSizeBytes,
+        CancellationToken cancellationToken) =>
+        HeadAsync(key, cancellationToken);
+
+    public ValueTask<UploadReconciliationMultipartRecovery> RecoverMultipartAsync(
+        UploadReconciliationMultipartIssuance issuance,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(
+            new UploadReconciliationMultipartRecovery(null, Retry: true));
     }
 
     public ValueTask<ReconciliationMultipartState> InspectMultipartAsync(

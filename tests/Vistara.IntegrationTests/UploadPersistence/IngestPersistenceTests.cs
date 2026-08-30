@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Vistara.Api.Features.Uploads;
 using Vistara.Application.Assets.Ingest;
+using Vistara.Application.Common;
 using Vistara.Application.Common.Auditing;
 using Vistara.Application.Common.Events;
 using Vistara.Application.Common.Imaging;
@@ -11,8 +12,10 @@ using Vistara.Contracts.Idempotency;
 using Vistara.Domain.Assets;
 using Vistara.Domain.Common;
 using Vistara.Domain.Jobs;
+using Vistara.IntegrationTests.Ingest;
 using Vistara.Worker.Composition.Platform;
 using Vistara.Worker.Features.Ingest;
+using Vistara.Worker.Features.Reconciliation.Uploads;
 using Xunit;
 
 namespace Vistara.IntegrationTests.UploadPersistence;
@@ -199,7 +202,193 @@ public sealed class IngestPersistenceTests
     }
 
     [Fact]
-    public async Task Rejection_releases_quota_and_writes_one_audit_record()
+    public async Task Reconciliation_recovers_verified_canonical_after_worker_crash()
+    {
+        Guid tenantId = Guid.CreateVersion7(UploadPersistenceDatabase.Now);
+        Guid actorId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(1));
+        await using UploadPersistenceDatabase database =
+            await UploadPersistenceDatabase.CreateAsync();
+        await database.SeedTenantAsync(tenantId, actorId);
+        TestBlobStore storage = new();
+        UploadSessionSnapshot committed = await CreateCommittedUploadAsync(
+            database,
+            storage,
+            tenantId,
+            actorId,
+            Guid.CreateVersion7(UploadPersistenceDatabase.Now.AddMilliseconds(2)),
+            "canonical-recovery");
+
+        using (ServiceProvider worker = database.CreateWorkerProvider(storage))
+        {
+            await using AsyncServiceScope scope = worker.CreateAsyncScope();
+            var checkpoints = new CrashCheckpointObserver
+            {
+                CancelAt = IngestCheckpoint.PromotionStored,
+            };
+            var ingest = new IngestService(
+                scope.ServiceProvider.GetRequiredService<IIngestTransactionPort>(),
+                storage,
+                scope.ServiceProvider.GetRequiredService<IImageProcessor>(),
+                scope.ServiceProvider.GetRequiredService<IClock>(),
+                scope.ServiceProvider.GetRequiredService<ImageDecodeLimits>(),
+                checkpoints);
+            await Assert.ThrowsAsync<OperationCanceledException>(
+                async () => await ingest.ProcessAsync(
+                    tenantId,
+                    committed.UploadId,
+                    CancellationToken.None));
+        }
+
+        await using (Vistara.Persistence.VistaraDbContext context =
+                     database.CreateContext(tenantId))
+        {
+            Vistara.Persistence.Jobs.JobRow job = await context.Jobs.SingleAsync();
+            job.State = "DeadLettered";
+            job.Attempts = job.MaxAttempts;
+            job.FailureCode = "jobs.processing_failed";
+            job.CompletedAtUtc = UploadPersistenceDatabase.Now.AddMinutes(1);
+            job.Version++;
+            await context.SaveChangesAsync();
+        }
+
+        using (ServiceProvider reconciler = database.CreateWorkerProvider(
+                   storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(30)),
+                   UploadPersistenceDatabase.Now.AddHours(30),
+                   addUploadReconciliation: true))
+        {
+            await using AsyncServiceScope scope = reconciler.CreateAsyncScope();
+            UploadReconciliationReport report = await scope.ServiceProvider
+                .GetRequiredService<UploadReconciliationService>()
+                .RunAsync(
+                    new UploadReconciliationRunRequest(
+                        tenantId,
+                        Guid.CreateVersion7(),
+                        cursor: null,
+                        dryRun: false),
+                    CancellationToken.None);
+            Assert.Equal(1, report.Counts.CanonicalPreserved);
+        }
+
+        await using (Vistara.Persistence.VistaraDbContext context =
+                     database.CreateContext(tenantId))
+        {
+            Assert.Equal("Pending", await context.Jobs.Select(row => row.State).SingleAsync());
+            Assert.Equal(
+                await context.UploadSessions.Select(row => row.Version).SingleAsync(),
+                await context.IngestOperations
+                    .Select(row => row.FencedUploadVersion)
+                    .SingleAsync());
+            Assert.Equal(
+                UploadPersistenceDatabase.Now.AddHours(54),
+                await context.QuotaReservations
+                    .Select(row => row.ExpiresAtUtc)
+                    .SingleAsync());
+        }
+
+        using (ServiceProvider restarted = database.CreateWorkerProvider(
+                   storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(30)),
+                   UploadPersistenceDatabase.Now.AddHours(30)))
+        {
+            await using AsyncServiceScope scope = restarted.CreateAsyncScope();
+            Vistara.Worker.Runtime.Jobs.JobHandlerResult result =
+                await scope.ServiceProvider
+                    .GetRequiredService<IngestService>()
+                    .ProcessAsync(
+                        tenantId,
+                        committed.UploadId,
+                        CancellationToken.None);
+            Assert.True(result.IsSuccess);
+        }
+
+        await using Vistara.Persistence.VistaraDbContext accepted =
+            database.CreateContext(tenantId);
+        Assert.Equal(
+            "Accepted",
+            await accepted.UploadSessions.Select(row => row.State).SingleAsync());
+        Assert.Single(await accepted.Assets.ToListAsync());
+        Assert.False(storage.Contains(new BlobKey(committed.StagingKey)));
+    }
+
+    [Fact]
+    public async Task Reconciliation_finishes_accepted_cleanup_after_worker_crash()
+    {
+        Guid tenantId = Guid.CreateVersion7(UploadPersistenceDatabase.Now);
+        Guid actorId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(1));
+        await using UploadPersistenceDatabase database =
+            await UploadPersistenceDatabase.CreateAsync();
+        await database.SeedTenantAsync(tenantId, actorId);
+        TestBlobStore storage = new();
+        UploadSessionSnapshot committed = await CreateCommittedUploadAsync(
+            database,
+            storage,
+            tenantId,
+            actorId,
+            Guid.CreateVersion7(UploadPersistenceDatabase.Now.AddMilliseconds(2)),
+            "accepted-cleanup");
+
+        using (ServiceProvider worker = database.CreateWorkerProvider(storage))
+        {
+            await using AsyncServiceScope scope = worker.CreateAsyncScope();
+            var checkpoints = new CrashCheckpointObserver
+            {
+                CancelAt = IngestCheckpoint.ActivationCommitted,
+            };
+            var ingest = new IngestService(
+                scope.ServiceProvider.GetRequiredService<IIngestTransactionPort>(),
+                storage,
+                scope.ServiceProvider.GetRequiredService<IImageProcessor>(),
+                scope.ServiceProvider.GetRequiredService<IClock>(),
+                scope.ServiceProvider.GetRequiredService<ImageDecodeLimits>(),
+                checkpoints);
+            await Assert.ThrowsAsync<OperationCanceledException>(
+                async () => await ingest.ProcessAsync(
+                    tenantId,
+                    committed.UploadId,
+                    CancellationToken.None));
+        }
+
+        using (ServiceProvider reconciler = database.CreateWorkerProvider(
+                   storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(2)),
+                   UploadPersistenceDatabase.Now.AddHours(2),
+                   addUploadReconciliation: true))
+        {
+            await using AsyncServiceScope scope = reconciler.CreateAsyncScope();
+            UploadReconciliationReport report = await scope.ServiceProvider
+                .GetRequiredService<UploadReconciliationService>()
+                .RunAsync(
+                    new UploadReconciliationRunRequest(
+                        tenantId,
+                        Guid.CreateVersion7(),
+                        cursor: null,
+                        dryRun: false),
+                    CancellationToken.None);
+            Assert.Equal(1, report.Counts.StagingDeleted);
+            Assert.Equal(0, report.Counts.ReservationsReleased);
+        }
+
+        await using Vistara.Persistence.VistaraDbContext context =
+            database.CreateContext(tenantId);
+        Assert.Equal(
+            "Consumed",
+            await context.QuotaReservations.Select(row => row.State).SingleAsync());
+        Assert.NotNull(
+            await context.UploadSessions
+                .Select(row => row.CleanupCompletedAtUtc)
+                .SingleAsync());
+        Assert.Equal(
+            "CleanupCompleted",
+            await context.IngestOperations.Select(row => row.State).SingleAsync());
+        Assert.NotNull(
+            await context.IngestOperations
+                .Select(row => row.CleanupCompletedAtUtc)
+                .SingleAsync());
+        Assert.False(storage.Contains(new BlobKey(committed.StagingKey)));
+    }
+
+    [Fact]
+    public async Task Rejection_keeps_quota_until_reconciliation_deletes_staging()
     {
         Guid tenantId = Guid.CreateVersion7(UploadPersistenceDatabase.Now);
         Guid actorId = Guid.CreateVersion7(UploadPersistenceDatabase.Now.AddMilliseconds(1));
@@ -233,18 +422,53 @@ public sealed class IngestPersistenceTests
         await transactions.RejectAsync(rejection, CancellationToken.None);
         await transactions.RejectAsync(rejection, CancellationToken.None);
 
-        await using Vistara.Persistence.VistaraDbContext context =
+        await using (Vistara.Persistence.VistaraDbContext context =
+                     database.CreateContext(tenantId))
+        {
+            Assert.Equal("Rejected", (await context.UploadSessions.SingleAsync()).State);
+            Assert.Equal(
+                "Reserved",
+                await context.QuotaReservations.Select(row => row.State).SingleAsync());
+            Vistara.Persistence.Uploads.QuotaUsageRow usage =
+                await context.QuotaUsage.SingleAsync();
+            Assert.Equal(committed.ExpectedSizeBytes, usage.ReservedBytes);
+            Assert.Equal(5, usage.ReservedJobs);
+            Assert.Equal(0, usage.CommittedJobs);
+            Assert.Equal(1, await database.CountAsync("audit_events"));
+            Assert.Empty(await context.Assets.ToListAsync());
+        }
+
+        using ServiceProvider cleanupWorker = database.CreateWorkerProvider(
+            storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(2)),
+            UploadPersistenceDatabase.Now.AddHours(2),
+            addUploadReconciliation: true);
+        await using (AsyncServiceScope cleanupScope =
+                     cleanupWorker.CreateAsyncScope())
+        {
+            _ = await cleanupScope.ServiceProvider
+                .GetRequiredService<
+                    Vistara.Worker.Features.Reconciliation.Uploads
+                        .UploadReconciliationService>()
+                .RunAsync(
+                    new Vistara.Worker.Features.Reconciliation.Uploads
+                        .UploadReconciliationRunRequest(
+                            tenantId,
+                            Guid.CreateVersion7(),
+                            cursor: null,
+                            dryRun: false),
+                    CancellationToken.None);
+        }
+
+        await using Vistara.Persistence.VistaraDbContext cleaned =
             database.CreateContext(tenantId);
-        Assert.Equal("Rejected", (await context.UploadSessions.SingleAsync()).State);
         Assert.Equal(
             "Released",
-            await context.QuotaReservations.Select(row => row.State).SingleAsync());
-        Vistara.Persistence.Uploads.QuotaUsageRow usage =
-            await context.QuotaUsage.SingleAsync();
-        Assert.Equal(0, usage.ReservedJobs);
-        Assert.Equal(0, usage.CommittedJobs);
-        Assert.Equal(1, await database.CountAsync("audit_events"));
-        Assert.Empty(await context.Assets.ToListAsync());
+            await cleaned.QuotaReservations.Select(row => row.State).SingleAsync());
+        Assert.NotNull(
+            await cleaned.UploadSessions
+                .Select(row => row.CleanupCompletedAtUtc)
+                .SingleAsync());
+        Assert.False(storage.Contains(new BlobKey(committed.StagingKey)));
     }
 
     [Fact]
@@ -301,6 +525,78 @@ public sealed class IngestPersistenceTests
             .ToArrayAsync();
         Assert.Equal(2, tenantOneBlobIds.Length);
         Assert.Single(tenantOneBlobIds.Distinct());
+    }
+
+    [Fact]
+    public async Task Missing_dedupe_object_is_repaired_before_second_asset_activation()
+    {
+        Guid tenantId = Guid.CreateVersion7(UploadPersistenceDatabase.Now);
+        Guid actorId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(1));
+        await using UploadPersistenceDatabase database =
+            await UploadPersistenceDatabase.CreateAsync();
+        await database.SeedTenantAsync(tenantId, actorId);
+        TestBlobStore storage = new();
+        UploadSessionSnapshot first = await CreateCommittedUploadAsync(
+            database,
+            storage,
+            tenantId,
+            actorId,
+            Guid.CreateVersion7(UploadPersistenceDatabase.Now.AddMilliseconds(2)),
+            "dedupe-repair-one");
+        UploadSessionSnapshot second = await CreateCommittedUploadAsync(
+            database,
+            storage,
+            tenantId,
+            actorId,
+            Guid.CreateVersion7(UploadPersistenceDatabase.Now.AddMilliseconds(3)),
+            "dedupe-repair-two");
+        using (ServiceProvider worker = database.CreateWorkerProvider(storage))
+        {
+            await using AsyncServiceScope scope = worker.CreateAsyncScope();
+            Assert.True((await scope.ServiceProvider
+                .GetRequiredService<IngestService>()
+                .ProcessAsync(
+                    tenantId,
+                    first.UploadId,
+                    CancellationToken.None)).IsSuccess);
+        }
+
+        BlobKey canonicalKey;
+        await using (Vistara.Persistence.VistaraDbContext context =
+                     database.CreateContext(tenantId))
+        {
+            canonicalKey = new BlobKey(
+                await context.Blobs.Select(row => row.ObjectKey).SingleAsync());
+        }
+
+        storage.Remove(canonicalKey);
+        Assert.True(storage.Contains(new BlobKey(second.StagingKey)));
+
+        using (ServiceProvider restarted = database.CreateWorkerProvider(
+                   storage.CreateReplica(UploadPersistenceDatabase.Now.AddMinutes(1))))
+        {
+            await using AsyncServiceScope scope = restarted.CreateAsyncScope();
+            Vistara.Worker.Runtime.Jobs.JobHandlerResult result =
+                await scope.ServiceProvider
+                    .GetRequiredService<IngestService>()
+                    .ProcessAsync(
+                        tenantId,
+                        second.UploadId,
+                        CancellationToken.None);
+            Assert.True(result.IsSuccess);
+        }
+
+        BlobHead repaired = Assert.IsType<BlobHead>(
+            await storage.HeadAsync(canonicalKey, CancellationToken.None));
+        await using Vistara.Persistence.VistaraDbContext verified =
+            database.CreateContext(tenantId);
+        Assert.Equal(2, await verified.Assets.CountAsync());
+        Assert.Single(await verified.Blobs.ToListAsync());
+        Assert.Equal(
+            repaired.Identity.Version.Value,
+            await verified.Blobs.Select(row => row.ProviderVersion).SingleAsync());
+        Assert.False(storage.Contains(new BlobKey(second.StagingKey)));
     }
 
     [Fact]
@@ -460,7 +756,7 @@ public sealed class IngestPersistenceTests
                 content.LongLength,
                 "image/jpeg",
                 sha256,
-                $"staging/{tenantId:N}/{uploadId:N}",
+                $"staging/{tenantId.ToString("N")[..2]}/{tenantId:D}/{uploadId:D}",
                 Convert.ToHexStringLower(
                     System.Security.Cryptography.SHA256.HashData(
                         Encoding.UTF8.GetBytes(idempotencyPrefix))),
@@ -551,7 +847,7 @@ public sealed class IngestPersistenceTests
             "media",
             plan,
             verified,
-            plan.Mode == IngestPromotionMode.ExistingExactBlob ? null : canonical,
+            canonical,
             UploadPersistenceDatabase.Now.AddMinutes(1),
             ConsumeReservation: true,
             EnqueueStandardDerivatives: true,

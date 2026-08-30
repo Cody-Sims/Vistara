@@ -218,25 +218,49 @@ public sealed class IngestService
             }
 
             await CheckpointAsync(IngestCheckpoint.PromotionStored, cancellationToken);
-            CanonicalVerification canonical = await VerifyCanonicalAsync(
+        }
+
+        CanonicalVerification canonical = await VerifyCanonicalAsync(
+            work,
+            plan.CanonicalKey,
+            requireUploadOwnership:
+                plan.Mode == IngestPromotionMode.PromoteCreateOnly,
+            cancellationToken);
+        if (canonical.Missing &&
+            plan.Mode == IngestPromotionMode.ExistingExactBlob)
+        {
+            JobHandlerResult? repairFailure = await PromoteAsync(
+                work,
+                verified,
+                plan,
+                cancellationToken);
+            if (repairFailure is not null)
+            {
+                return repairFailure;
+            }
+
+            await CheckpointAsync(IngestCheckpoint.PromotionStored, cancellationToken);
+            canonical = await VerifyCanonicalAsync(
                 work,
                 plan.CanonicalKey,
+                requireUploadOwnership: true,
                 cancellationToken);
-            if (canonical.Retry)
-            {
-                return Retry(JobFailureReason.ProviderUnavailable);
-            }
-
-            if (!canonical.IsValid)
-            {
-                return await RejectAsync(
-                    work.Fence,
-                    IngestRejectionCode.CanonicalConflict,
-                    cancellationToken);
-            }
-
-            canonicalHead = canonical.Head;
         }
+
+        if (canonical.Retry)
+        {
+            return Retry(JobFailureReason.ProviderUnavailable);
+        }
+
+        if (!canonical.IsValid)
+        {
+            return await RejectAsync(
+                work.Fence,
+                IngestRejectionCode.CanonicalConflict,
+                cancellationToken);
+        }
+
+        canonicalHead = canonical.Head;
 
         await _transactions.ActivateAsync(
             new IngestActivation(
@@ -331,6 +355,7 @@ public sealed class IngestService
     private async ValueTask<CanonicalVerification> VerifyCanonicalAsync(
         IngestWorkItem work,
         BlobKey canonicalKey,
+        bool requireUploadOwnership,
         CancellationToken cancellationToken)
     {
         BlobHead? head;
@@ -345,7 +370,7 @@ public sealed class IngestService
 
         if (head is null)
         {
-            return CanonicalVerification.RetryLater();
+            return CanonicalVerification.NotFound();
         }
 
         if (head.Properties.ContentLength != work.ExpectedSizeBytes ||
@@ -353,7 +378,10 @@ public sealed class IngestService
                 head.Properties.ContentType.Value,
                 work.DeclaredContentType.Value,
                 StringComparison.Ordinal) ||
-            !HasRequiredMetadata(head.Properties.Metadata, work.RequiredMetadata) ||
+            !HasCanonicalOwnershipMetadata(
+                head.Properties.Metadata,
+                work,
+                requireUploadOwnership) ||
             !head.Properties.Metadata.TryGetValue("vistara-sha256", out string? metadataSha) ||
             !string.Equals(metadataSha, work.ExpectedSha256.Value, StringComparison.Ordinal) ||
             !head.Properties.Metadata.TryGetValue(
@@ -423,7 +451,7 @@ public sealed class IngestService
                 code,
                 _clock.UtcNow,
                 QuarantineStaging: true,
-                ReleaseReservation: true),
+                ReleaseReservation: false),
             cancellationToken);
         await CheckpointAsync(IngestCheckpoint.RejectionCommitted, cancellationToken);
         return JobHandlerResult.Success();
@@ -517,6 +545,24 @@ public sealed class IngestService
             observed.TryGetValue(pair.Key, out string? value) &&
             string.Equals(value, pair.Value, StringComparison.Ordinal));
 
+    private static bool HasCanonicalOwnershipMetadata(
+        BlobMetadata observed,
+        IngestWorkItem work,
+        bool requireUploadOwnership)
+    {
+        if (!work.RequiredMetadata.TryGetValue(
+                "vistara-tenant-id",
+                out string? expectedTenantId) ||
+            !observed.TryGetValue("vistara-tenant-id", out string? tenantId) ||
+            !string.Equals(tenantId, expectedTenantId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return !requireUploadOwnership ||
+            HasRequiredMetadata(observed, work.RequiredMetadata);
+    }
+
     private static BlobMetadata CreateCanonicalMetadata(
         IngestWorkItem work,
         VerifiedIngestObject verified)
@@ -559,10 +605,15 @@ public sealed class IngestService
 
     private sealed class CanonicalVerification
     {
-        private CanonicalVerification(bool isValid, bool retry, BlobHead? head)
+        private CanonicalVerification(
+            bool isValid,
+            bool retry,
+            bool missing,
+            BlobHead? head)
         {
             IsValid = isValid;
             Retry = retry;
+            Missing = missing;
             Head = head;
         }
 
@@ -570,16 +621,21 @@ public sealed class IngestService
 
         internal bool Retry { get; }
 
+        internal bool Missing { get; }
+
         internal BlobHead? Head { get; }
 
         internal static CanonicalVerification Valid(BlobHead head) =>
-            new(true, false, head);
+            new(true, false, false, head);
 
         internal static CanonicalVerification Invalid() =>
-            new(false, false, null);
+            new(false, false, false, null);
+
+        internal static CanonicalVerification NotFound() =>
+            new(false, false, true, null);
 
         internal static CanonicalVerification RetryLater() =>
-            new(false, true, null);
+            new(false, true, false, null);
     }
 
     private sealed class BlobImageSource(

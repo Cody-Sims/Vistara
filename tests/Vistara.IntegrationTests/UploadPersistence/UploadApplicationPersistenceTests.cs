@@ -188,7 +188,7 @@ public sealed class UploadApplicationPersistenceTests
     }
 
     [Fact]
-    public async Task Proxy_write_and_abort_are_persistent_versioned_and_release_quota()
+    public async Task Proxy_abort_keeps_quota_until_reconciliation_cleans_staging()
     {
         Guid tenantId = Guid.CreateVersion7(UploadPersistenceDatabase.Now);
         Guid actorId = Guid.CreateVersion7(UploadPersistenceDatabase.Now.AddMilliseconds(1));
@@ -198,8 +198,9 @@ public sealed class UploadApplicationPersistenceTests
         await using UploadPersistenceDatabase database =
             await UploadPersistenceDatabase.CreateAsync();
         await database.SeedTenantAsync(tenantId, actorId);
+        TestBlobStore storage = new(direct: false);
         using ServiceProvider provider =
-            database.CreateApiProvider(tenantId, new TestBlobStore(direct: false));
+            database.CreateApiProvider(tenantId, storage);
 
         UploadSessionSnapshot stale;
         await using (AsyncServiceScope scope = provider.CreateAsyncScope())
@@ -243,15 +244,43 @@ public sealed class UploadApplicationPersistenceTests
             Assert.Equal(UploadAbortStatus.VersionConflict, conflict.Status);
         }
 
-        await using Vistara.Persistence.VistaraDbContext context =
+        await using (Vistara.Persistence.VistaraDbContext context =
+                     database.CreateContext(tenantId))
+        {
+            Assert.Equal(
+                "Reserved",
+                await context.QuotaReservations.Select(row => row.State).SingleAsync());
+            Vistara.Persistence.Uploads.QuotaUsageRow usage =
+                await context.QuotaUsage.SingleAsync();
+            Assert.Equal(5, usage.ReservedJobs);
+            Assert.Equal(0, usage.CommittedJobs);
+        }
+
+        using ServiceProvider worker = database.CreateWorkerProvider(
+            storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(2)),
+            UploadPersistenceDatabase.Now.AddHours(2),
+            addUploadReconciliation: true);
+        await using (AsyncServiceScope scope = worker.CreateAsyncScope())
+        {
+            _ = await scope.ServiceProvider
+                .GetRequiredService<
+                    Vistara.Worker.Features.Reconciliation.Uploads
+                        .UploadReconciliationService>()
+                .RunAsync(
+                    new Vistara.Worker.Features.Reconciliation.Uploads
+                        .UploadReconciliationRunRequest(
+                            tenantId,
+                            Guid.CreateVersion7(),
+                            cursor: null,
+                            dryRun: false),
+                    CancellationToken.None);
+        }
+
+        await using Vistara.Persistence.VistaraDbContext cleaned =
             database.CreateContext(tenantId);
         Assert.Equal(
             "Released",
-            await context.QuotaReservations.Select(row => row.State).SingleAsync());
-        Vistara.Persistence.Uploads.QuotaUsageRow usage =
-            await context.QuotaUsage.SingleAsync();
-        Assert.Equal(0, usage.ReservedJobs);
-        Assert.Equal(0, usage.CommittedJobs);
+            await cleaned.QuotaReservations.Select(row => row.State).SingleAsync());
     }
 
     [Fact]
@@ -515,6 +544,14 @@ public sealed class UploadApplicationPersistenceTests
                 [1],
                 persisted.Version,
                 CancellationToken.None);
+        replica.ObservedMultipartParts =
+        [
+            new UploadedPart(
+                1,
+                new BlobEntityTag("etag-1"),
+                new BlobChecksum(BlobChecksumAlgorithm.Sha256, Sha256),
+                20_000_000),
+        ];
         UploadCommitResult committed = await restartedApplication.CommitAsync(
             persisted,
             [new CommittedUploadPart(1, "etag-1", Sha256, 20_000_000)],
@@ -535,6 +572,266 @@ public sealed class UploadApplicationPersistenceTests
         Assert.StartsWith("test:v1:", row.MultipartProviderState);
         Assert.Equal(TimeSpan.FromMinutes(5).Ticks, row.MultipartPartPlanLifetimeTicks);
         Assert.Single(await context.UploadParts.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Multipart_creation_crash_resumes_the_same_durable_issuance()
+    {
+        Guid tenantId = Guid.CreateVersion7(UploadPersistenceDatabase.Now);
+        Guid actorId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(1));
+        Guid uploadId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(2));
+        await using UploadPersistenceDatabase database =
+            await UploadPersistenceDatabase.CreateAsync();
+        await database.SeedTenantAsync(tenantId, actorId);
+        TestBlobStore storage = new();
+        UploadSessionSnapshot reservedSession;
+        using (ServiceProvider first = database.CreateApiProvider(tenantId, storage))
+        {
+            await using AsyncServiceScope scope = first.CreateAsyncScope();
+            IUploadApplicationPort application =
+                scope.ServiceProvider.GetRequiredService<IUploadApplicationPort>();
+            UploadReserveResult reserved = await application.ReserveAsync(
+                Request(
+                    tenantId,
+                    actorId,
+                    uploadId,
+                    "multipart-crash-create",
+                    "multipart-crash-request",
+                    sizeBytes: 20_000_000,
+                    strategy: "multipart"),
+                CancellationToken.None);
+            reservedSession = reserved.Session!;
+            storage.AfterBeginMultipartAsync = _ =>
+                ValueTask.FromException(
+                    new OperationCanceledException(
+                        "Injected crash after provider multipart creation."));
+            await Assert.ThrowsAsync<OperationCanceledException>(
+                async () => await application.IssueAsync(
+                    reservedSession,
+                    CancellationToken.None));
+        }
+
+        Assert.Equal(1, storage.MultipartSessionsCreated);
+        await using (Vistara.Persistence.VistaraDbContext prepared =
+                     database.CreateContext(tenantId))
+        {
+            Vistara.Persistence.Model.UploadSessionRow preparedRow =
+                await prepared.UploadSessions.SingleAsync();
+            Assert.Equal("Pending", preparedRow.State);
+            Assert.Null(preparedRow.ProviderUploadId);
+            Assert.StartsWith(
+                "issuance:v1:mpi-",
+                preparedRow.MultipartProviderState);
+        }
+
+        TestBlobStore replica = storage.CreateReplica(
+            UploadPersistenceDatabase.Now.AddMinutes(1));
+        using ServiceProvider restarted =
+            database.CreateApiProvider(tenantId, replica);
+        await using AsyncServiceScope restartedScope = restarted.CreateAsyncScope();
+        UploadIssuance resumed = await restartedScope.ServiceProvider
+            .GetRequiredService<IUploadApplicationPort>()
+            .IssueAsync(reservedSession, CancellationToken.None);
+
+        Assert.Equal("uploadIssued", resumed.Session.State);
+        Assert.Equal(1, storage.MultipartSessionsCreated);
+        await using Vistara.Persistence.VistaraDbContext context =
+            database.CreateContext(tenantId);
+        Vistara.Persistence.Model.UploadSessionRow row =
+            await context.UploadSessions.SingleAsync();
+        Assert.NotNull(row.ProviderUploadId);
+        Assert.StartsWith("test:v1:", row.MultipartProviderState);
+    }
+
+    [Fact]
+    public async Task Multipart_abort_after_creation_crash_waits_for_provider_confirmation()
+    {
+        Guid tenantId = Guid.CreateVersion7(UploadPersistenceDatabase.Now);
+        Guid actorId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(1));
+        Guid uploadId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(2));
+        await using UploadPersistenceDatabase database =
+            await UploadPersistenceDatabase.CreateAsync();
+        await database.SeedTenantAsync(tenantId, actorId);
+        TestBlobStore storage = new();
+        using ServiceProvider provider = database.CreateApiProvider(tenantId, storage);
+        await using AsyncServiceScope scope = provider.CreateAsyncScope();
+        IUploadApplicationPort application =
+            scope.ServiceProvider.GetRequiredService<IUploadApplicationPort>();
+        UploadSessionSnapshot reserved = (await application.ReserveAsync(
+            Request(
+                tenantId,
+                actorId,
+                uploadId,
+                "multipart-abort-crash-create",
+                "multipart-abort-crash-request",
+                sizeBytes: 20_000_000,
+                strategy: "multipart"),
+            CancellationToken.None)).Session!;
+        storage.AfterBeginMultipartAsync = _ =>
+            ValueTask.FromException(
+                new OperationCanceledException(
+                    "Injected crash after provider multipart creation."));
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            async () => await application.IssueAsync(
+                reserved,
+                CancellationToken.None));
+        UploadSessionSnapshot prepared = Assert.IsType<UploadSessionSnapshot>(
+            await application.GetAsync(
+                tenantId,
+                uploadId,
+                CancellationToken.None));
+
+        UploadAbortResult result = await application.AbortAsync(
+            prepared,
+            prepared.Version,
+            CancellationToken.None);
+
+        Assert.Equal(UploadAbortStatus.Unavailable, result.Status);
+        Assert.Equal(1, storage.ActiveMultipartSessions);
+        await using (Vistara.Persistence.VistaraDbContext context =
+                     database.CreateContext(tenantId))
+        {
+            Assert.Equal(
+                "Aborting",
+                await context.UploadSessions.Select(row => row.State).SingleAsync());
+            Assert.Equal(
+                "Reserved",
+                await context.QuotaReservations.Select(row => row.State).SingleAsync());
+        }
+
+        using ServiceProvider worker = database.CreateWorkerProvider(
+            storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(2)),
+            UploadPersistenceDatabase.Now.AddHours(2),
+            addUploadReconciliation: true);
+        await using AsyncServiceScope workerScope = worker.CreateAsyncScope();
+        Vistara.Worker.Features.Reconciliation.Uploads.UploadReconciliationReport report =
+            await workerScope.ServiceProvider
+                .GetRequiredService<
+                    Vistara.Worker.Features.Reconciliation.Uploads
+                        .UploadReconciliationService>()
+                .RunAsync(
+                    new Vistara.Worker.Features.Reconciliation.Uploads
+                        .UploadReconciliationRunRequest(
+                            tenantId,
+                            Guid.CreateVersion7(),
+                            cursor: null,
+                            dryRun: false),
+                    CancellationToken.None);
+        Assert.Equal(1, report.Counts.MultipartAborted);
+        Assert.Equal(0, storage.ActiveMultipartSessions);
+    }
+
+    [Fact]
+    public async Task Multipart_creation_two_replicas_converge_on_one_provider_session()
+    {
+        Guid tenantId = Guid.CreateVersion7(UploadPersistenceDatabase.Now);
+        Guid actorId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(1));
+        Guid uploadId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(2));
+        await using UploadPersistenceDatabase database =
+            await UploadPersistenceDatabase.CreateAsync();
+        await database.SeedTenantAsync(tenantId, actorId);
+        TestBlobStore storage = new();
+        UploadSessionSnapshot reservedSession;
+        using (ServiceProvider api = database.CreateApiProvider(tenantId, storage))
+        {
+            await using AsyncServiceScope scope = api.CreateAsyncScope();
+            reservedSession = (await scope.ServiceProvider
+                .GetRequiredService<IUploadApplicationPort>()
+                .ReserveAsync(
+                    Request(
+                        tenantId,
+                        actorId,
+                        uploadId,
+                        "multipart-replicas-create",
+                        "multipart-replicas-request",
+                        sizeBytes: 20_000_000,
+                        strategy: "multipart"),
+                    CancellationToken.None)).Session!;
+        }
+
+        using ServiceProvider first = database.CreateApiProvider(
+            tenantId,
+            storage.CreateReplica(UploadPersistenceDatabase.Now));
+        using ServiceProvider second = database.CreateApiProvider(
+            tenantId,
+            storage.CreateReplica(UploadPersistenceDatabase.Now));
+        await using AsyncServiceScope firstScope = first.CreateAsyncScope();
+        await using AsyncServiceScope secondScope = second.CreateAsyncScope();
+        UploadIssuance[] issuances = await Task.WhenAll(
+            firstScope.ServiceProvider
+                .GetRequiredService<IUploadApplicationPort>()
+                .IssueAsync(reservedSession, CancellationToken.None)
+                .AsTask(),
+            secondScope.ServiceProvider
+                .GetRequiredService<IUploadApplicationPort>()
+                .IssueAsync(reservedSession, CancellationToken.None)
+                .AsTask());
+
+        Assert.All(
+            issuances,
+            issuance => Assert.Equal("uploadIssued", issuance.Session.State));
+        Assert.Equal(1, storage.MultipartSessionsCreated);
+        Assert.Single(issuances.Select(item => item.Session.Version).Distinct());
+    }
+
+    [Fact]
+    public async Task Multipart_commit_rejects_client_sizes_not_confirmed_by_provider_inventory()
+    {
+        Guid tenantId = Guid.CreateVersion7(UploadPersistenceDatabase.Now);
+        Guid actorId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(1));
+        Guid uploadId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(2));
+        await using UploadPersistenceDatabase database =
+            await UploadPersistenceDatabase.CreateAsync();
+        await database.SeedTenantAsync(tenantId, actorId);
+        TestBlobStore storage = new();
+        using ServiceProvider provider = database.CreateApiProvider(tenantId, storage);
+        await using AsyncServiceScope scope = provider.CreateAsyncScope();
+        IUploadApplicationPort application =
+            scope.ServiceProvider.GetRequiredService<IUploadApplicationPort>();
+        UploadReserveResult reserved = await application.ReserveAsync(
+            Request(
+                tenantId,
+                actorId,
+                uploadId,
+                "multipart-inventory-create",
+                "multipart-inventory-request",
+                sizeBytes: 20_000_000,
+                strategy: "multipart"),
+            CancellationToken.None);
+        UploadSessionSnapshot issued = (await application.IssueAsync(
+            reserved.Session!,
+            CancellationToken.None)).Session;
+        storage.ObservedMultipartParts =
+        [
+            new UploadedPart(
+                1,
+                new BlobEntityTag("etag-1"),
+                new BlobChecksum(BlobChecksumAlgorithm.Sha256, Sha256),
+                19_999_999),
+        ];
+
+        UploadCommitResult result = await application.CommitAsync(
+            issued,
+            [new CommittedUploadPart(1, "etag-1", Sha256, 20_000_000)],
+            new IdempotencyKey("multipart-inventory-commit"),
+            issued.Version,
+            CancellationToken.None);
+
+        Assert.Equal(UploadCommitStatus.InvalidState, result.Status);
+        await using Vistara.Persistence.VistaraDbContext context =
+            database.CreateContext(tenantId);
+        Assert.Equal(
+            "UploadIssued",
+            await context.UploadSessions.Select(row => row.State).SingleAsync());
+        Assert.Empty(await context.UploadParts.ToListAsync());
     }
 
     [Fact]
@@ -577,6 +874,14 @@ public sealed class UploadApplicationPersistenceTests
         UploadSessionSnapshot issued = (await application.IssueAsync(
             reserved.Session!,
             CancellationToken.None)).Session;
+        storage.ObservedMultipartParts =
+        [
+            new UploadedPart(
+                1,
+                new BlobEntityTag("etag-1"),
+                new BlobChecksum(BlobChecksumAlgorithm.Sha256, Sha256),
+                20_000_000),
+        ];
 
         UploadCommitResult result = await application.CommitAsync(
             issued,
@@ -685,7 +990,7 @@ public sealed class UploadApplicationPersistenceTests
             sizeBytes,
             "image/jpeg",
             sha256,
-            $"staging/{tenantId:N}/{uploadId:N}",
+            $"staging/{tenantId.ToString("N")[..2]}/{tenantId:D}/{uploadId:D}",
             Convert.ToHexStringLower(
                 System.Security.Cryptography.SHA256.HashData(
                     Encoding.UTF8.GetBytes(requestHash))),

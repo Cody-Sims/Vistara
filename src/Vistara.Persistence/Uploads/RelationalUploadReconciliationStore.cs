@@ -28,6 +28,9 @@ public sealed record PersistedUploadReconciliationCandidate(
     long ExpectedSizeBytes,
     string ExpectedSha256,
     string DeclaredContentType,
+    string? MultipartIssuanceId,
+    TimeSpan? MultipartPartPlanLifetime,
+    bool CanonicalRequiresUploadOwnership,
     MultipartSession? MultipartSession,
     IReadOnlyList<UploadedPart> CompletionParts,
     bool ReservationReleased,
@@ -51,7 +54,8 @@ public sealed record PersistedUploadReconciliationPage(
 
 public sealed class RelationalUploadReconciliationStore(
     VistaraDbContext context,
-    IUuid7Generator idGenerator)
+    IUuid7Generator idGenerator,
+    UploadPersistenceOptions? options = null)
 {
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
@@ -59,12 +63,54 @@ public sealed class RelationalUploadReconciliationStore(
         context ?? throw new ArgumentNullException(nameof(context));
     private readonly IUuid7Generator _idGenerator =
         idGenerator ?? throw new ArgumentNullException(nameof(idGenerator));
+    private readonly UploadPersistenceOptions _options =
+        options ?? new UploadPersistenceOptions();
 
-    public async ValueTask<PersistedUploadReconciliationPage> ScanAsync(
+    public async ValueTask<string?> LoadCheckpointAsync(
+        Guid tenantId,
+        Guid runId,
+        CancellationToken cancellationToken)
+    {
+        _context.ChangeTracker.Clear();
+        await using IDbContextTransaction transaction =
+            await BeginTenantTransactionAsync(
+                tenantId,
+                cancellationToken);
+        string? cursor = await _context.UploadReconciliationCheckpoints
+            .AsNoTracking()
+            .Where(row => row.RunId == runId)
+            .Select(row => row.Cursor)
+            .SingleOrDefaultAsync(cancellationToken);
+        await transaction.RollbackAsync(cancellationToken);
+        return cursor;
+    }
+
+    public ValueTask<PersistedUploadReconciliationPage> ScanAsync(
         Guid tenantId,
         string? cursor,
         int maximumSessions,
         DateTimeOffset utcNow,
+        TimeSpan leaseDuration,
+        bool dryRun,
+        CancellationToken cancellationToken) =>
+        ScanAsync(
+            tenantId,
+            cursor,
+            _idGenerator.NewId(),
+            maximumSessions,
+            utcNow,
+            utcNow,
+            leaseDuration,
+            dryRun,
+            cancellationToken);
+
+    public async ValueTask<PersistedUploadReconciliationPage> ScanAsync(
+        Guid tenantId,
+        string? cursor,
+        Guid runId,
+        int maximumSessions,
+        DateTimeOffset utcNow,
+        DateTimeOffset recoveryCutoffUtc,
         TimeSpan leaseDuration,
         bool dryRun,
         CancellationToken cancellationToken)
@@ -73,6 +119,7 @@ public sealed class RelationalUploadReconciliationStore(
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(
             leaseDuration,
             TimeSpan.Zero);
+        string leasePrefix = $"upload-reconcile:{runId:N}:";
         ReconciliationCursor? position = ParseCursor(cursor);
         _context.ChangeTracker.Clear();
         await using IDbContextTransaction transaction =
@@ -84,17 +131,26 @@ public sealed class RelationalUploadReconciliationStore(
                 ((row.State == "Pending" ||
                   row.State == "UploadIssued") &&
                  row.ExpiresAtUtc <= utcNow) ||
-                row.State == "Committing" ||
-                row.State == "Aborting" ||
-                row.State == "OutcomeUnknown" ||
+                ((row.State == "Committing" ||
+                  row.State == "Aborting" ||
+                  row.State == "OutcomeUnknown" ||
+                  row.State == "CommitRequested" ||
+                  row.State == "Verifying" ||
+                  row.State == "Promoting" ||
+                  row.State == "Reconciling") &&
+                 row.UpdatedAtUtc <= recoveryCutoffUtc) ||
                 ((row.State == "Expired" ||
-                  row.State == "Aborted") &&
+                  row.State == "Aborted" ||
+                  row.State == "Accepted" ||
+                  row.State == "Rejected") &&
                  row.CleanupCompletedAtUtc == null));
         if (!dryRun)
         {
             query = query.Where(row =>
                 row.ReconciliationLeaseExpiresAtUtc == null ||
-                row.ReconciliationLeaseExpiresAtUtc <= utcNow);
+                row.ReconciliationLeaseExpiresAtUtc <= utcNow ||
+                (row.ReconciliationLeaseToken != null &&
+                 row.ReconciliationLeaseToken.StartsWith(leasePrefix)));
         }
 
         if (position is not null)
@@ -115,13 +171,31 @@ public sealed class RelationalUploadReconciliationStore(
         {
             foreach (UploadSessionRow row in rows)
             {
+                if (row.ReconciliationLeaseExpiresAtUtc > utcNow &&
+                    row.ReconciliationLeaseToken is { } existingToken &&
+                    existingToken.StartsWith(
+                        leasePrefix,
+                        StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
                 row.ReconciliationLeaseToken =
-                    $"upload-reconcile:{_idGenerator.NewId():N}";
+                    $"{leasePrefix}{_idGenerator.NewId():N}";
                 row.ReconciliationLeaseExpiresAtUtc = utcNow + leaseDuration;
                 row.Version = checked(row.Version + 1);
             }
 
-            await _context.SaveChangesAsync(cancellationToken);
+            try
+            {
+                await _context.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                _context.ChangeTracker.Clear();
+                return new([], cursor);
+            }
         }
 
         var candidates =
@@ -193,7 +267,7 @@ public sealed class RelationalUploadReconciliationStore(
         return candidate;
     }
 
-    public ValueTask<PersistedUploadReconciliationMutation> ExpireAndReleaseAsync(
+    public ValueTask<PersistedUploadReconciliationMutation> ExpireAsync(
         PersistedUploadReconciliationCandidate candidate,
         DateTimeOffset utcNow,
         CancellationToken cancellationToken) =>
@@ -201,11 +275,102 @@ public sealed class RelationalUploadReconciliationStore(
             candidate,
             utcNow,
             targetState: "Expired",
-            releaseReservation: true,
+            releaseReservation: false,
             cancellationToken);
 
-    public ValueTask<PersistedUploadReconciliationMutation>
-        CompleteAbortAndReleaseAsync(
+    public ValueTask<PersistedUploadReconciliationMutation> PrepareAbortAsync(
+        PersistedUploadReconciliationCandidate candidate,
+        DateTimeOffset utcNow,
+        CancellationToken cancellationToken) =>
+        MutateAsync(
+            candidate,
+            utcNow,
+            targetState: "Aborting",
+            releaseReservation: false,
+            cancellationToken);
+
+    public async ValueTask<PersistedUploadReconciliationMutation>
+        RecordMultipartIssuedForAbortAsync(
+            PersistedUploadReconciliationCandidate candidate,
+            MultipartSession session,
+            DateTimeOffset utcNow,
+            CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        _context.ChangeTracker.Clear();
+        await using IDbContextTransaction transaction =
+            await BeginTenantTransactionAsync(
+                candidate.TenantId,
+                cancellationToken);
+        UploadSessionRow? row = await LoadFencedAsync(
+            candidate,
+            utcNow,
+            cancellationToken);
+        if (row is null ||
+            row.State is not ("Pending" or "Aborting") ||
+            row.ProviderUploadId is not null ||
+            MultipartIssuanceId(row) is not { } issuanceId ||
+            session.Key.Value != row.StagingKey ||
+            session.ContentLength != row.ExpectedBytes ||
+            session.ContentType.Value != row.DeclaredContentType ||
+            session.CompletionConditions != BlobRequestConditions.CreateOnly ||
+            session.PartPlanLifetime.Ticks !=
+                row.MultipartPartPlanLifetimeTicks ||
+            !HasMetadata(
+                session.Metadata,
+                "vistara-tenant-id",
+                row.TenantId.Value.ToString("D")) ||
+            !HasMetadata(
+                session.Metadata,
+                "vistara-upload-id",
+                row.Id.ToString("D")) ||
+            !HasMetadata(
+                session.Metadata,
+                "vistara-multipart-issuance-id",
+                issuanceId))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return Stale();
+        }
+
+        long expectedVersion = row.Version;
+        row.LastKnownState = row.State;
+        row.State = "Aborting";
+        row.ProviderUploadId = session.UploadId;
+        row.MultipartProviderState = session.ProviderState;
+        row.MultipartExpiresAtUtc = session.ExpiresAtUtc;
+        row.MultipartPartPlanLifetimeTicks = session.PartPlanLifetime.Ticks;
+        row.MultipartMaxParts = session.MaxParts;
+        row.MultipartMinPartBytes = session.MinPartBytes;
+        row.MultipartMaxPartBytes = session.MaxPartBytes;
+        row.UpdatedAtUtc = utcNow;
+        row.Version = checked(row.Version + 1);
+        _context.Entry(row).Property(item => item.Version).OriginalValue =
+            expectedVersion;
+        try
+        {
+            await _context.SaveChangesAsync(cancellationToken);
+            PersistedUploadReconciliationCandidate current =
+                await ToCandidateAsync(
+                    row,
+                    candidate.LeaseToken,
+                    candidate.LeaseExpiresAtUtc,
+                    candidate.ContinuationCursor,
+                    cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new(
+                PersistedUploadReconciliationMutationStatus.Applied,
+                current,
+                false);
+        }
+        catch (DbUpdateException)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return Stale();
+        }
+    }
+
+    public ValueTask<PersistedUploadReconciliationMutation> CompleteAbortAsync(
             PersistedUploadReconciliationCandidate candidate,
             DateTimeOffset utcNow,
             CancellationToken cancellationToken) =>
@@ -213,7 +378,7 @@ public sealed class RelationalUploadReconciliationStore(
             candidate,
             utcNow,
             targetState: "Aborted",
-            releaseReservation: true,
+            releaseReservation: false,
             cancellationToken);
 
     public ValueTask<PersistedUploadReconciliationMutation>
@@ -351,7 +516,7 @@ public sealed class RelationalUploadReconciliationStore(
                 false);
         }
 
-        if (row.State is not ("Expired" or "Aborted"))
+        if (row.State is not ("Expired" or "Aborted" or "Accepted" or "Rejected"))
         {
             await transaction.RollbackAsync(cancellationToken);
             return Stale();
@@ -363,6 +528,24 @@ public sealed class RelationalUploadReconciliationStore(
         row.Version = checked(row.Version + 1);
         _context.Entry(row).Property(item => item.Version).OriginalValue =
             expectedVersion;
+        Ingest.IngestOperationRow? ingest =
+            await _context.IngestOperations.SingleOrDefaultAsync(
+                item => item.UploadSessionId == row.Id,
+                cancellationToken);
+        if (ingest is not null && !ingest.CleanupCompletedAtUtc.HasValue)
+        {
+            if (row.State == "Accepted")
+            {
+                ingest.State = "CleanupCompleted";
+            }
+
+            ingest.CleanupCompletedAtUtc = utcNow;
+            ingest.UpdatedAtUtc = utcNow;
+            ingest.Version = checked(ingest.Version + 1);
+        }
+
+        bool released = row.State != "Accepted" &&
+            await ReleaseReservationAsync(row, utcNow, cancellationToken);
         try
         {
             await _context.SaveChangesAsync(cancellationToken);
@@ -377,7 +560,7 @@ public sealed class RelationalUploadReconciliationStore(
             return new(
                 PersistedUploadReconciliationMutationStatus.Applied,
                 current,
-                false);
+                released);
         }
         catch (DbUpdateException)
         {
@@ -386,16 +569,27 @@ public sealed class RelationalUploadReconciliationStore(
         }
     }
 
-    public static ValueTask<PersistedUploadReconciliationMutation>
+    public async ValueTask<PersistedUploadReconciliationMutation> ResumeIngestAsync(
+        PersistedUploadReconciliationCandidate candidate,
+        DateTimeOffset utcNow,
+        CancellationToken cancellationToken) =>
+        await RecoverIngestAsync(
+            candidate,
+            canonicalIdentity: null,
+            utcNow,
+            cancellationToken);
+
+    public ValueTask<PersistedUploadReconciliationMutation>
         PreserveCanonicalAsync(
         PersistedUploadReconciliationCandidate candidate,
         BlobIdentity canonicalIdentity,
         DateTimeOffset utcNow,
-        CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(Stale());
-    }
+        CancellationToken cancellationToken) =>
+        RecoverIngestAsync(
+            candidate,
+            canonicalIdentity,
+            utcNow,
+            cancellationToken);
 
     public ValueTask<PersistedUploadReconciliationMutation> QuarantineAsync(
         PersistedUploadReconciliationCandidate candidate,
@@ -406,7 +600,7 @@ public sealed class RelationalUploadReconciliationStore(
             candidate,
             utcNow,
             targetState: "Rejected",
-            releaseReservation: true,
+            releaseReservation: false,
             cancellationToken,
             rejectionCode: reason);
 
@@ -445,6 +639,121 @@ public sealed class RelationalUploadReconciliationStore(
 
         await _context.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+    }
+
+    private async ValueTask<PersistedUploadReconciliationMutation> RecoverIngestAsync(
+        PersistedUploadReconciliationCandidate candidate,
+        BlobIdentity? canonicalIdentity,
+        DateTimeOffset utcNow,
+        CancellationToken cancellationToken)
+    {
+        _context.ChangeTracker.Clear();
+        await using IDbContextTransaction transaction =
+            await BeginTenantTransactionAsync(
+                candidate.TenantId,
+                cancellationToken);
+        UploadSessionRow? row = await LoadFencedAsync(
+            candidate,
+            utcNow,
+            cancellationToken);
+        if (row is null ||
+            row.State is not ("CommitRequested" or "Verifying" or "Promoting" or
+                "OutcomeUnknown" or "Reconciling") ||
+            (canonicalIdentity is not null &&
+             !string.Equals(
+                 candidate.CanonicalKey,
+                 canonicalIdentity.Key.Value,
+                 StringComparison.Ordinal)))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return Stale();
+        }
+
+        Ingest.IngestOperationRow? operation =
+            await _context.IngestOperations.SingleOrDefaultAsync(
+                item => item.UploadSessionId == row.Id,
+                cancellationToken);
+        if (row.State != "CommitRequested" && operation is null)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return Stale();
+        }
+
+        long expectedVersion = row.Version;
+        if (row.State != "CommitRequested")
+        {
+            row.State = "Verifying";
+        }
+
+        row.UpdatedAtUtc = utcNow;
+        row.Version = checked(row.Version + 1);
+        _context.Entry(row).Property(item => item.Version).OriginalValue =
+            expectedVersion;
+        if (operation is not null)
+        {
+            operation.FencedUploadVersion = row.Version;
+            operation.UpdatedAtUtc = utcNow;
+            operation.Version = checked(operation.Version + 1);
+        }
+
+        QuotaReservationRow reservation =
+            await _context.QuotaReservations.SingleAsync(
+                item => item.UploadSessionId == row.Id,
+                cancellationToken);
+        DateTimeOffset requiredExpiry =
+            utcNow + _options.OutcomeReconciliationGrace;
+        if (reservation.State == "Reserved" &&
+            reservation.ExpiresAtUtc < requiredExpiry)
+        {
+            reservation.ExpiresAtUtc = requiredExpiry;
+            reservation.UpdatedAtUtc = utcNow;
+            reservation.Version = checked(reservation.Version + 1);
+        }
+
+        JobRow? job = await _context.Jobs.SingleOrDefaultAsync(
+            item =>
+                item.TenantId == candidate.TenantId &&
+                item.DedupeKey == $"upload:{row.Id:D}:ingest:v1",
+            cancellationToken);
+        if (job is null)
+        {
+            _context.Jobs.Add(JobMapper.ToRow(CreateIngestJob(row, utcNow)));
+        }
+        else if (job.State is "Completed" or "DeadLettered")
+        {
+            job.State = "Pending";
+            job.Attempts = 0;
+            job.AvailableAtUtc = utcNow;
+            job.LeaseOwner = null;
+            job.LeaseAcquiredAtUtc = null;
+            job.LeaseHeartbeatAtUtc = null;
+            job.LeaseExpiresAtUtc = null;
+            job.FailureCode = null;
+            job.CompletedAtUtc = null;
+            job.Version = checked(job.Version + 1);
+        }
+
+        try
+        {
+            await _context.SaveChangesAsync(cancellationToken);
+            PersistedUploadReconciliationCandidate current =
+                await ToCandidateAsync(
+                    row,
+                    candidate.LeaseToken,
+                    candidate.LeaseExpiresAtUtc,
+                    candidate.ContinuationCursor,
+                    cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new(
+                PersistedUploadReconciliationMutationStatus.Applied,
+                current,
+                false);
+        }
+        catch (DbUpdateException)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return Stale();
+        }
     }
 
     private async ValueTask<PersistedUploadReconciliationMutation> MutateAsync(
@@ -620,11 +929,20 @@ public sealed class RelationalUploadReconciliationStore(
             row.ExpectedBytes,
             row.ExpectedSha256,
             row.DeclaredContentType,
+            MultipartIssuanceId(row),
+            row.MultipartPartPlanLifetimeTicks.HasValue
+                ? TimeSpan.FromTicks(row.MultipartPartPlanLifetimeTicks.Value)
+                : null,
+            ingest?.PromotionMode != "ExistingExactBlob",
             multipart,
             parts.Select(item => new UploadedPart(
                 item.PartNumber,
                 new BlobEntityTag(item.EntityTag),
-                checksum: null,
+                item.Checksum is null
+                    ? null
+                    : new BlobChecksum(
+                        BlobChecksumAlgorithm.Sha256,
+                        item.Checksum),
                 item.SizeBytes)).ToArray(),
             reservation is null || reservation.State != "Reserved",
             cursor);
@@ -656,15 +974,43 @@ public sealed class RelationalUploadReconciliationStore(
             TimeSpan.FromTicks(row.MultipartPartPlanLifetimeTicks.Value),
             new BlobMediaType(row.DeclaredContentType),
             checksum: null,
-            new BlobMetadata(
-            [
-                KeyValuePair.Create(
-                    "vistara-tenant-id",
-                    row.TenantId.Value.ToString("D")),
-                KeyValuePair.Create("vistara-upload-id", row.Id.ToString("D")),
-            ]),
+            MultipartMetadata(row),
             row.MultipartProviderState);
     }
+
+    private static BlobMetadata MultipartMetadata(UploadSessionRow row)
+    {
+        var metadata = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["vistara-tenant-id"] = row.TenantId.Value.ToString("D"),
+            ["vistara-upload-id"] = row.Id.ToString("D"),
+        };
+        if (MultipartIssuanceId(row) is { } issuanceId)
+        {
+            metadata["vistara-multipart-issuance-id"] =
+                issuanceId;
+        }
+
+        return new BlobMetadata(metadata);
+    }
+
+    private static string? MultipartIssuanceId(UploadSessionRow row)
+    {
+        const string prefix = "issuance:v1:";
+        return row.ProviderUploadId is null &&
+            row.MultipartProviderState is { } state &&
+            state.StartsWith(prefix, StringComparison.Ordinal) &&
+            state.Length > prefix.Length
+                ? state[prefix.Length..]
+                : null;
+    }
+
+    private static bool HasMetadata(
+        BlobMetadata metadata,
+        string key,
+        string expected) =>
+        metadata.TryGetValue(key, out string? value) &&
+        string.Equals(value, expected, StringComparison.Ordinal);
 
     private DurableJob CreateIngestJob(
         UploadSessionRow row,

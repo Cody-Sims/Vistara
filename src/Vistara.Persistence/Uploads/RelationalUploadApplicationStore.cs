@@ -235,34 +235,19 @@ public sealed class RelationalUploadApplicationStore
     {
         ArgumentNullException.ThrowIfNull(supplied);
         cancellationToken.ThrowIfCancellationRequested();
-        _context.ChangeTracker.Clear();
-        UploadSessionRow observed;
-        await using (IDbContextTransaction readTransaction =
-                     await TenantDatabaseTransaction.BeginAsync(
-                         _context,
-                         supplied.TenantId,
-                         cancellationToken))
+        if (string.Equals(
+                supplied.Strategy,
+                "multipart",
+                StringComparison.Ordinal) &&
+            _blobStore is not IDurableMultipartBlobStore)
         {
-            observed = await _context.UploadSessions
-                .AsNoTracking()
-                .SingleAsync(
-                    row => row.Id == supplied.UploadId,
-                    cancellationToken);
-            EnsureSnapshotMatches(supplied, observed);
-            if (EnsureUtc(_clock.UtcNow) >= observed.ExpiresAtUtc)
-            {
-                throw new InvalidOperationException(
-                    "The upload session has expired.");
-            }
-
-            if (observed.State is not ("Pending" or "UploadIssued"))
-            {
-                throw new InvalidOperationException(
-                    "Only pending or issued uploads can receive an upload plan.");
-            }
-
-            await readTransaction.CommitAsync(cancellationToken);
+            throw new InvalidOperationException(
+                "The storage provider cannot issue recoverable multipart uploads.");
         }
+
+        UploadSessionRow observed = await PrepareIssuanceAsync(
+            supplied,
+            cancellationToken);
 
         DirectUploadPlan? directPlan = null;
         MultipartSession? multipart = null;
@@ -289,11 +274,15 @@ public sealed class RelationalUploadApplicationStore
                 case "Multipart":
                     DateTimeOffset now = EnsureUtc(_clock.UtcNow);
                     TimeSpan remaining = observed.ExpiresAtUtc - now;
-                    TimeSpan partPlanLifetime = remaining < _options.PlanLifetime
-                        ? remaining
-                        : _options.PlanLifetime;
+                    TimeSpan partPlanLifetime = TimeSpan.FromTicks(
+                        observed.MultipartPartPlanLifetimeTicks
+                            ?? throw new InvalidOperationException(
+                                "The durable multipart issuance is incomplete."));
                     multipart = observed.ProviderUploadId is null
-                        ? await _blobStore.BeginMultipartAsync(
+                        ? await DurableMultipartStore().GetOrCreateMultipartAsync(
+                            MultipartIssuanceId(observed)
+                                ?? throw new InvalidOperationException(
+                                    "The multipart issuance ID is missing."),
                             new MultipartRequest(
                                 new BlobKey(observed.StagingKey),
                                 observed.ExpectedBytes,
@@ -305,12 +294,16 @@ public sealed class RelationalUploadApplicationStore
                                 metadata),
                             cancellationToken)
                         : RestoreMultipart(observed);
-                    parts =
-                    [
+                    ValidateMultipartSession(observed, multipart, now);
+                    MultipartPartPlan initialPlan =
                         await _blobStore.CreatePartPlanAsync(
                             multipart,
                             1,
-                            cancellationToken),
+                            cancellationToken);
+                    ValidatePartPlan(multipart, initialPlan, 1, now);
+                    parts =
+                    [
+                        initialPlan,
                     ];
                     break;
                 default:
@@ -325,7 +318,16 @@ public sealed class RelationalUploadApplicationStore
                 exception);
         }
 
-        if (observed.State == "Pending")
+        if (observed.State == "Pending" && observed.Strategy == "Multipart")
+        {
+            multipart = await CompleteMultipartIssuanceAsync(
+                supplied,
+                observed,
+                multipart ?? throw new InvalidOperationException(
+                    "A multipart issuance is missing its provider session."),
+                cancellationToken);
+        }
+        else if (observed.State == "Pending")
         {
             _context.ChangeTracker.Clear();
             await using IDbContextTransaction transaction =
@@ -387,6 +389,181 @@ public sealed class RelationalUploadApplicationStore
             cancellationToken) ?? throw new InvalidOperationException(
             "The issued upload session disappeared.");
         return new PersistedUploadIssuance(session, directPlan, multipart, parts);
+    }
+
+    private async ValueTask<UploadSessionRow> PrepareIssuanceAsync(
+        PersistedUploadSession supplied,
+        CancellationToken cancellationToken)
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            _context.ChangeTracker.Clear();
+            await using IDbContextTransaction transaction =
+                await TenantDatabaseTransaction.BeginAsync(
+                    _context,
+                    supplied.TenantId,
+                    cancellationToken);
+            UploadSessionRow row = await LoadTrackedAsync(
+                supplied.UploadId,
+                cancellationToken);
+            EnsureUploadIdentityMatches(supplied, row);
+            if (EnsureUtc(_clock.UtcNow) >= row.ExpiresAtUtc)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                throw new InvalidOperationException(
+                    "The upload session has expired.");
+            }
+
+            if (row.State is not ("Pending" or "UploadIssued"))
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                throw new InvalidOperationException(
+                    "Only pending or issued uploads can receive an upload plan.");
+            }
+
+            if (row.Strategy != "Multipart")
+            {
+                EnsureSnapshotMatches(supplied, row);
+                await transaction.CommitAsync(cancellationToken);
+                _context.Entry(row).State = EntityState.Detached;
+                return row;
+            }
+
+            if (supplied.Version > row.Version ||
+                (supplied.Version != row.Version &&
+                 MultipartIssuanceId(row) is null &&
+                 row.State != "UploadIssued"))
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                throw new InvalidOperationException(
+                    "The upload snapshot does not match persisted state.");
+            }
+
+            if (row.State == "UploadIssued" ||
+                MultipartIssuanceId(row) is not null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                _context.Entry(row).State = EntityState.Detached;
+                return row;
+            }
+
+            long expectedVersion = row.Version;
+            row.MultipartProviderState =
+                $"issuance:v1:mpi-{_idGenerator.NewId():N}";
+            TimeSpan remaining = row.ExpiresAtUtc - EnsureUtc(_clock.UtcNow);
+            row.MultipartPartPlanLifetimeTicks =
+                (remaining < _options.PlanLifetime
+                    ? remaining
+                    : _options.PlanLifetime).Ticks;
+            row.UpdatedAtUtc = EnsureUtc(_clock.UtcNow);
+            row.Version = checked(row.Version + 1);
+            _context.Entry(row).Property(item => item.Version).OriginalValue =
+                expectedVersion;
+            try
+            {
+                await _context.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                _context.Entry(row).State = EntityState.Detached;
+                return row;
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+            }
+            catch (DbUpdateException)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+            }
+            catch (DbException)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+            }
+        }
+
+        throw new InvalidOperationException(
+            "The multipart issuance could not be durably prepared.");
+    }
+
+    private async ValueTask<MultipartSession> CompleteMultipartIssuanceAsync(
+        PersistedUploadSession supplied,
+        UploadSessionRow prepared,
+        MultipartSession multipart,
+        CancellationToken cancellationToken)
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            _context.ChangeTracker.Clear();
+            await using IDbContextTransaction transaction =
+                await TenantDatabaseTransaction.BeginAsync(
+                    _context,
+                    supplied.TenantId,
+                    cancellationToken);
+            UploadSessionRow row = await LoadTrackedAsync(
+                supplied.UploadId,
+                cancellationToken);
+            EnsureUploadIdentityMatches(supplied, row);
+            if (row.State == "UploadIssued")
+            {
+                MultipartSession persisted = RestoreMultipart(row);
+                await transaction.RollbackAsync(cancellationToken);
+                if (persisted.UploadId != multipart.UploadId ||
+                    persisted.ProviderState != multipart.ProviderState)
+                {
+                    throw new InvalidOperationException(
+                        "Concurrent multipart issuance returned a different provider session.");
+                }
+
+                return persisted;
+            }
+
+            if (row.State != "Pending" ||
+                !string.Equals(
+                    MultipartIssuanceId(row),
+                    MultipartIssuanceId(prepared),
+                    StringComparison.Ordinal) ||
+                row.Version != prepared.Version)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                throw new InvalidOperationException(
+                    "The upload changed while its provider plan was issued.");
+            }
+
+            long expectedVersion = row.Version;
+            row.State = "UploadIssued";
+            row.ProviderUploadId = multipart.UploadId;
+            row.MultipartProviderState = multipart.ProviderState;
+            row.MultipartExpiresAtUtc = multipart.ExpiresAtUtc;
+            row.MultipartPartPlanLifetimeTicks =
+                multipart.PartPlanLifetime.Ticks;
+            row.MultipartMaxParts = multipart.MaxParts;
+            row.MultipartMinPartBytes = multipart.MinPartBytes;
+            row.MultipartMaxPartBytes = multipart.MaxPartBytes;
+            row.UpdatedAtUtc = EnsureUtc(_clock.UtcNow);
+            row.Version = checked(row.Version + 1);
+            _context.Entry(row).Property(item => item.Version).OriginalValue =
+                expectedVersion;
+            try
+            {
+                await _context.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                return multipart;
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+            }
+            catch (DbUpdateException)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+            }
+            catch (DbException)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+            }
+        }
+
+        throw new InvalidOperationException(
+            "The multipart provider plan could not be durably recorded.");
     }
 
     public async ValueTask<PersistedUploadSession?> GetAsync(
@@ -600,6 +777,11 @@ public sealed class RelationalUploadApplicationStore
                     session,
                     partNumbers[index],
                     cancellationToken);
+                ValidatePartPlan(
+                    session,
+                    plans[index],
+                    partNumbers[index],
+                    EnsureUtc(_clock.UtcNow));
             }
         }
         catch (BlobStoreException)
@@ -629,12 +811,27 @@ public sealed class RelationalUploadApplicationStore
         string requestHash = CommitHash(parts);
         UploadSessionRow observed;
         long completionVersion = expectedVersion;
+        IReadOnlyList<PersistedCommittedUploadPart> completionParts = parts;
         if (string.Equals(supplied.Strategy, "multipart", StringComparison.Ordinal))
         {
+            MultipartPartsVerification verification =
+                await VerifyMultipartPartsAsync(
+                    supplied,
+                    parts,
+                    idempotencyKey,
+                    requestHash,
+                    expectedVersion,
+                    cancellationToken);
+            if (verification.Failure is not null)
+            {
+                return verification.Failure;
+            }
+
+            completionParts = verification.Parts;
             MultipartCommitPreparation preparation =
                 await PrepareMultipartCommitAsync(
                     supplied,
-                    parts,
+                    verification.Parts,
                     idempotencyKey,
                     requestHash,
                     expectedVersion,
@@ -705,11 +902,12 @@ public sealed class RelationalUploadApplicationStore
                 MultipartCompletion completion =
                     await _blobStore.CompleteMultipartAsync(
                         RestoreMultipart(observed),
-                        parts.Select(ToUploadedPart).ToArray(),
+                        completionParts.Select(ToUploadedPart).ToArray(),
                         cancellationToken);
                 head = completion.Head;
             }
         }
+
         catch (BlobStoreException exception)
             when (exception.Code == BlobStoreErrorCode.OutcomeUnknown)
         {
@@ -821,6 +1019,119 @@ public sealed class RelationalUploadApplicationStore
             await transaction.RollbackAsync(cancellationToken);
             return new(PersistedUploadCommitStatus.VersionConflict, null);
         }
+    }
+
+    private async ValueTask<MultipartPartsVerification> VerifyMultipartPartsAsync(
+        PersistedUploadSession supplied,
+        IReadOnlyList<PersistedCommittedUploadPart> claimedParts,
+        string idempotencyKey,
+        string requestHash,
+        long expectedVersion,
+        CancellationToken cancellationToken)
+    {
+        _context.ChangeTracker.Clear();
+        MultipartSession session;
+        await using (IDbContextTransaction transaction =
+                     await TenantDatabaseTransaction.BeginAsync(
+                         _context,
+                         supplied.TenantId,
+                         cancellationToken))
+        {
+            UploadSessionRow row = await LoadTrackedAsync(
+                supplied.UploadId,
+                cancellationToken);
+            EnsureUploadIdentityMatches(supplied, row);
+            PersistedUploadCommitResult? existing = await ExistingCommitAsync(
+                row,
+                idempotencyKey,
+                requestHash,
+                cancellationToken);
+            if (existing is not null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new(existing, []);
+            }
+
+            if (row.Version != expectedVersion)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new(
+                    new PersistedUploadCommitResult(
+                        PersistedUploadCommitStatus.VersionConflict,
+                        null),
+                    []);
+            }
+
+            if (EnsureUtc(_clock.UtcNow) >= row.ExpiresAtUtc)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new(
+                    new PersistedUploadCommitResult(
+                        PersistedUploadCommitStatus.Expired,
+                        null),
+                    []);
+            }
+
+            if (row.State != "UploadIssued" ||
+                row.Strategy != "Multipart" ||
+                row.ProviderUploadId is null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new(
+                    new PersistedUploadCommitResult(
+                        PersistedUploadCommitStatus.InvalidState,
+                        null),
+                    []);
+            }
+
+            session = RestoreMultipart(row);
+            await transaction.RollbackAsync(cancellationToken);
+        }
+
+        if (claimedParts.Count == 0 ||
+            claimedParts.Count > session.MaxParts)
+        {
+            return new(
+                new PersistedUploadCommitResult(
+                    PersistedUploadCommitStatus.InvalidState,
+                    null),
+                []);
+        }
+
+        MultipartInventory inventory;
+        try
+        {
+            inventory = await DurableMultipartStore().InspectMultipartAsync(
+                session,
+                claimedParts.Select(ToUploadedPart).ToArray(),
+                cancellationToken);
+        }
+        catch (BlobStoreException)
+        {
+            return new(
+                new PersistedUploadCommitResult(
+                    PersistedUploadCommitStatus.Unavailable,
+                    null),
+                []);
+        }
+
+        if (inventory.State is not (
+                MultipartInventoryState.Active or
+                MultipartInventoryState.Completed) ||
+            !TryValidateProviderParts(
+                session,
+                claimedParts,
+                inventory.Parts,
+                out PersistedCommittedUploadPart[] verified))
+        {
+            return new(
+                new PersistedUploadCommitResult(
+                    PersistedUploadCommitStatus.InvalidState,
+                    null),
+                []);
+        }
+
+        return new(null, verified);
     }
 
     private async ValueTask<MultipartCommitPreparation> PrepareMultipartCommitAsync(
@@ -1090,7 +1401,6 @@ public sealed class RelationalUploadApplicationStore
             return new(PersistedUploadAbortStatus.InvalidState, null);
         }
 
-        await ReleaseReservationAsync(row, EnsureUtc(_clock.UtcNow), cancellationToken);
         row.State = "Aborted";
         row.UpdatedAtUtc = EnsureUtc(_clock.UtcNow);
         row.Version = checked(row.Version + 1);
@@ -1174,10 +1484,36 @@ public sealed class RelationalUploadApplicationStore
 
             if (row.ProviderUploadId is null)
             {
-                await ReleaseReservationAsync(
-                    row,
-                    EnsureUtc(_clock.UtcNow),
-                    cancellationToken);
+                if (MultipartIssuanceId(row) is not null)
+                {
+                    row.LastKnownState = row.State;
+                    row.State = "Aborting";
+                    await ExtendReservationForProcessingAsync(
+                        row,
+                        EnsureUtc(_clock.UtcNow),
+                        cancellationToken);
+                    row.UpdatedAtUtc = EnsureUtc(_clock.UtcNow);
+                    row.Version = checked(row.Version + 1);
+                    _context.Entry(row).Property(item => item.Version).OriginalValue =
+                        expectedVersion;
+                    try
+                    {
+                        await _context.SaveChangesAsync(cancellationToken);
+                        await transaction.CommitAsync(cancellationToken);
+                        return new(PersistedUploadAbortStatus.Unavailable, null);
+                    }
+                    catch (DbUpdateConcurrencyException)
+                    {
+                        await transaction.RollbackAsync(cancellationToken);
+                        return new(PersistedUploadAbortStatus.VersionConflict, null);
+                    }
+                    catch (DbException)
+                    {
+                        await transaction.RollbackAsync(cancellationToken);
+                        return new(PersistedUploadAbortStatus.VersionConflict, null);
+                    }
+                }
+
                 row.LastKnownState = row.State;
                 row.State = "Aborted";
                 row.UpdatedAtUtc = EnsureUtc(_clock.UtcNow);
@@ -1323,10 +1659,6 @@ public sealed class RelationalUploadApplicationStore
             return new(PersistedUploadAbortStatus.VersionConflict, null);
         }
 
-        await ReleaseReservationAsync(
-            row,
-            EnsureUtc(_clock.UtcNow),
-            cancellationToken);
         row.LastKnownState = "Aborting";
         row.State = "Aborted";
         row.UpdatedAtUtc = EnsureUtc(_clock.UtcNow);
@@ -1532,61 +1864,10 @@ public sealed class RelationalUploadApplicationStore
         UploadSessionRow row,
         CancellationToken cancellationToken)
     {
-        await ReleaseReservationAsync(
-            row,
-            EnsureUtc(_clock.UtcNow),
-            cancellationToken,
-            expire: true);
+        cancellationToken.ThrowIfCancellationRequested();
         row.State = "Expired";
         row.UpdatedAtUtc = EnsureUtc(_clock.UtcNow);
         row.Version = checked(row.Version + 1);
-    }
-
-    private async ValueTask ReleaseReservationAsync(
-        UploadSessionRow row,
-        DateTimeOffset nowUtc,
-        CancellationToken cancellationToken,
-        bool expire = false)
-    {
-        QuotaReservationRow? reservation = await _context.QuotaReservations
-            .SingleOrDefaultAsync(
-                candidate => candidate.UploadSessionId == row.Id,
-                cancellationToken);
-        if (reservation is null)
-        {
-            throw new InvalidOperationException(
-                "The upload quota reservation is missing.");
-        }
-
-        string target = expire ? "Expired" : "Released";
-        if (reservation.State == target)
-        {
-            return;
-        }
-
-        if (reservation.State != "Reserved")
-        {
-            throw new InvalidOperationException(
-                "The upload quota reservation cannot be released.");
-        }
-
-        QuotaStoreTransitionResult result =
-            await QuotaPersistence.TransitionTrackedAsync(
-            _context,
-            new AtomicQuotaTransition(
-                reservation.Id,
-                expire
-                    ? QuotaReservationState.Expired
-                    : QuotaReservationState.Released,
-                reservation.Version,
-                nowUtc),
-            consumedByOperationId: null,
-            cancellationToken);
-        if (result.Status != QuotaStoreTransitionStatus.Transitioned)
-        {
-            throw new DbUpdateConcurrencyException(
-                "The upload quota reservation changed concurrently.");
-        }
     }
 
     private async ValueTask ExtendReservationForProcessingAsync(
@@ -1638,8 +1919,136 @@ public sealed class RelationalUploadApplicationStore
         new(
             part.PartNumber,
             new BlobEntityTag(part.EntityTag),
-            checksum: null,
+            part.Checksum is null
+                ? null
+                : new BlobChecksum(
+                    BlobChecksumAlgorithm.Sha256,
+                    part.Checksum),
             part.SizeBytes);
+
+    private static bool TryValidateProviderParts(
+        MultipartSession session,
+        IReadOnlyList<PersistedCommittedUploadPart> claimed,
+        IReadOnlyList<UploadedPart> observed,
+        out PersistedCommittedUploadPart[] verified)
+    {
+        verified = [];
+        if (observed.Count == 0 ||
+            observed.Count != claimed.Count ||
+            observed.Count > session.MaxParts)
+        {
+            return false;
+        }
+
+        var result = new PersistedCommittedUploadPart[observed.Count];
+        long total = 0;
+        for (int index = 0; index < observed.Count; index++)
+        {
+            UploadedPart actual = observed[index];
+            PersistedCommittedUploadPart reported = claimed[index];
+            BlobChecksum? actualSha256 =
+                actual.Checksum?.Algorithm == BlobChecksumAlgorithm.Sha256
+                    ? actual.Checksum
+                    : null;
+            if (actual.PartNumber != index + 1 ||
+                actual.PartNumber != reported.PartNumber ||
+                actual.EntityTag.Value != reported.EntityTag ||
+                actual.SizeBytes > session.MaxPartBytes ||
+                (index < observed.Count - 1 &&
+                 actual.SizeBytes < session.MinPartBytes) ||
+                (actualSha256 is not null &&
+                 reported.Checksum is not null &&
+                 !string.Equals(
+                     actualSha256.Value,
+                     reported.Checksum,
+                     StringComparison.Ordinal)))
+            {
+                return false;
+            }
+
+            try
+            {
+                total = checked(total + actual.SizeBytes);
+            }
+            catch (OverflowException)
+            {
+                return false;
+            }
+            result[index] = new PersistedCommittedUploadPart(
+                actual.PartNumber,
+                actual.EntityTag.Value,
+                actualSha256?.Value,
+                actual.SizeBytes);
+        }
+
+        if (total != session.ContentLength)
+        {
+            return false;
+        }
+
+        verified = result;
+        return true;
+    }
+
+    private static void ValidateMultipartSession(
+        UploadSessionRow row,
+        MultipartSession session,
+        DateTimeOffset utcNow)
+    {
+        if (session.Key.Value != row.StagingKey ||
+            session.ContentLength != row.ExpectedBytes ||
+            session.ContentType.Value != row.DeclaredContentType ||
+            session.CompletionConditions != BlobRequestConditions.CreateOnly ||
+            session.Checksum is not null ||
+            session.ExpiresAtUtc <= utcNow ||
+            session.ExpiresAtUtc > row.ExpiresAtUtc + TimeSpan.FromMinutes(1) ||
+            session.PartPlanLifetime.Ticks !=
+                row.MultipartPartPlanLifetimeTicks ||
+            !HasMetadata(
+                session.Metadata,
+                "vistara-tenant-id",
+                row.TenantId.Value.ToString("D")) ||
+            !HasMetadata(
+                session.Metadata,
+                "vistara-upload-id",
+                row.Id.ToString("D")) ||
+            (MultipartIssuanceId(row) is { } issuanceId &&
+             !HasMetadata(
+                 session.Metadata,
+                 "vistara-multipart-issuance-id",
+                 issuanceId)))
+        {
+            throw new BlobStoreException(
+                BlobStoreErrorCode.InvalidRequest,
+                "The provider returned an invalid multipart session.");
+        }
+    }
+
+    private static void ValidatePartPlan(
+        MultipartSession session,
+        MultipartPartPlan plan,
+        int requestedPartNumber,
+        DateTimeOffset utcNow)
+    {
+        if (plan.UploadId != session.UploadId ||
+            plan.PartNumber != requestedPartNumber ||
+            plan.MinBytes != session.MinPartBytes ||
+            plan.MaxBytes != session.MaxPartBytes ||
+            plan.ExpiresAtUtc <= utcNow ||
+            plan.ExpiresAtUtc > session.ExpiresAtUtc)
+        {
+            throw new BlobStoreException(
+                BlobStoreErrorCode.InvalidRequest,
+                "The provider returned an invalid multipart part plan.");
+        }
+    }
+
+    private static bool HasMetadata(
+        BlobMetadata metadata,
+        string key,
+        string expected) =>
+        metadata.TryGetValue(key, out string? value) &&
+        string.Equals(value, expected, StringComparison.Ordinal);
 
     private BlobChecksum? NativeSha256(UploadSessionRow row) =>
         _blobStore.Capabilities.NativeChecksumAlgorithms.Contains(
@@ -1648,6 +2057,12 @@ public sealed class RelationalUploadApplicationStore
                 BlobChecksumAlgorithm.Sha256,
                 row.ExpectedSha256)
             : null;
+
+    private IDurableMultipartBlobStore DurableMultipartStore() =>
+        _blobStore as IDurableMultipartBlobStore ??
+        throw new BlobStoreException(
+            BlobStoreErrorCode.Unsupported,
+            "The storage provider does not expose durable multipart issuance and inventory.");
 
     private static string CommitHash(
         IReadOnlyList<PersistedCommittedUploadPart> parts)
@@ -1717,14 +2132,32 @@ public sealed class RelationalUploadApplicationStore
                 StringComparison.Ordinal);
     }
 
-    private static BlobMetadata RequiredMetadata(UploadSessionRow row) =>
-        new(
-        [
-            KeyValuePair.Create(
-                "vistara-tenant-id",
-                row.TenantId.Value.ToString("D")),
-            KeyValuePair.Create("vistara-upload-id", row.Id.ToString("D")),
-        ]);
+    private static BlobMetadata RequiredMetadata(UploadSessionRow row)
+    {
+        var metadata = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["vistara-tenant-id"] = row.TenantId.Value.ToString("D"),
+            ["vistara-upload-id"] = row.Id.ToString("D"),
+        };
+        if (MultipartIssuanceId(row) is { } issuanceId)
+        {
+            metadata["vistara-multipart-issuance-id"] =
+                issuanceId;
+        }
+
+        return new BlobMetadata(metadata);
+    }
+
+    private static string? MultipartIssuanceId(UploadSessionRow row)
+    {
+        const string prefix = "issuance:v1:";
+        return row.ProviderUploadId is null &&
+            row.MultipartProviderState is { } state &&
+            state.StartsWith(prefix, StringComparison.Ordinal) &&
+            state.Length > prefix.Length
+                ? state[prefix.Length..]
+                : null;
+    }
 
     private static MultipartSession RestoreMultipart(UploadSessionRow row)
     {
@@ -2071,6 +2504,10 @@ public sealed class RelationalUploadApplicationStore
     private sealed record MultipartCommitPreparation(
         UploadSessionRow? Row,
         PersistedUploadCommitResult? Failure);
+
+    private sealed record MultipartPartsVerification(
+        PersistedUploadCommitResult? Failure,
+        IReadOnlyList<PersistedCommittedUploadPart> Parts);
 
     private sealed record UploadIngestPayload(Guid UploadSessionId);
 }

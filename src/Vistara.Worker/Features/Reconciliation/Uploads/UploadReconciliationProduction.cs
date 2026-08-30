@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Security.Cryptography;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Vistara.Application.Common;
 using Vistara.Application.Common.Storage;
@@ -57,6 +59,18 @@ internal sealed class RelationalUploadReconciliationStateAdapter(
     private readonly IClock _clock = clock ?? throw new ArgumentNullException(nameof(clock));
     private Guid? _activeTenantId;
 
+    public ValueTask<string?> LoadCheckpointAsync(
+        Guid tenantId,
+        Guid runId,
+        CancellationToken cancellationToken)
+    {
+        EstablishTenant(tenantId);
+        return _store.LoadCheckpointAsync(
+            tenantId,
+            runId,
+            cancellationToken);
+    }
+
     public async ValueTask<UploadReconciliationPage> ScanAsync(
         UploadReconciliationScanRequest request,
         CancellationToken cancellationToken)
@@ -65,8 +79,10 @@ internal sealed class RelationalUploadReconciliationStateAdapter(
         PersistedUploadReconciliationPage page = await _store.ScanAsync(
             request.TenantId,
             request.Cursor,
+            request.RunId,
             request.MaximumSessions,
             request.UtcNow,
+            request.RecoveryCutoffUtc,
             request.LeaseDuration,
             request.DryRun,
             cancellationToken);
@@ -93,28 +109,56 @@ internal sealed class RelationalUploadReconciliationStateAdapter(
         return candidate is null ? null : ToWorker(candidate);
     }
 
-    public ValueTask<UploadReconciliationMutationResult> ExpireAndReleaseAsync(
+    public ValueTask<UploadReconciliationMutationResult> ExpireAsync(
         UploadReconciliationFence fence,
         DateTimeOffset utcNow,
         CancellationToken cancellationToken) =>
         MutateAsync(
             fence,
             utcNow,
-            (candidate, token) => _store.ExpireAndReleaseAsync(
+            (candidate, token) => _store.ExpireAsync(
+                candidate,
+                utcNow,
+                token),
+            cancellationToken);
+
+    public ValueTask<UploadReconciliationMutationResult> PrepareAbortAsync(
+        UploadReconciliationFence fence,
+        DateTimeOffset utcNow,
+        CancellationToken cancellationToken) =>
+        MutateAsync(
+            fence,
+            utcNow,
+            (candidate, token) => _store.PrepareAbortAsync(
                 candidate,
                 utcNow,
                 token),
             cancellationToken);
 
     public ValueTask<UploadReconciliationMutationResult>
-        CompleteAbortAndReleaseAsync(
+        RecordMultipartIssuedForAbortAsync(
+            UploadReconciliationFence fence,
+            MultipartSession session,
+            DateTimeOffset utcNow,
+            CancellationToken cancellationToken) =>
+        MutateAsync(
+            fence,
+            utcNow,
+            (candidate, token) => _store.RecordMultipartIssuedForAbortAsync(
+                candidate,
+                session,
+                utcNow,
+                token),
+            cancellationToken);
+
+    public ValueTask<UploadReconciliationMutationResult> CompleteAbortAsync(
             UploadReconciliationFence fence,
             DateTimeOffset utcNow,
             CancellationToken cancellationToken) =>
         MutateAsync(
             fence,
             utcNow,
-            (candidate, token) => _store.CompleteAbortAndReleaseAsync(
+            (candidate, token) => _store.CompleteAbortAsync(
                 candidate,
                 utcNow,
                 token),
@@ -162,6 +206,19 @@ internal sealed class RelationalUploadReconciliationStateAdapter(
                 token),
             cancellationToken);
 
+    public ValueTask<UploadReconciliationMutationResult> ResumeIngestAsync(
+        UploadReconciliationFence fence,
+        DateTimeOffset utcNow,
+        CancellationToken cancellationToken) =>
+        MutateAsync(
+            fence,
+            utcNow,
+            (candidate, token) => _store.ResumeIngestAsync(
+                candidate,
+                utcNow,
+                token),
+            cancellationToken);
+
     public ValueTask<UploadReconciliationMutationResult> PreserveCanonicalAsync(
         UploadReconciliationFence fence,
         BlobIdentity canonicalIdentity,
@@ -170,12 +227,11 @@ internal sealed class RelationalUploadReconciliationStateAdapter(
         MutateAsync(
             fence,
             utcNow,
-            (candidate, token) =>
-                RelationalUploadReconciliationStore.PreserveCanonicalAsync(
-                    candidate,
-                    canonicalIdentity,
-                    utcNow,
-                    token),
+            (candidate, token) => _store.PreserveCanonicalAsync(
+                candidate,
+                canonicalIdentity,
+                utcNow,
+                token),
             cancellationToken);
 
     public ValueTask<UploadReconciliationMutationResult> QuarantineAsync(
@@ -283,7 +339,10 @@ internal sealed class RelationalUploadReconciliationStateAdapter(
             candidate.ContinuationCursor,
             new BlobMediaType(candidate.DeclaredContentType),
             candidate.MultipartSession,
-            candidate.CompletionParts);
+            candidate.CompletionParts,
+            candidate.MultipartIssuanceId,
+            candidate.MultipartPartPlanLifetime,
+            candidate.CanonicalRequiresUploadOwnership);
 
     private static UploadReconciliationSessionState State(
         PersistedUploadReconciliationCandidate candidate) =>
@@ -291,6 +350,10 @@ internal sealed class RelationalUploadReconciliationStateAdapter(
         {
             "Pending" or "UploadIssued" =>
                 UploadReconciliationSessionState.Pending,
+            "CommitRequested" => UploadReconciliationSessionState.CommitRequested,
+            "Verifying" => UploadReconciliationSessionState.Verifying,
+            "Promoting" => UploadReconciliationSessionState.Promoting,
+            "Reconciling" => UploadReconciliationSessionState.Reconciling,
             "Committing" => UploadReconciliationSessionState.Committing,
             "Aborting" => UploadReconciliationSessionState.Aborting,
             "Expired" => UploadReconciliationSessionState.Expired,
@@ -322,10 +385,13 @@ internal sealed class RelationalUploadReconciliationStateAdapter(
 }
 
 internal sealed class BlobStoreUploadReconciliationStorageAdapter(
-    IBlobStore blobStore) : IUploadReconciliationStoragePort
+    IBlobStore blobStore,
+    IClock clock) : IUploadReconciliationStoragePort
 {
     private readonly IBlobStore _blobStore =
         blobStore ?? throw new ArgumentNullException(nameof(blobStore));
+    private readonly IClock _clock =
+        clock ?? throw new ArgumentNullException(nameof(clock));
 
     public async ValueTask<UploadReconciliationHeadResult> HeadAsync(
         BlobKey key,
@@ -349,6 +415,143 @@ internal sealed class BlobStoreUploadReconciliationStorageAdapter(
         }
     }
 
+    public async ValueTask<UploadReconciliationHeadResult> VerifyAsync(
+        BlobKey key,
+        long expectedSizeBytes,
+        CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(expectedSizeBytes);
+        UploadReconciliationHeadResult headed = await HeadAsync(
+            key,
+            cancellationToken);
+        if (headed.Status != UploadReconciliationHeadStatus.Found)
+        {
+            return headed;
+        }
+
+        UploadReconciliationObjectHead observed = headed.Head
+            ?? throw new InvalidOperationException("Found HEAD result lacks data.");
+        if (observed.ContentLength != expectedSizeBytes)
+        {
+            return headed;
+        }
+
+        try
+        {
+            await using BlobReadHandle handle = await _blobStore.OpenReadAsync(
+                key,
+                new BlobReadOptions(
+                    Conditions: new BlobRequestConditions(
+                        ifMatch: observed.Identity.Version)),
+                cancellationToken);
+            if (handle.Head.Identity != observed.Identity)
+            {
+                return UploadReconciliationHeadResult.Retry();
+            }
+
+            using IncrementalHash hash =
+                IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
+            long length = 0;
+            try
+            {
+                int read;
+                while ((read = await handle.Content.ReadAsync(
+                           buffer.AsMemory(0, buffer.Length),
+                           cancellationToken)) > 0)
+                {
+                    length = checked(length + read);
+                    if (length > expectedSizeBytes)
+                    {
+                        return UploadReconciliationHeadResult.Found(
+                            observed with
+                            {
+                                ContentLength = length,
+                                Sha256 = null,
+                            });
+                    }
+
+                    hash.AppendData(buffer, 0, read);
+                }
+
+                return UploadReconciliationHeadResult.Found(
+                    observed with
+                    {
+                        ContentLength = length,
+                        Sha256 = new Sha256Checksum(
+                            Convert.ToHexStringLower(hash.GetHashAndReset())),
+                    });
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
+            }
+        }
+        catch (BlobStoreException exception)
+            when (exception.Code is BlobStoreErrorCode.NotFound or
+                BlobStoreErrorCode.PreconditionFailed)
+        {
+            return UploadReconciliationHeadResult.Retry();
+        }
+        catch (BlobStoreException)
+        {
+            return UploadReconciliationHeadResult.Retry();
+        }
+    }
+
+    public async ValueTask<UploadReconciliationMultipartRecovery>
+        RecoverMultipartAsync(
+            UploadReconciliationMultipartIssuance issuance,
+            CancellationToken cancellationToken)
+    {
+        if (_blobStore is not IDurableMultipartBlobStore durable)
+        {
+            return new(null, Retry: true);
+        }
+
+        TimeSpan remaining = issuance.ExpiresAtUtc - _clock.UtcNow;
+        if (remaining <= TimeSpan.Zero)
+        {
+            remaining = issuance.PartPlanLifetime;
+        }
+
+        try
+        {
+            MultipartSession session = await durable.GetOrCreateMultipartAsync(
+                issuance.IssuanceId,
+                new MultipartRequest(
+                    issuance.StagingKey,
+                    issuance.ExpectedSizeBytes,
+                    issuance.ContentType,
+                    checksum: null,
+                    BlobRequestConditions.CreateOnly,
+                    remaining,
+                    issuance.PartPlanLifetime,
+                    new BlobMetadata(
+                    [
+                        KeyValuePair.Create(
+                            "vistara-tenant-id",
+                            issuance.TenantId.ToString("D")),
+                        KeyValuePair.Create(
+                            "vistara-upload-id",
+                            issuance.UploadSessionId.ToString("D")),
+                        KeyValuePair.Create(
+                            "vistara-multipart-issuance-id",
+                            issuance.IssuanceId),
+                    ])),
+                cancellationToken);
+            return new(session, Retry: false);
+        }
+        catch (BlobStoreException)
+        {
+            return new(null, Retry: true);
+        }
+        catch (TimeoutException)
+        {
+            return new(null, Retry: true);
+        }
+    }
+
     public async ValueTask<ReconciliationMultipartState> InspectMultipartAsync(
         UploadReconciliationMultipart multipart,
         CancellationToken cancellationToken)
@@ -360,13 +563,51 @@ internal sealed class BlobStoreUploadReconciliationStorageAdapter(
         {
             UploadReconciliationHeadStatus.Found =>
                 ReconciliationMultipartState.Completed,
-            UploadReconciliationHeadStatus.Missing
-                when multipart.Session is not null =>
-                ReconciliationMultipartState.Active,
             UploadReconciliationHeadStatus.Missing =>
-                ReconciliationMultipartState.Unknown,
+                await InspectMissingMultipartAsync(
+                    multipart,
+                    cancellationToken),
             _ => ReconciliationMultipartState.Retry,
         };
+    }
+
+    private async ValueTask<ReconciliationMultipartState> InspectMissingMultipartAsync(
+        UploadReconciliationMultipart multipart,
+        CancellationToken cancellationToken)
+    {
+        if (multipart.Session is null ||
+            _blobStore is not IDurableMultipartBlobStore durable)
+        {
+            return ReconciliationMultipartState.Unknown;
+        }
+
+        try
+        {
+            MultipartInventory inventory = await durable.InspectMultipartAsync(
+                multipart.Session,
+                multipart.CompletionParts,
+                cancellationToken);
+            return inventory.State switch
+            {
+                MultipartInventoryState.Active =>
+                    ReconciliationMultipartState.Active,
+                MultipartInventoryState.Completed =>
+                    ReconciliationMultipartState.Completed,
+                MultipartInventoryState.Aborted =>
+                    ReconciliationMultipartState.Aborted,
+                MultipartInventoryState.Missing =>
+                    ReconciliationMultipartState.Missing,
+                _ => ReconciliationMultipartState.Unknown,
+            };
+        }
+        catch (BlobStoreException)
+        {
+            return ReconciliationMultipartState.Retry;
+        }
+        catch (TimeoutException)
+        {
+            return ReconciliationMultipartState.Retry;
+        }
     }
 
     public async ValueTask<ReconciliationProviderMutationOutcome>
@@ -390,9 +631,10 @@ internal sealed class BlobStoreUploadReconciliationStorageAdapter(
         {
             return exception.Code switch
             {
-                BlobStoreErrorCode.NotFound or
-                BlobStoreErrorCode.InvalidRequest =>
+                BlobStoreErrorCode.NotFound =>
                     ReconciliationProviderMutationOutcome.Missing,
+                BlobStoreErrorCode.InvalidRequest =>
+                    ReconciliationProviderMutationOutcome.Stale,
                 BlobStoreErrorCode.PreconditionFailed =>
                     ReconciliationProviderMutationOutcome.Stale,
                 BlobStoreErrorCode.OutcomeUnknown =>
@@ -424,9 +666,10 @@ internal sealed class BlobStoreUploadReconciliationStorageAdapter(
         {
             return exception.Code switch
             {
-                BlobStoreErrorCode.NotFound or
-                BlobStoreErrorCode.InvalidRequest =>
+                BlobStoreErrorCode.NotFound =>
                     ReconciliationProviderMutationOutcome.Missing,
+                BlobStoreErrorCode.InvalidRequest =>
+                    ReconciliationProviderMutationOutcome.Stale,
                 BlobStoreErrorCode.PreconditionFailed =>
                     ReconciliationProviderMutationOutcome.Stale,
                 BlobStoreErrorCode.OutcomeUnknown =>

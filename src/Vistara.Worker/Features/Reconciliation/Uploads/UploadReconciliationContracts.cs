@@ -6,6 +6,10 @@ namespace Vistara.Worker.Features.Reconciliation.Uploads;
 public enum UploadReconciliationSessionState
 {
     Pending,
+    CommitRequested,
+    Verifying,
+    Promoting,
+    Reconciling,
     Committing,
     Aborting,
     Expired,
@@ -82,7 +86,10 @@ public sealed record UploadReconciliationCandidate
         string continuationCursor,
         BlobMediaType? expectedContentType = null,
         MultipartSession? multipartSession = null,
-        IReadOnlyList<UploadedPart>? completionParts = null)
+        IReadOnlyList<UploadedPart>? completionParts = null,
+        string? multipartIssuanceId = null,
+        TimeSpan? multipartPartPlanLifetime = null,
+        bool canonicalRequiresUploadOwnership = true)
     {
         EnsureUtc(createdAtUtc, nameof(createdAtUtc));
         EnsureUtc(updatedAtUtc, nameof(updatedAtUtc));
@@ -113,6 +120,11 @@ public sealed record UploadReconciliationCandidate
         ExpectedContentType = expectedContentType;
         MultipartSession = multipartSession;
         CompletionParts = completionParts ?? [];
+        MultipartIssuanceId = string.IsNullOrWhiteSpace(multipartIssuanceId)
+            ? null
+            : multipartIssuanceId.Trim();
+        MultipartPartPlanLifetime = multipartPartPlanLifetime;
+        CanonicalRequiresUploadOwnership = canonicalRequiresUploadOwnership;
     }
 
     public UploadReconciliationFence Fence { get; init; }
@@ -146,6 +158,12 @@ public sealed record UploadReconciliationCandidate
     public MultipartSession? MultipartSession { get; init; }
 
     public IReadOnlyList<UploadedPart> CompletionParts { get; init; }
+
+    public string? MultipartIssuanceId { get; init; }
+
+    public TimeSpan? MultipartPartPlanLifetime { get; init; }
+
+    public bool CanonicalRequiresUploadOwnership { get; init; }
 
     public override string ToString() =>
         $"UploadReconciliationCandidate {{ State = {State}, sensitive values redacted }}";
@@ -239,8 +257,10 @@ public sealed record UploadReconciliationRunRequest
 
 public sealed record UploadReconciliationScanRequest(
     string? Cursor,
+    Guid RunId,
     int MaximumSessions,
     DateTimeOffset UtcNow,
+    DateTimeOffset RecoveryCutoffUtc,
     TimeSpan LeaseDuration,
     bool DryRun,
     Guid TenantId = default);
@@ -315,6 +335,11 @@ public enum ReconciliationQuarantineReason
 
 public interface IUploadReconciliationStatePort
 {
+    ValueTask<string?> LoadCheckpointAsync(
+        Guid tenantId,
+        Guid runId,
+        CancellationToken cancellationToken);
+
     ValueTask<UploadReconciliationPage> ScanAsync(
         UploadReconciliationScanRequest request,
         CancellationToken cancellationToken);
@@ -324,12 +349,23 @@ public interface IUploadReconciliationStatePort
         DateTimeOffset utcNow,
         CancellationToken cancellationToken);
 
-    ValueTask<UploadReconciliationMutationResult> ExpireAndReleaseAsync(
+    ValueTask<UploadReconciliationMutationResult> ExpireAsync(
         UploadReconciliationFence fence,
         DateTimeOffset utcNow,
         CancellationToken cancellationToken);
 
-    ValueTask<UploadReconciliationMutationResult> CompleteAbortAndReleaseAsync(
+    ValueTask<UploadReconciliationMutationResult> PrepareAbortAsync(
+        UploadReconciliationFence fence,
+        DateTimeOffset utcNow,
+        CancellationToken cancellationToken);
+
+    ValueTask<UploadReconciliationMutationResult> RecordMultipartIssuedForAbortAsync(
+        UploadReconciliationFence fence,
+        MultipartSession session,
+        DateTimeOffset utcNow,
+        CancellationToken cancellationToken);
+
+    ValueTask<UploadReconciliationMutationResult> CompleteAbortAsync(
         UploadReconciliationFence fence,
         DateTimeOffset utcNow,
         CancellationToken cancellationToken);
@@ -346,6 +382,11 @@ public interface IUploadReconciliationStatePort
         CancellationToken cancellationToken);
 
     ValueTask<UploadReconciliationMutationResult> CompleteCleanupAsync(
+        UploadReconciliationFence fence,
+        DateTimeOffset utcNow,
+        CancellationToken cancellationToken);
+
+    ValueTask<UploadReconciliationMutationResult> ResumeIngestAsync(
         UploadReconciliationFence fence,
         DateTimeOffset utcNow,
         CancellationToken cancellationToken);
@@ -500,10 +541,33 @@ public enum ReconciliationProviderMutationOutcome
     Retry,
 }
 
+public sealed record UploadReconciliationMultipartIssuance(
+    Guid TenantId,
+    Guid UploadSessionId,
+    string IssuanceId,
+    BlobKey StagingKey,
+    long ExpectedSizeBytes,
+    BlobMediaType ContentType,
+    DateTimeOffset ExpiresAtUtc,
+    TimeSpan PartPlanLifetime);
+
+public sealed record UploadReconciliationMultipartRecovery(
+    MultipartSession? Session,
+    bool Retry);
+
 public interface IUploadReconciliationStoragePort
 {
     ValueTask<UploadReconciliationHeadResult> HeadAsync(
         BlobKey key,
+        CancellationToken cancellationToken);
+
+    ValueTask<UploadReconciliationHeadResult> VerifyAsync(
+        BlobKey key,
+        long expectedSizeBytes,
+        CancellationToken cancellationToken);
+
+    ValueTask<UploadReconciliationMultipartRecovery> RecoverMultipartAsync(
+        UploadReconciliationMultipartIssuance issuance,
         CancellationToken cancellationToken);
 
     ValueTask<ReconciliationMultipartState> InspectMultipartAsync(
@@ -534,6 +598,7 @@ public enum ReconciliationActionKind
     DeleteStaging,
     InspectCanonical,
     PreserveCanonical,
+    ResumeIngest,
     Quarantine,
 }
 

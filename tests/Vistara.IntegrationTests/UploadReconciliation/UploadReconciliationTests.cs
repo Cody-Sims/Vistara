@@ -90,9 +90,25 @@ public sealed class UploadReconciliationTests
 
         UploadReconciliationReport report = await scenario.RunAsync();
 
-        Assert.Equal(1, report.Counts.ReservationsReleased);
+        Assert.Equal(0, report.Counts.ReservationsReleased);
         Assert.Equal(0, report.Counts.StagingDeleted);
         Assert.True(scenario.Storage.Contains(scenario.Candidate.StagingKey));
+    }
+
+    [Fact]
+    public async Task Expired_multipart_keeps_abort_required_state_and_quota_until_abort_is_confirmed()
+    {
+        ReconciliationScenario scenario = ReconciliationScenario.ExpiredMultipart();
+        scenario.Storage.AbortOutcome = ReconciliationProviderMutationOutcome.Retry;
+
+        UploadReconciliationReport report = await scenario.RunAsync();
+
+        Assert.Equal(0, report.Counts.ReservationsReleased);
+        Assert.Equal(0, scenario.State.ReservationReleaseCount);
+        Assert.Equal(0, scenario.Storage.DeleteCalls);
+        Assert.Equal(
+            UploadReconciliationSessionState.Aborting,
+            scenario.State.Current(scenario.Candidate.Fence.UploadSessionId).State);
     }
 
     [Fact]
@@ -225,7 +241,7 @@ public sealed class UploadReconciliationTests
 
         UploadReconciliationReport report = await scenario.RunAsync();
 
-        Assert.Equal(1, report.Counts.ReservationsReleased);
+        Assert.Equal(0, report.Counts.ReservationsReleased);
         Assert.Equal(1, report.Counts.Stale);
         Assert.Equal(0, scenario.Storage.DeleteCalls);
         Assert.True(scenario.Storage.Contains(scenario.Candidate.StagingKey));
@@ -360,13 +376,13 @@ public sealed class UploadReconciliationTests
     public async Task Cancellation_saves_last_stable_cursor_and_restart_continues()
     {
         ReconciliationScenario scenario = ReconciliationScenario.ManyExpired(3);
+        scenario.RunId = Guid.CreateVersion7();
         scenario.Checkpoints.CancelAtItem = 2;
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             async () => await scenario.RunAsync());
 
         Assert.Equal("cursor-1", scenario.State.SavedCursor);
-        scenario.Cursor = scenario.State.SavedCursor;
         scenario.Checkpoints.CancelAtItem = null;
         UploadReconciliationReport restarted = await scenario.RunAsync();
 
@@ -416,6 +432,16 @@ public sealed class UploadReconciliationTests
             UploadSessionSnapshot issued = (await application.IssueAsync(
                 reserved.Session!,
                 CancellationToken.None)).Session;
+            storage.ObservedMultipartParts =
+            [
+                new UploadedPart(
+                    1,
+                    new BlobEntityTag("etag-1"),
+                    new BlobChecksum(
+                        BlobChecksumAlgorithm.Sha256,
+                        new string('a', 64)),
+                    20_000_000),
+            ];
             UploadCommitResult ambiguous = await application.CommitAsync(
                 issued,
                 [new CommittedUploadPart(
@@ -494,23 +520,126 @@ public sealed class UploadReconciliationTests
             Assert.Equal(UploadAbortStatus.Unavailable, ambiguous.Status);
         }
 
-        using ServiceProvider worker = database.CreateWorkerProvider(
-            storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(2)),
-            UploadPersistenceDatabase.Now.AddHours(2),
-            addUploadReconciliation: true);
-        await using AsyncServiceScope workerScope = worker.CreateAsyncScope();
-        UploadReconciliationReport report = await workerScope.ServiceProvider
-            .GetRequiredService<UploadReconciliationService>()
-            .RunAsync(
-                new UploadReconciliationRunRequest(
-                    tenantId,
-                    Guid.CreateVersion7(),
-                    cursor: null,
-                    dryRun: false),
-                CancellationToken.None);
+        using (ServiceProvider worker = database.CreateWorkerProvider(
+                   storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(2)),
+                   UploadPersistenceDatabase.Now.AddHours(2),
+                   addUploadReconciliation: true))
+        {
+            await using AsyncServiceScope workerScope = worker.CreateAsyncScope();
+            UploadReconciliationReport report = await workerScope.ServiceProvider
+                .GetRequiredService<UploadReconciliationService>()
+                .RunAsync(
+                    new UploadReconciliationRunRequest(
+                        tenantId,
+                        Guid.CreateVersion7(),
+                        cursor: null,
+                        dryRun: false),
+                    CancellationToken.None);
+            Assert.Equal(1, report.Counts.MultipartAborted);
+            Assert.Equal(0, report.Counts.ReservationsReleased);
+        }
 
-        Assert.Equal(1, report.Counts.MultipartAborted);
-        Assert.Equal(1, report.Counts.ReservationsReleased);
+        using (ServiceProvider cleanup = database.CreateWorkerProvider(
+                   storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(4)),
+                   UploadPersistenceDatabase.Now.AddHours(4),
+                   addUploadReconciliation: true))
+        {
+            await using AsyncServiceScope cleanupScope = cleanup.CreateAsyncScope();
+            UploadReconciliationReport report = await cleanupScope.ServiceProvider
+                .GetRequiredService<UploadReconciliationService>()
+                .RunAsync(
+                    new UploadReconciliationRunRequest(
+                        tenantId,
+                        Guid.CreateVersion7(),
+                        cursor: null,
+                        dryRun: false),
+                    CancellationToken.None);
+            Assert.Equal(1, report.Counts.ReservationsReleased);
+        }
+
+        await using Vistara.Persistence.VistaraDbContext context =
+            database.CreateContext(tenantId);
+        Assert.Equal(
+            "Aborted",
+            await context.UploadSessions.Select(row => row.State).SingleAsync());
+        Assert.Equal(
+            "Released",
+            await context.QuotaReservations.Select(row => row.State).SingleAsync());
+    }
+
+    [Fact]
+    public async Task Production_reconciliation_recovers_and_aborts_crashed_multipart_issuance()
+    {
+        Guid tenantId = Guid.CreateVersion7(UploadPersistenceDatabase.Now);
+        Guid actorId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(1));
+        Guid uploadId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(2));
+        await using UploadPersistenceDatabase database =
+            await UploadPersistenceDatabase.CreateAsync();
+        await database.SeedTenantAsync(tenantId, actorId);
+        TestBlobStore storage = new();
+        using (ServiceProvider api = database.CreateApiProvider(tenantId, storage))
+        {
+            await using AsyncServiceScope scope = api.CreateAsyncScope();
+            IUploadApplicationPort application =
+                scope.ServiceProvider.GetRequiredService<IUploadApplicationPort>();
+            UploadReserveResult reserved = await application.ReserveAsync(
+                MultipartRequest(
+                    tenantId,
+                    actorId,
+                    uploadId,
+                    "issuance-crash"),
+                CancellationToken.None);
+            storage.AfterBeginMultipartAsync = _ =>
+                ValueTask.FromException(
+                    new OperationCanceledException(
+                        "Injected crash after multipart creation."));
+            await Assert.ThrowsAsync<OperationCanceledException>(
+                async () => await application.IssueAsync(
+                    reserved.Session!,
+                    CancellationToken.None));
+        }
+
+        Assert.Equal(1, storage.ActiveMultipartSessions);
+        using (ServiceProvider abortWorker = database.CreateWorkerProvider(
+                   storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(2)),
+                   UploadPersistenceDatabase.Now.AddHours(2),
+                   addUploadReconciliation: true))
+        {
+            await using AsyncServiceScope scope = abortWorker.CreateAsyncScope();
+            UploadReconciliationReport report = await scope.ServiceProvider
+                .GetRequiredService<UploadReconciliationService>()
+                .RunAsync(
+                    new UploadReconciliationRunRequest(
+                        tenantId,
+                        Guid.CreateVersion7(),
+                        cursor: null,
+                        dryRun: false),
+                    CancellationToken.None);
+            Assert.Equal(1, report.Counts.MultipartAborted);
+            Assert.Equal(0, report.Counts.ReservationsReleased);
+        }
+
+        Assert.Equal(0, storage.ActiveMultipartSessions);
+        using (ServiceProvider cleanupWorker = database.CreateWorkerProvider(
+                   storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(4)),
+                   UploadPersistenceDatabase.Now.AddHours(4),
+                   addUploadReconciliation: true))
+        {
+            await using AsyncServiceScope scope = cleanupWorker.CreateAsyncScope();
+            UploadReconciliationReport report = await scope.ServiceProvider
+                .GetRequiredService<UploadReconciliationService>()
+                .RunAsync(
+                    new UploadReconciliationRunRequest(
+                        tenantId,
+                        Guid.CreateVersion7(),
+                        cursor: null,
+                        dryRun: false),
+                    CancellationToken.None);
+            Assert.Equal(1, report.Counts.ReservationsReleased);
+        }
+
         await using Vistara.Persistence.VistaraDbContext context =
             database.CreateContext(tenantId);
         Assert.Equal(
@@ -554,6 +683,16 @@ public sealed class UploadReconciliationTests
                 UploadSessionSnapshot issued = (await application.IssueAsync(
                     reserved.Session!,
                     CancellationToken.None)).Session;
+                storage.ObservedMultipartParts =
+                [
+                    new UploadedPart(
+                        1,
+                        new BlobEntityTag($"etag-{index}"),
+                        new BlobChecksum(
+                            BlobChecksumAlgorithm.Sha256,
+                            new string('a', 64)),
+                        20_000_000),
+                ];
                 UploadCommitResult ambiguous = await application.CommitAsync(
                     issued,
                     [new CommittedUploadPart(
@@ -586,18 +725,19 @@ public sealed class UploadReconciliationTests
                 MaximumSessionsPerRun = 1,
             });
 
+        Guid runId = Guid.CreateVersion7();
         UploadReconciliationReport first = await service.RunAsync(
             new UploadReconciliationRunRequest(
                 tenantId,
-                Guid.CreateVersion7(),
+                runId,
                 cursor: null,
                 dryRun: false),
             CancellationToken.None);
         UploadReconciliationReport second = await service.RunAsync(
             new UploadReconciliationRunRequest(
                 tenantId,
-                Guid.CreateVersion7(),
-                first.ContinuationCursor,
+                runId,
+                cursor: null,
                 dryRun: false),
             CancellationToken.None);
 
@@ -663,6 +803,189 @@ public sealed class UploadReconciliationTests
             await context.UploadSessions.SingleAsync();
         Assert.Equal(1, row.Version);
         Assert.Null(row.ReconciliationLeaseToken);
+    }
+
+    [Fact]
+    public async Task Production_reconciliation_two_replicas_cleanup_once()
+    {
+        Guid tenantId = Guid.CreateVersion7(UploadPersistenceDatabase.Now);
+        Guid actorId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(1));
+        Guid uploadId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(2));
+        await using UploadPersistenceDatabase database =
+            await UploadPersistenceDatabase.CreateAsync();
+        await database.SeedTenantAsync(tenantId, actorId);
+        TestBlobStore storage = new();
+        using (ServiceProvider api = database.CreateApiProvider(tenantId, storage))
+        {
+            await using AsyncServiceScope scope = api.CreateAsyncScope();
+            IUploadApplicationPort application =
+                scope.ServiceProvider.GetRequiredService<IUploadApplicationPort>();
+            UploadReserveResult reserved = await application.ReserveAsync(
+                new ReserveUploadRequest(
+                    tenantId,
+                    actorId,
+                    uploadId,
+                    "direct",
+                    "expired.jpg",
+                    1_000,
+                    "image/jpeg",
+                    new string('a', 64),
+                    $"staging/{tenantId.ToString("N")[..2]}/{tenantId:D}/{uploadId:D}",
+                    new string('b', 64),
+                    new IdempotencyKey("replica-cleanup"),
+                    UploadPersistenceDatabase.Now.AddHours(1)),
+                CancellationToken.None);
+            UploadIssuance issued = await application.IssueAsync(
+                reserved.Session!,
+                CancellationToken.None);
+            storage.StoreUploaded(storage.LastDirectRequest!);
+            Assert.Equal("uploadIssued", issued.Session.State);
+        }
+
+        using (ServiceProvider expiration = database.CreateWorkerProvider(
+                   storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(2)),
+                   UploadPersistenceDatabase.Now.AddHours(2),
+                   addUploadReconciliation: true))
+        {
+            await using AsyncServiceScope scope = expiration.CreateAsyncScope();
+            _ = await scope.ServiceProvider
+                .GetRequiredService<UploadReconciliationService>()
+                .RunAsync(
+                    new UploadReconciliationRunRequest(
+                        tenantId,
+                        Guid.CreateVersion7(),
+                        cursor: null,
+                        dryRun: false),
+                    CancellationToken.None);
+        }
+
+        using ServiceProvider first = database.CreateWorkerProvider(
+            storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(4)),
+            UploadPersistenceDatabase.Now.AddHours(4),
+            addUploadReconciliation: true);
+        using ServiceProvider second = database.CreateWorkerProvider(
+            storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(4)),
+            UploadPersistenceDatabase.Now.AddHours(4),
+            addUploadReconciliation: true);
+        await using AsyncServiceScope firstScope = first.CreateAsyncScope();
+        await using AsyncServiceScope secondScope = second.CreateAsyncScope();
+
+        UploadReconciliationReport[] reports = await Task.WhenAll(
+            firstScope.ServiceProvider
+                .GetRequiredService<UploadReconciliationService>()
+                .RunAsync(
+                    new UploadReconciliationRunRequest(
+                        tenantId,
+                        Guid.CreateVersion7(),
+                        cursor: null,
+                        dryRun: false),
+                    CancellationToken.None)
+                .AsTask(),
+            secondScope.ServiceProvider
+                .GetRequiredService<UploadReconciliationService>()
+                .RunAsync(
+                    new UploadReconciliationRunRequest(
+                        tenantId,
+                        Guid.CreateVersion7(),
+                        cursor: null,
+                        dryRun: false),
+                    CancellationToken.None)
+                .AsTask());
+
+        Assert.Equal(1, reports.Sum(report => report.Counts.ReservationsReleased));
+        Assert.Equal(1, reports.Sum(report => report.Counts.StagingDeleted));
+        await using Vistara.Persistence.VistaraDbContext context =
+            database.CreateContext(tenantId);
+        Assert.Equal(
+            "Released",
+            await context.QuotaReservations.Select(row => row.State).SingleAsync());
+        Assert.NotNull(
+            await context.UploadSessions
+                .Select(row => row.CleanupCompletedAtUtc)
+                .SingleAsync());
+        Assert.False(storage.Contains(new BlobKey(
+            $"staging/{tenantId.ToString("N")[..2]}/{tenantId:D}/{uploadId:D}")));
+    }
+
+    [Fact]
+    public async Task Production_restart_reuses_its_unexpired_leases_before_advancing_cursor()
+    {
+        Guid tenantId = Guid.CreateVersion7(UploadPersistenceDatabase.Now);
+        Guid actorId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(1));
+        Guid uploadId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(2));
+        Guid runId = Guid.CreateVersion7(
+            UploadPersistenceDatabase.Now.AddMilliseconds(3));
+        await using UploadPersistenceDatabase database =
+            await UploadPersistenceDatabase.CreateAsync();
+        await database.SeedTenantAsync(tenantId, actorId);
+        TestBlobStore storage = new();
+        using (ServiceProvider api = database.CreateApiProvider(tenantId, storage))
+        {
+            await using AsyncServiceScope scope = api.CreateAsyncScope();
+            _ = await scope.ServiceProvider
+                .GetRequiredService<IUploadApplicationPort>()
+                .ReserveAsync(
+                    new ReserveUploadRequest(
+                        tenantId,
+                        actorId,
+                        uploadId,
+                        "direct",
+                        "expired.jpg",
+                        1_000,
+                        "image/jpeg",
+                        new string('a', 64),
+                        $"staging/{tenantId.ToString("N")[..2]}/{tenantId:D}/{uploadId:D}",
+                        new string('b', 64),
+                        new IdempotencyKey("lease-restart"),
+                        UploadPersistenceDatabase.Now.AddHours(1)),
+                    CancellationToken.None);
+        }
+
+        using ServiceProvider worker = database.CreateWorkerProvider(
+            storage.CreateReplica(UploadPersistenceDatabase.Now.AddHours(2)),
+            UploadPersistenceDatabase.Now.AddHours(2),
+            addUploadReconciliation: true);
+        var crash = new TestReconciliationCheckpoints
+        {
+            CrashOnceAt = ReconciliationCheckpoint.CandidateRevalidated,
+        };
+        await using (AsyncServiceScope scope = worker.CreateAsyncScope())
+        {
+            var service = new UploadReconciliationService(
+                scope.ServiceProvider
+                    .GetRequiredService<IUploadReconciliationStatePort>(),
+                scope.ServiceProvider
+                    .GetRequiredService<IUploadReconciliationStoragePort>(),
+                scope.ServiceProvider.GetRequiredService<IClock>(),
+                new UploadReconciliationOptions(),
+                checkpoints: crash);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                async () => await service.RunAsync(
+                    new UploadReconciliationRunRequest(
+                        tenantId,
+                        runId,
+                        cursor: null,
+                        dryRun: false),
+                    CancellationToken.None));
+        }
+
+        await using AsyncServiceScope restarted = worker.CreateAsyncScope();
+        UploadReconciliationReport report = await restarted.ServiceProvider
+            .GetRequiredService<UploadReconciliationService>()
+            .RunAsync(
+                new UploadReconciliationRunRequest(
+                    tenantId,
+                    runId,
+                    cursor: null,
+                    dryRun: false),
+                CancellationToken.None);
+
+        Assert.Equal(1, report.Counts.Scanned);
+        Assert.Equal(1, report.Counts.SessionsExpired);
     }
 
     [Fact]
@@ -816,6 +1139,8 @@ internal sealed class ReconciliationScenario
 
     internal string? Cursor { get; set; }
 
+    internal Guid? RunId { get; set; }
+
     internal static ReconciliationScenario Expired(bool aged)
     {
         UploadReconciliationCandidate candidate = CreateCandidate(
@@ -831,6 +1156,20 @@ internal sealed class ReconciliationScenario
     {
         UploadReconciliationCandidate candidate = CreateCandidate(
             UploadReconciliationSessionState.Aborting,
+            aged: true,
+            providerUploadId: "provider-upload");
+        var storage = new TestReconciliationStorage
+        {
+            MultipartState = ReconciliationMultipartState.Active,
+        };
+        storage.AddStaging(candidate, aged: true);
+        return new ReconciliationScenario([candidate], storage);
+    }
+
+    internal static ReconciliationScenario ExpiredMultipart()
+    {
+        UploadReconciliationCandidate candidate = CreateCandidate(
+            UploadReconciliationSessionState.Pending,
             aged: true,
             providerUploadId: "provider-upload");
         var storage = new TestReconciliationStorage
@@ -891,7 +1230,10 @@ internal sealed class ReconciliationScenario
             Observer,
             Checkpoints);
         return await service.RunAsync(
-            new UploadReconciliationRunRequest(Guid.CreateVersion7(), Cursor, dryRun),
+            new UploadReconciliationRunRequest(
+                RunId ?? Guid.CreateVersion7(),
+                Cursor,
+                dryRun),
             CancellationToken.None);
     }
 
@@ -931,7 +1273,7 @@ internal sealed class ReconciliationScenario
             expectedSizeBytes: 17,
             new Sha256Checksum(new string('a', 64)),
             providerUploadId,
-            reservationReleased: state == UploadReconciliationSessionState.Expired,
+            reservationReleased: false,
             $"cursor-{suffix + 1}");
     }
 

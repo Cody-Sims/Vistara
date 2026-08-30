@@ -109,6 +109,18 @@ internal sealed class WorkerIngestPersistenceAdapter(
             .FirstOrDefault(checksum =>
                 checksum.Algorithm == BlobChecksumAlgorithm.Sha256)
             ?.Value ?? canonical?.Properties.EntityTag.Value;
+        if (activation.Plan.Mode == IngestPromotionMode.ExistingExactBlob)
+        {
+            await _store.RefreshDedupedBlobAsync(
+                activation.Fence.TenantId,
+                activation.Fence.UploadSessionId,
+                activation.Fence.Version,
+                operationId,
+                canonical!.Identity,
+                providerChecksum,
+                cancellationToken);
+        }
+
         var media = new MediaDescriptor(
             activation.Verified.Media.DetectedFormat,
             new MediaContentType(activation.Verified.Media.ContentType.Value),
@@ -178,7 +190,6 @@ internal sealed class WorkerIngestPersistenceAdapter(
             _idGenerator.NewId(),
             rejection.Code.ToString(),
             rejection.RejectedAtUtc,
-            rejection.ReleaseReservation,
             cancellationToken);
     }
 
@@ -280,11 +291,8 @@ internal sealed class WorkerIngestPersistenceAdapter(
                 activation.Plan.CanonicalKey.Value,
                 context.CanonicalKey,
                 StringComparison.Ordinal) ||
-            (activation.Plan.Mode == IngestPromotionMode.PromoteCreateOnly &&
-             (activation.CanonicalHead is null ||
-              activation.CanonicalHead.Identity.Key != activation.Plan.CanonicalKey)) ||
-            (activation.Plan.Mode == IngestPromotionMode.ExistingExactBlob &&
-             activation.CanonicalHead is not null))
+            activation.CanonicalHead is null ||
+            activation.CanonicalHead.Identity.Key != activation.Plan.CanonicalKey)
         {
             throw new InvalidOperationException(
                 "The ingest activation does not match its durable plan.");

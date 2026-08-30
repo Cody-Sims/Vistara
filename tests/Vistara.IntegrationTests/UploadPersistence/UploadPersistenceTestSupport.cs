@@ -238,7 +238,7 @@ internal sealed class NoopImageProcessor : IImageProcessor
         throw new NotSupportedException();
 }
 
-internal sealed class TestBlobStore : IBlobStore
+internal sealed class TestBlobStore : IBlobStore, IDurableMultipartBlobStore
 {
     private readonly Backend _backend;
     private readonly DateTimeOffset _now;
@@ -291,6 +291,8 @@ internal sealed class TestBlobStore : IBlobStore
 
     internal Func<CancellationToken, ValueTask>? BeforeDirectPlanAsync { get; set; }
 
+    internal Func<CancellationToken, ValueTask>? AfterBeginMultipartAsync { get; set; }
+
     internal bool RejectCreateBeforeRead { get; init; }
 
     internal Func<CancellationToken, ValueTask>? BeforeCompleteMultipartAsync
@@ -309,7 +311,15 @@ internal sealed class TestBlobStore : IBlobStore
 
     internal bool AbortOutcomeUnknown { get; init; }
 
+    internal IReadOnlyList<UploadedPart>? ObservedMultipartParts { get; set; }
+
     internal bool Contains(BlobKey key) => _backend.Objects.ContainsKey(key);
+
+    internal void Remove(BlobKey key) => _backend.Objects.TryRemove(key, out _);
+
+    internal int MultipartSessionsCreated => _backend.MultipartSessionsCreated;
+
+    internal int ActiveMultipartSessions => _backend.MultipartByIssuance.Count;
 
     internal TestBlobStore CreateReplica(DateTimeOffset now) =>
         new(_backend, now, Capabilities.SupportsDirectUpload, Capabilities.SupportsMultipartUpload);
@@ -523,26 +533,89 @@ internal sealed class TestBlobStore : IBlobStore
             request.Checksum);
     }
 
-    public ValueTask<MultipartSession> BeginMultipartAsync(
+    public async ValueTask<MultipartSession> BeginMultipartAsync(
         MultipartRequest request,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        string uploadId = $"multipart-{Guid.NewGuid():N}";
-        return ValueTask.FromResult(new MultipartSession(
-            uploadId,
-            request.Key,
-            _now.Add(request.SessionLifetime),
-            request.ContentLength,
-            request.Conditions,
-            Capabilities.Limits.MaxMultipartParts,
-            Capabilities.Limits.MinMultipartPartBytes,
-            Capabilities.Limits.MaxMultipartPartBytes,
-            request.PartPlanLifetime,
-            request.ContentType,
-            request.Checksum,
-            request.Metadata,
-            $"test:v1:{uploadId}"));
+        request.Metadata.TryGetValue(
+            "vistara-multipart-issuance-id",
+            out string? issuanceId);
+        MultipartSession session;
+        if (issuanceId is null)
+        {
+            session = CreateMultipartSession(request, Guid.NewGuid().ToString("N"));
+            Interlocked.Increment(ref _backend.MultipartSessionsCreated);
+        }
+        else
+        {
+            session = _backend.MultipartByIssuance.GetOrAdd(
+                issuanceId,
+                _ =>
+                {
+                    Interlocked.Increment(ref _backend.MultipartSessionsCreated);
+                    return CreateMultipartSession(request, issuanceId);
+                });
+        }
+
+        if (AfterBeginMultipartAsync is not null)
+        {
+            await AfterBeginMultipartAsync(cancellationToken);
+        }
+
+        return session;
+    }
+
+    public async ValueTask<MultipartSession> GetOrCreateMultipartAsync(
+        string issuanceId,
+        MultipartRequest request,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentException.ThrowIfNullOrWhiteSpace(issuanceId);
+        MultipartSession session = _backend.MultipartByIssuance.GetOrAdd(
+            issuanceId,
+            _ =>
+            {
+                Interlocked.Increment(ref _backend.MultipartSessionsCreated);
+                return CreateMultipartSession(request, issuanceId);
+            });
+        if (AfterBeginMultipartAsync is not null)
+        {
+            await AfterBeginMultipartAsync(cancellationToken);
+        }
+
+        return session;
+    }
+
+    public ValueTask<MultipartInventory> InspectMultipartAsync(
+        MultipartSession session,
+        IReadOnlyList<UploadedPart> claimedParts,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_backend.Objects.TryGetValue(session.Key, out StoredBlob? completed))
+        {
+            return ValueTask.FromResult(new MultipartInventory(
+                MultipartInventoryState.Completed,
+                ObservedMultipartParts ?? [],
+                completed.Head));
+        }
+
+        if (_backend.AbortedMultipartIds.ContainsKey(session.UploadId))
+        {
+            return ValueTask.FromResult(new MultipartInventory(
+                MultipartInventoryState.Aborted,
+                []));
+        }
+
+        bool active = _backend.MultipartByIssuance.Values.Any(
+            candidate => candidate.UploadId == session.UploadId);
+        return ValueTask.FromResult(new MultipartInventory(
+            active
+                ? MultipartInventoryState.Active
+                : MultipartInventoryState.Missing,
+            active ? ObservedMultipartParts ?? [] : []));
     }
 
     public ValueTask<MultipartPartPlan> CreatePartPlanAsync(
@@ -600,6 +673,7 @@ internal sealed class TestBlobStore : IBlobStore
             session.Metadata,
             session.Checksum);
         _backend.Objects[session.Key] = new StoredBlob(head, []);
+        RemoveMultipartSession(session.UploadId);
         if (CompleteOutcomeUnknownAfterStore)
         {
             throw new BlobStoreException(
@@ -636,6 +710,9 @@ internal sealed class TestBlobStore : IBlobStore
                 BlobStoreErrorCode.OutcomeUnknown,
                 "The multipart abort response was lost.");
         }
+
+        RemoveMultipartSession(session.UploadId);
+        _backend.AbortedMultipartIds.TryAdd(session.UploadId, 0);
     }
 
     public ValueTask<SignedAccessPlan> CreateReadGrantAsync(
@@ -646,6 +723,40 @@ internal sealed class TestBlobStore : IBlobStore
 
     private BlobVersion NextVersion() =>
         new($"provider-v{Interlocked.Increment(ref _backend.Version)}");
+
+    private MultipartSession CreateMultipartSession(
+        MultipartRequest request,
+        string issuanceId)
+    {
+        string uploadId = $"multipart-{issuanceId}";
+        return new MultipartSession(
+            uploadId,
+            request.Key,
+            _now.Add(request.SessionLifetime),
+            request.ContentLength,
+            request.Conditions,
+            Capabilities.Limits.MaxMultipartParts,
+            Capabilities.Limits.MinMultipartPartBytes,
+            Capabilities.Limits.MaxMultipartPartBytes,
+            request.PartPlanLifetime,
+            request.ContentType,
+            request.Checksum,
+            request.Metadata,
+            $"test:v1:{uploadId}");
+    }
+
+    private void RemoveMultipartSession(string uploadId)
+    {
+        foreach (KeyValuePair<string, MultipartSession> pair in
+                 _backend.MultipartByIssuance)
+        {
+            if (pair.Value.UploadId == uploadId)
+            {
+                _backend.MultipartByIssuance.TryRemove(pair.Key, out _);
+                return;
+            }
+        }
+    }
 
     private static DateTimeOffset Min(
         DateTimeOffset left,
@@ -675,6 +786,16 @@ internal sealed class TestBlobStore : IBlobStore
     private sealed class Backend
     {
         internal ConcurrentDictionary<BlobKey, StoredBlob> Objects { get; } = new();
+
+        internal ConcurrentDictionary<string, MultipartSession> MultipartByIssuance
+        {
+            get;
+        } = new(StringComparer.Ordinal);
+
+        internal ConcurrentDictionary<string, byte> AbortedMultipartIds { get; } =
+            new(StringComparer.Ordinal);
+
+        internal int MultipartSessionsCreated;
 
         internal long Version;
     }

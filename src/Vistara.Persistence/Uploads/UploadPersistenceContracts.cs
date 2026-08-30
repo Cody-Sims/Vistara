@@ -86,7 +86,7 @@ public sealed record PersistedUploadPartPlanResult(
 public sealed record PersistedCommittedUploadPart(
     int PartNumber,
     string EntityTag,
-    string Checksum,
+    string? Checksum,
     long SizeBytes);
 
 public enum PersistedUploadCommitStatus

@@ -126,6 +126,20 @@ public sealed class IngestWorkerTests
     {
         IngestScenario scenario = IngestScenario.Valid();
         scenario.State.UseExactDuplicate = true;
+        FakeBlobObject staging = scenario.Storage.Get(scenario.Work.StagingKey);
+        scenario.Storage.Add(
+            scenario.State.CanonicalKey,
+            staging.Bytes,
+            new BlobVersion("canonical-v1"),
+            staging.ContentType,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["vistara-tenant-id"] = scenario.Work.Fence.TenantId.ToString("D"),
+                ["vistara-upload-id"] = Guid.CreateVersion7().ToString("D"),
+                ["vistara-sha256"] = scenario.Work.ExpectedSha256.Value,
+                ["vistara-media-type"] = scenario.Work.DeclaredContentType.Value,
+            },
+            scenario.Work.ExpectedSha256);
 
         JobHandlerResult result = await scenario.RunAsync();
 
@@ -134,6 +148,54 @@ public sealed class IngestWorkerTests
         Assert.Equal(IngestPromotionMode.ExistingExactBlob, scenario.State.Activation?.Plan.Mode);
         Assert.Equal(0, scenario.Storage.CopyCalls);
         Assert.False(scenario.Storage.Contains(scenario.Work.StagingKey));
+    }
+
+    [Fact]
+    public async Task IngestWorker_missing_exact_duplicate_is_repaired_create_only_from_staging()
+    {
+        IngestScenario scenario = IngestScenario.Valid();
+        scenario.State.UseExactDuplicate = true;
+
+        JobHandlerResult result = await scenario.RunAsync();
+
+        Assert.True(result.IsSuccess);
+        Assert.True(scenario.State.IsActivated);
+        Assert.True(scenario.State.ReservationConsumed);
+        Assert.False(scenario.Storage.Contains(scenario.Work.StagingKey));
+        Assert.True(scenario.Storage.Contains(scenario.State.CanonicalKey));
+        Assert.Equal(1, scenario.Storage.CopyCalls);
+        Assert.Equal(
+            BlobRequestConditions.CreateOnly,
+            scenario.Storage.LastCopyOptions!.EffectiveDestinationConditions);
+    }
+
+    [Fact]
+    public async Task IngestWorker_exact_duplicate_hash_mismatch_never_activates()
+    {
+        IngestScenario scenario = IngestScenario.Valid();
+        scenario.State.UseExactDuplicate = true;
+        scenario.Storage.Add(
+            scenario.State.CanonicalKey,
+            "corrupt-canonical"u8.ToArray(),
+            new BlobVersion("canonical-v1"),
+            new BlobMediaType("image/png"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["vistara-tenant-id"] = scenario.Work.Fence.TenantId.ToString("D"),
+                ["vistara-upload-id"] = Guid.CreateVersion7().ToString("D"),
+                ["vistara-sha256"] = scenario.Work.ExpectedSha256.Value,
+                ["vistara-media-type"] = scenario.Work.DeclaredContentType.Value,
+            },
+            scenario.Work.ExpectedSha256);
+
+        JobHandlerResult result = await scenario.RunAsync();
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(
+            IngestRejectionCode.CanonicalConflict,
+            scenario.State.Rejection?.Code);
+        Assert.False(scenario.State.IsActivated);
+        Assert.True(scenario.Storage.Contains(scenario.Work.StagingKey));
     }
 
     [Fact]
@@ -161,7 +223,7 @@ public sealed class IngestWorkerTests
         Assert.True(result.IsSuccess);
         Assert.Equal(IngestRejectionCode.CanonicalConflict, scenario.State.Rejection?.Code);
         Assert.True(scenario.State.IsRejected);
-        Assert.True(scenario.State.ReservationReleased);
+        Assert.False(scenario.State.ReservationReleased);
         Assert.False(scenario.State.IsActivated);
         Assert.False(scenario.State.ReservationConsumed);
         Assert.False(scenario.State.DerivativesEnqueued);
@@ -449,7 +511,7 @@ public sealed class IngestWorkerTests
         internal void AssertRejectedWithoutLeaks()
         {
             Assert.True(State.IsRejected);
-            Assert.True(State.ReservationReleased);
+            Assert.False(State.ReservationReleased);
             Assert.False(State.IsActivated);
             Assert.False(State.ReservationConsumed);
             Assert.False(State.DerivativesEnqueued);

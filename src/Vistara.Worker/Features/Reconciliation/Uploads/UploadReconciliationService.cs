@@ -36,18 +36,26 @@ public sealed class UploadReconciliationService
         ArgumentNullException.ThrowIfNull(request);
         DateTimeOffset utcNow = _clock.UtcNow;
         var run = new RunState(request.DryRun, _options, _observer);
+        string? startingCursor = request.DryRun
+            ? request.Cursor
+            : await _state.LoadCheckpointAsync(
+                request.TenantId,
+                request.RunId,
+                cancellationToken) ?? request.Cursor;
         UploadReconciliationPage page = await _state.ScanAsync(
             new UploadReconciliationScanRequest(
-                request.Cursor,
+                startingCursor,
+                request.RunId,
                 _options.MaximumSessionsPerRun,
                 utcNow,
+                utcNow - _options.MinimumObjectAge,
                 _options.LeaseDuration,
                 request.DryRun,
                 request.TenantId),
             cancellationToken);
         run.Scanned = page.Candidates.Count;
 
-        string? stableCursor = request.Cursor;
+        string? stableCursor = startingCursor;
         try
         {
             foreach (UploadReconciliationCandidate candidate in page.Candidates)
@@ -113,12 +121,6 @@ public sealed class UploadReconciliationService
             ReconciliationCheckpoint.CandidateRevalidated,
             cancellationToken);
 
-        if (current.State is UploadReconciliationSessionState.Accepted
-            or UploadReconciliationSessionState.Quarantined)
-        {
-            return ProcessResult.Completed;
-        }
-
         bool abandoned = IsAged(current.UpdatedAtUtc, utcNow);
         switch (current.State)
         {
@@ -127,6 +129,8 @@ public sealed class UploadReconciliationService
                 return await ExpireAsync(current, utcNow, run, cancellationToken);
             case UploadReconciliationSessionState.Expired:
             case UploadReconciliationSessionState.Aborted:
+            case UploadReconciliationSessionState.Accepted:
+            case UploadReconciliationSessionState.Quarantined:
                 return await CleanupStagingAsync(
                     current,
                     utcNow,
@@ -150,9 +154,157 @@ public sealed class UploadReconciliationService
                     utcNow,
                     run,
                     cancellationToken);
+            case UploadReconciliationSessionState.CommitRequested
+                when abandoned:
+            case UploadReconciliationSessionState.Verifying
+                when abandoned:
+            case UploadReconciliationSessionState.Promoting
+                when abandoned:
+            case UploadReconciliationSessionState.Reconciling
+                when abandoned:
+                return await RecoverIngestAsync(
+                    current,
+                    utcNow,
+                    run,
+                    cancellationToken);
             default:
                 return ProcessResult.Completed;
         }
+    }
+
+    private async ValueTask<ProcessResult> RecoverIngestAsync(
+        UploadReconciliationCandidate candidate,
+        DateTimeOffset utcNow,
+        RunState run,
+        CancellationToken cancellationToken)
+    {
+        if (candidate.CanonicalKey is not null)
+        {
+            if (!run.TryUseStorageOperation())
+            {
+                return ProcessResult.StorageBudgetExhausted;
+            }
+
+            UploadReconciliationHeadResult canonical;
+            try
+            {
+                canonical = await _storage.VerifyAsync(
+                    candidate.CanonicalKey,
+                    candidate.ExpectedSizeBytes,
+                    cancellationToken);
+            }
+            catch (Exception exception) when (IsTransientProviderFailure(exception))
+            {
+                run.Deferred(ReconciliationActionKind.InspectCanonical);
+                return ProcessResult.Completed;
+            }
+
+            run.Applied(ReconciliationActionKind.InspectCanonical);
+            await CheckpointAsync(
+                ReconciliationCheckpoint.ObjectInspected,
+                cancellationToken);
+            if (canonical.Status == UploadReconciliationHeadStatus.Retry)
+            {
+                run.Deferred(ReconciliationActionKind.InspectCanonical);
+                return ProcessResult.Completed;
+            }
+
+            if (canonical.Status == UploadReconciliationHeadStatus.Found)
+            {
+                UploadReconciliationObjectHead head = canonical.Head
+                    ?? throw new InvalidOperationException(
+                        "Found canonical verification lacks data.");
+                if (!CanonicalMatches(candidate, head))
+                {
+                    return await QuarantineAsync(
+                        candidate,
+                        ReconciliationQuarantineReason.CanonicalMismatch,
+                        utcNow,
+                        run,
+                        cancellationToken);
+                }
+
+                return await PreserveCanonicalAsync(
+                    candidate,
+                    head.Identity,
+                    utcNow,
+                    run,
+                    cancellationToken);
+            }
+        }
+
+        if (!run.TryUseStorageOperation())
+        {
+            return ProcessResult.StorageBudgetExhausted;
+        }
+
+        UploadReconciliationHeadResult staging;
+        try
+        {
+            staging = await _storage.HeadAsync(
+                candidate.StagingKey,
+                cancellationToken);
+        }
+        catch (Exception exception) when (IsTransientProviderFailure(exception))
+        {
+            run.Deferred(ReconciliationActionKind.InspectStaging);
+            return ProcessResult.Completed;
+        }
+
+        run.Applied(ReconciliationActionKind.InspectStaging);
+        await CheckpointAsync(
+            ReconciliationCheckpoint.ObjectInspected,
+            cancellationToken);
+        if (staging.Status == UploadReconciliationHeadStatus.Retry)
+        {
+            run.Deferred(ReconciliationActionKind.InspectStaging);
+            return ProcessResult.Completed;
+        }
+
+        if (staging.Status == UploadReconciliationHeadStatus.Missing)
+        {
+            return await QuarantineAsync(
+                candidate,
+                ReconciliationQuarantineReason.OwnershipMismatch,
+                utcNow,
+                run,
+                cancellationToken);
+        }
+
+        UploadReconciliationObjectHead stagingHead = staging.Head
+            ?? throw new InvalidOperationException("Found staging HEAD lacks data.");
+        if (!CompletedStagingMatches(candidate, stagingHead))
+        {
+            return await QuarantineAsync(
+                candidate,
+                ReconciliationQuarantineReason.OwnershipMismatch,
+                utcNow,
+                run,
+                cancellationToken);
+        }
+
+        if (run.DryRun)
+        {
+            run.Planned(ReconciliationActionKind.ResumeIngest);
+            return ProcessResult.Completed;
+        }
+
+        UploadReconciliationMutationResult resumed =
+            await _state.ResumeIngestAsync(
+                candidate.Fence,
+                utcNow,
+                cancellationToken);
+        if (resumed.Status == UploadReconciliationMutationStatus.Stale)
+        {
+            run.Stale(ReconciliationActionKind.ResumeIngest);
+            return ProcessResult.Completed;
+        }
+
+        run.Applied(ReconciliationActionKind.ResumeIngest);
+        await CheckpointAsync(
+            ReconciliationCheckpoint.SessionTransitioned,
+            cancellationToken);
+        return ProcessResult.Completed;
     }
 
     private async ValueTask<ProcessResult> ExpireAsync(
@@ -162,24 +314,108 @@ public sealed class UploadReconciliationService
         CancellationToken cancellationToken)
     {
         UploadReconciliationCandidate current = candidate;
-        if (!candidate.ReservationReleased ||
-            candidate.State != UploadReconciliationSessionState.Expired)
+        if (candidate.ProviderUploadId is null &&
+            candidate.MultipartIssuanceId is not null &&
+            candidate.ExpectedContentType is not null &&
+            candidate.MultipartPartPlanLifetime is not null)
+        {
+            if (run.DryRun)
+            {
+                run.Planned(ReconciliationActionKind.InspectMultipart);
+                run.Planned(ReconciliationActionKind.AbortMultipart);
+                return ProcessResult.Completed;
+            }
+
+            if (!run.TryUseStorageOperation())
+            {
+                return ProcessResult.StorageBudgetExhausted;
+            }
+
+            UploadReconciliationMultipartRecovery recovered =
+                await _storage.RecoverMultipartAsync(
+                    new UploadReconciliationMultipartIssuance(
+                        candidate.Fence.TenantId,
+                        candidate.Fence.UploadSessionId,
+                        candidate.MultipartIssuanceId,
+                        candidate.StagingKey,
+                        candidate.ExpectedSizeBytes,
+                        candidate.ExpectedContentType,
+                        candidate.ExpiresAtUtc,
+                        candidate.MultipartPartPlanLifetime.Value),
+                    cancellationToken);
+            if (recovered.Retry || recovered.Session is null)
+            {
+                run.Deferred(ReconciliationActionKind.InspectMultipart);
+                return ProcessResult.Completed;
+            }
+
+            UploadReconciliationMutationResult recorded =
+                await _state.RecordMultipartIssuedForAbortAsync(
+                    candidate.Fence,
+                    recovered.Session,
+                    utcNow,
+                    cancellationToken);
+            if (recorded.Status == UploadReconciliationMutationStatus.Stale ||
+                recorded.Current is null)
+            {
+                run.Stale(ReconciliationActionKind.AbortMultipart);
+                return ProcessResult.Completed;
+            }
+
+            current = recorded.Current;
+            await CheckpointAsync(
+                ReconciliationCheckpoint.SessionTransitioned,
+                cancellationToken);
+        }
+
+        if (TryCreateMultipart(current, out UploadReconciliationMultipart multipart))
         {
             if (run.DryRun)
             {
                 run.Planned(ReconciliationActionKind.ExpireSession);
-                if (!candidate.ReservationReleased)
-                {
-                    run.ReservationsReleased++;
-                    run.Planned(ReconciliationActionKind.ReleaseReservation);
-                }
-
                 run.SessionsExpired++;
             }
             else
             {
                 UploadReconciliationMutationResult mutation =
-                    await _state.ExpireAndReleaseAsync(
+                    await _state.PrepareAbortAsync(
+                        current.Fence,
+                        utcNow,
+                        cancellationToken);
+                if (mutation.Status == UploadReconciliationMutationStatus.Stale ||
+                    mutation.Current is null)
+                {
+                    run.Stale(ReconciliationActionKind.ExpireSession);
+                    return ProcessResult.Completed;
+                }
+
+                current = mutation.Current;
+                run.Applied(ReconciliationActionKind.ExpireSession);
+                run.SessionsExpired++;
+                await CheckpointAsync(
+                    ReconciliationCheckpoint.SessionTransitioned,
+                    cancellationToken);
+            }
+
+            return await AbortExpiredMultipartAsync(
+                current,
+                multipart,
+                utcNow,
+                run,
+                cancellationToken);
+        }
+
+        if (candidate.State != UploadReconciliationSessionState.Expired)
+        {
+            if (run.DryRun)
+            {
+                run.Planned(ReconciliationActionKind.ExpireSession);
+                run.SessionsExpired++;
+            }
+            else
+            {
+                UploadReconciliationMutationResult mutation =
+                    await _state.ExpireAsync(
                         candidate.Fence,
                         utcNow,
                         cancellationToken);
@@ -193,29 +429,9 @@ public sealed class UploadReconciliationService
                 current = mutation.Current;
                 run.Applied(ReconciliationActionKind.ExpireSession);
                 run.SessionsExpired++;
-                if (mutation.ReservationReleased)
-                {
-                    run.ReservationsReleased++;
-                    run.Applied(ReconciliationActionKind.ReleaseReservation);
-                }
-
                 await CheckpointAsync(
                     ReconciliationCheckpoint.SessionTransitioned,
                     cancellationToken);
-            }
-        }
-
-        if (TryCreateMultipart(current, out UploadReconciliationMultipart multipart))
-        {
-            ProcessResult aborted = await AbortExpiredMultipartAsync(
-                current,
-                multipart,
-                utcNow,
-                run,
-                cancellationToken);
-            if (aborted != ProcessResult.Completed)
-            {
-                return aborted;
             }
         }
 
@@ -237,7 +453,11 @@ public sealed class UploadReconciliationService
         {
             run.MultipartAborted++;
             run.Planned(ReconciliationActionKind.AbortMultipart);
-            return ProcessResult.Completed;
+            return await CompleteAbortAsync(
+                candidate,
+                utcNow,
+                run,
+                cancellationToken);
         }
 
         UploadReconciliationCandidate? current = await _state.RevalidateAsync(
@@ -278,7 +498,11 @@ public sealed class UploadReconciliationService
                 await CheckpointAsync(
                     ReconciliationCheckpoint.MultipartAborted,
                     cancellationToken);
-                return ProcessResult.Completed;
+                return await CompleteAbortAsync(
+                    current,
+                    utcNow,
+                    run,
+                    cancellationToken);
             case ReconciliationProviderMutationOutcome.OutcomeUnknown:
                 _ = await _state.RecordAbortOutcomeUnknownAsync(
                     current.Fence,
@@ -304,10 +528,64 @@ public sealed class UploadReconciliationService
         RunState run,
         CancellationToken cancellationToken)
     {
-        if (!TryCreateMultipart(candidate, out UploadReconciliationMultipart multipart))
+        UploadReconciliationCandidate abortCandidate = candidate;
+        bool recoveredIssuance = false;
+        if (!TryCreateMultipart(
+                abortCandidate,
+                out UploadReconciliationMultipart multipart) &&
+            abortCandidate.MultipartIssuanceId is not null &&
+            abortCandidate.ExpectedContentType is not null &&
+            abortCandidate.MultipartPartPlanLifetime is not null)
+        {
+            if (!run.TryUseStorageOperation())
+            {
+                return ProcessResult.StorageBudgetExhausted;
+            }
+
+            UploadReconciliationMultipartRecovery recovered =
+                await _storage.RecoverMultipartAsync(
+                    new UploadReconciliationMultipartIssuance(
+                        abortCandidate.Fence.TenantId,
+                        abortCandidate.Fence.UploadSessionId,
+                        abortCandidate.MultipartIssuanceId,
+                        abortCandidate.StagingKey,
+                        abortCandidate.ExpectedSizeBytes,
+                        abortCandidate.ExpectedContentType,
+                        abortCandidate.ExpiresAtUtc,
+                        abortCandidate.MultipartPartPlanLifetime.Value),
+                    cancellationToken);
+            if (recovered.Retry || recovered.Session is null)
+            {
+                run.Deferred(ReconciliationActionKind.InspectMultipart);
+                return ProcessResult.Completed;
+            }
+
+            UploadReconciliationMutationResult recorded =
+                await _state.RecordMultipartIssuedForAbortAsync(
+                    abortCandidate.Fence,
+                    recovered.Session,
+                    utcNow,
+                    cancellationToken);
+            if (recorded.Status == UploadReconciliationMutationStatus.Stale ||
+                recorded.Current is null)
+            {
+                run.Stale(ReconciliationActionKind.AbortMultipart);
+                return ProcessResult.Completed;
+            }
+
+            abortCandidate = recorded.Current;
+            recoveredIssuance = true;
+            if (!TryCreateMultipart(abortCandidate, out multipart))
+            {
+                run.Stale(ReconciliationActionKind.AbortMultipart);
+                return ProcessResult.Completed;
+            }
+        }
+
+        if (multipart is null)
         {
             return await QuarantineAsync(
-                candidate,
+                abortCandidate,
                 ReconciliationQuarantineReason.OwnershipMismatch,
                 utcNow,
                 run,
@@ -341,7 +619,7 @@ public sealed class UploadReconciliationService
         {
             case ReconciliationMultipartState.Completed:
                 return await ReconcileCommitAsync(
-                    candidate,
+                    abortCandidate,
                     utcNow,
                     run,
                     cancellationToken,
@@ -349,14 +627,14 @@ public sealed class UploadReconciliationService
             case ReconciliationMultipartState.Aborted:
             case ReconciliationMultipartState.Missing:
                 return await CompleteAbortAsync(
-                    candidate,
+                    abortCandidate,
                     utcNow,
                     run,
                     cancellationToken);
-            case ReconciliationMultipartState.Unknown:
             case ReconciliationMultipartState.Retry:
                 run.Deferred(ReconciliationActionKind.InspectMultipart);
                 return ProcessResult.Completed;
+            case ReconciliationMultipartState.Unknown:
             case ReconciliationMultipartState.Active:
                 break;
             default:
@@ -368,18 +646,18 @@ public sealed class UploadReconciliationService
             run.MultipartAborted++;
             run.Planned(ReconciliationActionKind.AbortMultipart);
             return await CompleteAbortAsync(
-                candidate,
+                abortCandidate,
                 utcNow,
                 run,
                 cancellationToken);
         }
 
         UploadReconciliationCandidate? current = await _state.RevalidateAsync(
-            candidate.Fence,
+            abortCandidate.Fence,
             utcNow,
             cancellationToken);
         if (current is null ||
-            !IsAged(current.UpdatedAtUtc, utcNow) ||
+            (!recoveredIssuance && !IsAged(current.UpdatedAtUtc, utcNow)) ||
             !TryCreateMultipart(current, out multipart))
         {
             run.Stale(ReconciliationActionKind.AbortMultipart);
@@ -453,18 +731,10 @@ public sealed class UploadReconciliationService
         CancellationToken cancellationToken)
     {
         UploadReconciliationCandidate current = candidate;
-        if (run.DryRun)
-        {
-            if (!candidate.ReservationReleased)
-            {
-                run.ReservationsReleased++;
-                run.Planned(ReconciliationActionKind.ReleaseReservation);
-            }
-        }
-        else
+        if (!run.DryRun)
         {
             UploadReconciliationMutationResult mutation =
-                await _state.CompleteAbortAndReleaseAsync(
+                await _state.CompleteAbortAsync(
                     candidate.Fence,
                     utcNow,
                     cancellationToken);
@@ -476,12 +746,6 @@ public sealed class UploadReconciliationService
             }
 
             current = mutation.Current;
-            if (mutation.ReservationReleased)
-            {
-                run.ReservationsReleased++;
-                run.Applied(ReconciliationActionKind.ReleaseReservation);
-            }
-
             await CheckpointAsync(
                 ReconciliationCheckpoint.SessionTransitioned,
                 cancellationToken);
@@ -526,8 +790,9 @@ public sealed class UploadReconciliationService
             UploadReconciliationHeadResult canonical;
             try
             {
-                canonical = await _storage.HeadAsync(
+                canonical = await _storage.VerifyAsync(
                     candidate.CanonicalKey,
+                    candidate.ExpectedSizeBytes,
                     cancellationToken);
             }
             catch (Exception exception) when (IsTransientProviderFailure(exception))
@@ -823,11 +1088,7 @@ public sealed class UploadReconciliationService
                 cancellationToken);
         }
 
-        return await CleanupStagingAsync(
-            current,
-            utcNow,
-            run,
-            cancellationToken);
+        return ProcessResult.Completed;
     }
 
     private async ValueTask<ProcessResult> CleanupStagingAsync(
@@ -903,7 +1164,11 @@ public sealed class UploadReconciliationService
 
         if (result.Status == UploadReconciliationHeadStatus.Missing)
         {
-            if (!run.DryRun)
+            if (run.DryRun)
+            {
+                PlanReservationRelease(current, run);
+            }
+            else
             {
                 await CompleteCleanupStateAsync(
                     current,
@@ -936,6 +1201,7 @@ public sealed class UploadReconciliationService
         {
             run.Planned(ReconciliationActionKind.DeleteStaging);
             run.StagingDeleted++;
+            PlanReservationRelease(current, run);
             return ProcessResult.Completed;
         }
 
@@ -1008,6 +1274,23 @@ public sealed class UploadReconciliationService
         if (mutation.Status == UploadReconciliationMutationStatus.Stale)
         {
             run.Stale(ReconciliationActionKind.DeleteStaging);
+        }
+        else if (mutation.ReservationReleased)
+        {
+            run.ReservationsReleased++;
+            run.Applied(ReconciliationActionKind.ReleaseReservation);
+        }
+    }
+
+    private static void PlanReservationRelease(
+        UploadReconciliationCandidate candidate,
+        RunState run)
+    {
+        if (!candidate.ReservationReleased &&
+            candidate.State != UploadReconciliationSessionState.Accepted)
+        {
+            run.ReservationsReleased++;
+            run.Planned(ReconciliationActionKind.ReleaseReservation);
         }
     }
 
@@ -1113,9 +1396,12 @@ public sealed class UploadReconciliationService
         candidate.CanonicalKey is not null &&
         head.Identity.Key == candidate.CanonicalKey &&
         head.OwnerTenantId == candidate.Fence.TenantId &&
-        head.OwnerUploadSessionId == candidate.Fence.UploadSessionId &&
+        (!candidate.CanonicalRequiresUploadOwnership ||
+         head.OwnerUploadSessionId == candidate.Fence.UploadSessionId) &&
         head.ContentLength == candidate.ExpectedSizeBytes &&
-        head.Sha256 == candidate.ExpectedSha256;
+        head.Sha256 == candidate.ExpectedSha256 &&
+        (candidate.ExpectedContentType is null ||
+         head.ContentType == candidate.ExpectedContentType);
 
     private static bool IsTransientProviderFailure(Exception exception) =>
         exception is TimeoutException or BlobStoreException;
