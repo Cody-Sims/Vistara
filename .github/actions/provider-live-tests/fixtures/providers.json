@@ -1,0 +1,169 @@
+[
+  {
+    "provider": "aws",
+    "bucket": "vistara-dry-run",
+    "region": "us-east-1",
+    "endpoint": "",
+    "azureAccount": "",
+    "azureContainer": "",
+    "prefix": "vistara-live/dry-run/aws/0123456789abcdef",
+    "capabilities": {
+      "Name": "aws-s3",
+      "Capabilities": {
+        "SupportsDirectUpload": true,
+        "SupportsMultipartUpload": true,
+        "SupportsRangeReads": true,
+        "SupportsConditionalRead": true,
+        "SupportsConditionalCreate": true,
+        "SupportsConditionalReplace": true,
+        "SupportsConditionalCopy": false,
+        "SupportsConditionalDelete": true,
+        "SupportsConditionalMultipartCompletion": true,
+        "SupportsServerSideCopy": true,
+        "SupportsObjectVersioning": false,
+        "SupportsSignedRead": true,
+        "ReadAfterWriteConsistency": "Strong",
+        "ListAfterWriteConsistency": "Strong",
+        "NativeChecksumAlgorithms": [
+          "Sha256"
+        ],
+        "Limits": {
+          "MaxObjectBytes": 53687091200000,
+          "MaxKeyBytes": 1024,
+          "MaxMultipartParts": 10000,
+          "MinMultipartPartBytes": 5242880,
+          "MaxMultipartPartBytes": 5368709120
+        }
+      },
+      "MaxSinglePutBytes": 5368709120,
+      "RequiresUniformMultipartParts": false,
+      "SupportsConditionalCopySource": true,
+      "MultipartFullObjectChecksumAlgorithms": []
+    }
+  },
+  {
+    "provider": "azure",
+    "bucket": "",
+    "region": "",
+    "endpoint": "",
+    "azureAccount": "vistaradryrun",
+    "azureContainer": "vistara-dry-run",
+    "prefix": "vistara-live/dry-run/azure/0123456789abcdef",
+    "capabilities": {
+      "Name": "azure",
+      "Capabilities": {
+        "SupportsDirectUpload": true,
+        "SupportsMultipartUpload": true,
+        "SupportsRangeReads": true,
+        "SupportsConditionalRead": true,
+        "SupportsConditionalCreate": true,
+        "SupportsConditionalReplace": true,
+        "SupportsConditionalCopy": true,
+        "SupportsConditionalDelete": true,
+        "SupportsConditionalMultipartCompletion": true,
+        "SupportsServerSideCopy": true,
+        "SupportsObjectVersioning": false,
+        "SupportsSignedRead": true,
+        "ReadAfterWriteConsistency": "Strong",
+        "ListAfterWriteConsistency": "Strong",
+        "NativeChecksumAlgorithms": [
+          "Md5",
+          "Sha256"
+        ],
+        "Limits": {
+          "MaxObjectBytes": 209715200000,
+          "MaxKeyBytes": 1024,
+          "MaxMultipartParts": 50000,
+          "MinMultipartPartBytes": 1,
+          "MaxMultipartPartBytes": 4000000000
+        }
+      }
+    }
+  },
+  {
+    "provider": "r2",
+    "bucket": "vistara-dry-run",
+    "region": "auto",
+    "endpoint": "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
+    "azureAccount": "",
+    "azureContainer": "",
+    "prefix": "vistara-live/dry-run/r2/0123456789abcdef",
+    "capabilities": {
+      "Name": "cloudflare-r2",
+      "Capabilities": {
+        "SupportsDirectUpload": true,
+        "SupportsMultipartUpload": true,
+        "SupportsRangeReads": true,
+        "SupportsConditionalRead": true,
+        "SupportsConditionalCreate": true,
+        "SupportsConditionalReplace": true,
+        "SupportsConditionalCopy": false,
+        "SupportsConditionalDelete": false,
+        "SupportsConditionalMultipartCompletion": false,
+        "SupportsServerSideCopy": true,
+        "SupportsObjectVersioning": false,
+        "SupportsSignedRead": true,
+        "ReadAfterWriteConsistency": "Strong",
+        "ListAfterWriteConsistency": "Strong",
+        "NativeChecksumAlgorithms": [
+          "Crc64Nvme"
+        ],
+        "Limits": {
+          "MaxObjectBytes": 5497558138880,
+          "MaxKeyBytes": 1024,
+          "MaxMultipartParts": 10000,
+          "MinMultipartPartBytes": 5242880,
+          "MaxMultipartPartBytes": 5368709120
+        }
+      },
+      "MaxSinglePutBytes": 5368709120,
+      "RequiresUniformMultipartParts": true,
+      "SupportsConditionalCopySource": true,
+      "MultipartFullObjectChecksumAlgorithms": [
+        "Crc64Nvme"
+      ]
+    }
+  },
+  {
+    "provider": "b2",
+    "bucket": "vistara-dry-run",
+    "region": "us-west-004",
+    "endpoint": "https://s3.us-west-004.backblazeb2.com",
+    "azureAccount": "",
+    "azureContainer": "",
+    "prefix": "vistara-live/dry-run/b2/0123456789abcdef",
+    "capabilities": {
+      "Name": "backblaze-b2",
+      "Capabilities": {
+        "SupportsDirectUpload": true,
+        "SupportsMultipartUpload": true,
+        "SupportsRangeReads": true,
+        "SupportsConditionalRead": true,
+        "SupportsConditionalCreate": false,
+        "SupportsConditionalReplace": false,
+        "SupportsConditionalCopy": false,
+        "SupportsConditionalDelete": false,
+        "SupportsConditionalMultipartCompletion": false,
+        "SupportsServerSideCopy": true,
+        "SupportsObjectVersioning": false,
+        "SupportsSignedRead": true,
+        "ReadAfterWriteConsistency": "Strong",
+        "ListAfterWriteConsistency": "Eventual",
+        "NativeChecksumAlgorithms": [
+          "Md5"
+        ],
+        "Limits": {
+          "MaxObjectBytes": 10000000000000,
+          "MaxKeyBytes": 1024,
+          "MaxMultipartParts": 10000,
+          "MinMultipartPartBytes": 5242880,
+          "MaxMultipartPartBytes": 5368709120
+        }
+      },
+      "MaxSinglePutBytes": 5368709120,
+      "RequiresUniformMultipartParts": false,
+      "SupportsConditionalCopySource": false,
+      "MultipartFullObjectChecksumAlgorithms": []
+    }
+  }
+]

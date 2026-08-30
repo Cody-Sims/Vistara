@@ -8,6 +8,7 @@ export default defineConfig(({ mode }) => {
     base: isPagesBuild ? '/Vistara/' : '/',
     plugins: [react()],
     build: {
+      outDir: isPagesBuild ? 'dist-pages' : 'dist',
       sourcemap: !isPagesBuild,
     },
     test: {

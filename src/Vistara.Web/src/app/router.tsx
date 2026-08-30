@@ -1,52 +1,27 @@
 import type { RouteObject } from 'react-router-dom';
-import {
-  createBrowserRouter,
-  createMemoryRouter,
-  redirect,
-} from 'react-router-dom';
-import { ApplicationFrame } from './ApplicationFrame';
-import {
-  InitialLoadingPage,
-  LibraryPage,
-  NotFoundPage,
-  RouteErrorBoundary,
-} from './ShellPages';
+import { createBrowserRouter, createMemoryRouter } from 'react-router-dom';
+import { galleryRoutes } from './routes/galleryRoutes';
 
 export interface AppRouterOptions {
   initialEntries?: string[];
   additionalRoutes?: RouteObject[];
+  staticPreview?: boolean;
 }
 
 export function createAppRouter({
   initialEntries,
   additionalRoutes = [],
+  staticPreview: staticPreviewOverride,
 }: AppRouterOptions = {}) {
   const basename = import.meta.env.BASE_URL;
-  const staticPreview = import.meta.env.MODE === 'pages';
-  const routes: RouteObject[] = [
-    {
-      path: '/',
-      element: <ApplicationFrame staticPreview={staticPreview} />,
-      errorElement: <RouteErrorBoundary />,
-      hydrateFallbackElement: <InitialLoadingPage />,
-      children: [
-        {
-          index: true,
-          loader: () => redirect('/library'),
-          element: <InitialLoadingPage />,
-        },
-        {
-          path: 'library',
-          element: <LibraryPage />,
-        },
-        ...additionalRoutes,
-        {
-          path: '*',
-          element: <NotFoundPage />,
-        },
-      ],
-    },
-  ];
+  const staticPreview =
+    staticPreviewOverride ??
+    (import.meta.env.MODE === 'pages' || import.meta.env.MODE === 'test');
+  const routes = galleryRoutes(
+    staticPreview,
+    additionalRoutes,
+    initialEntries === undefined,
+  );
 
   if (initialEntries) {
     return createMemoryRouter(routes, { basename, initialEntries });

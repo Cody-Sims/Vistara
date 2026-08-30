@@ -3,6 +3,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="NetVips" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../Vistara.Application/Vistara.Application.csproj" />
   </ItemGroup>
 </Project>

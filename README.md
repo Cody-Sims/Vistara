@@ -22,7 +22,7 @@ node eng/validate-agent-workflows.mjs
 node --test eng/tests/*.test.mjs
 ```
 
-`npm --prefix src/Vistara.Web run build:pages` creates a GitHub Pages artifact under `src/Vistara.Web/dist`. That artifact is a static preview only; it has no API, authentication, uploads, persistence, or worker processing.
+`npm --prefix src/Vistara.Web run build:pages` creates a GitHub Pages artifact under `src/Vistara.Web/dist-pages`, separately from the production bundle in `src/Vistara.Web/dist`. The Pages artifact is a static preview only; it has no API, authentication, uploads, persistence, or worker processing.
 
 ## Layout
 
@@ -32,5 +32,6 @@ node --test eng/tests/*.test.mjs
 - `.shadow/`: evidence-linked architecture decisions.
 - `.github/workflows/`: CI, security, Pages preview, and release-image automation.
 - `docs/specification.md`: approved product specification and ordered implementation roadmap.
+- [Future ideas](docs/future-ideas/README.md): uncommitted post-MVP research directions and constraints.
 
 Licensed under the [Apache License 2.0](LICENSE).

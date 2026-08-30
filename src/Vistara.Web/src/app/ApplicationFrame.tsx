@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
-import { Link, NavLink, Outlet, useNavigation } from 'react-router-dom';
+import { Link, Outlet, useNavigation } from 'react-router-dom';
+import { PrimaryNavigation } from './navigation/PrimaryNavigation';
 import styles from './ApplicationFrame.module.css';
 
 interface ApplicationFrameProps {
@@ -27,16 +28,7 @@ export function ApplicationFrame({
           <span>Vistara</span>
         </Link>
 
-        <nav aria-label="Primary navigation">
-          <NavLink
-            className={({ isActive }) =>
-              isActive ? `${styles.navLink} ${styles.activeNavLink}` : styles.navLink
-            }
-            to="/library"
-          >
-            Library
-          </NavLink>
-        </nav>
+        <PrimaryNavigation />
       </header>
 
       {staticPreview ? (

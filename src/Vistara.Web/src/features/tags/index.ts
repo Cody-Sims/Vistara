@@ -1,0 +1,1 @@
+export { TagsView } from './TagsView';
