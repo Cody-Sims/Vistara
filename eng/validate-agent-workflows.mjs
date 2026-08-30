@@ -398,6 +398,19 @@ function boundedArtifactPath(value) {
     && !isCatchAllGlob(path));
 }
 
+function hasHiddenArtifactPath(value) {
+  if (typeof value !== 'string') return false;
+  return value
+    .split(/\r?\n/)
+    .map((path) => path.trim())
+    .filter(Boolean)
+    .some((path) => path
+      .split('/')
+      .some((segment) => segment.length > 1
+        && segment.startsWith('.')
+        && segment !== '..'));
+}
+
 function collectActionUses(workflow, document, path) {
   const uses = [];
   for (const [jobName, job] of Object.entries(workflow.jobs)) {
@@ -451,6 +464,10 @@ function validateActionUse(use, path) {
     }
     if (!['error', 'ignore', 'warn'].includes(use.step.with?.['if-no-files-found'])) {
       fail(`${path}: artifact uploads require if-no-files-found.`);
+    }
+    if (hasHiddenArtifactPath(use.step.with?.path)
+        && use.step.with?.['include-hidden-files'] !== true) {
+      fail(`${path}: artifact uploads of hidden paths require include-hidden-files.`);
     }
   }
   if (action.name === 'actions/upload-pages-artifact') {

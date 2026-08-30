@@ -67,5 +67,6 @@ jobs:
           path: |
             tests/Vistara.E2E/playwright-report/**
             tests/Vistara.E2E/.artifacts/*.log
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7

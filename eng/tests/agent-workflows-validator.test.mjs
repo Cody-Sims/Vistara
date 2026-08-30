@@ -430,3 +430,69 @@ updates:
     );
   });
 });
+
+test('requires hidden artifact paths to include hidden files', () => {
+  withFixture((root) => {
+    const path = resolve(root, '.github/workflows/ci.yml');
+    writeFileSync(path, hiddenArtifactWorkflow(false));
+    assert.throws(
+      () => validateAgentWorkflows(root),
+      /hidden paths require include-hidden-files/,
+    );
+  });
+});
+
+test('accepts hidden artifact paths that opt into hidden files', () => {
+  withFixture((root) => {
+    const path = resolve(root, '.github/workflows/ci.yml');
+    writeFileSync(path, hiddenArtifactWorkflow(true));
+    assert.doesNotThrow(() => validateAgentWorkflows(root));
+  });
+});
+
+test('leaves visible artifact paths unaffected', () => {
+  withFixture((root) => {
+    const path = resolve(root, '.github/workflows/ci.yml');
+    writeFileSync(
+      path,
+      hiddenArtifactWorkflow(false).replace(
+        'tests/Vistara.E2E/.artifacts/*.log',
+        'tests/Vistara.E2E/reports/*.log',
+      ),
+    );
+    assert.doesNotThrow(() => validateAgentWorkflows(root));
+  });
+});
+
+function hiddenArtifactWorkflow(includeHiddenFiles) {
+  return `name: CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-\${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: echo test
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: diagnostics
+          path: |
+            tests/Vistara.E2E/playwright-report/**
+            tests/Vistara.E2E/.artifacts/*.log
+${includeHiddenFiles ? '          include-hidden-files: true\n' : ''}          if-no-files-found: ignore
+          retention-days: 7
+`;
+}
