@@ -33,6 +33,17 @@ internal sealed class VistaraSecurityMiddleware(
                 SecurityRequestLimits.Validate(context, _options.Limits);
             if (limitFailure is not null)
             {
+                // Kestrel cannot drain a body beyond its configured limit,
+                // so HTTP/1 clients must not reuse this connection.
+                if (limitFailure.Status ==
+                        StatusCodes.Status413PayloadTooLarge &&
+                    context.Request.Protocol.StartsWith(
+                        "HTTP/1.",
+                        StringComparison.Ordinal))
+                {
+                    context.Response.Headers.Connection = "close";
+                }
+
                 await SecurityProblemWriter.WriteAsync(
                     context,
                     limitFailure.Status,

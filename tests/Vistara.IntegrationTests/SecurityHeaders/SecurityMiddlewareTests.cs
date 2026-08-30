@@ -741,6 +741,7 @@ public sealed class SecurityMiddlewareTests
         Assert.Equal(
             HttpStatusCode.RequestEntityTooLarge,
             oversizedResponse.StatusCode);
+        Assert.True(oversizedResponse.Headers.ConnectionClose);
         using (JsonDocument document = JsonDocument.Parse(oversizedBody))
         {
             Assert.Equal(
