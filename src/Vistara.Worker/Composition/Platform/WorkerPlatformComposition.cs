@@ -4,12 +4,15 @@ using Microsoft.Extensions.Options;
 using Vistara.Application.Common;
 using Vistara.Application.Common.Imaging;
 using Vistara.Application.Derivatives;
+using Vistara.Application.Lifecycle;
 using Vistara.Domain.Jobs;
 using Vistara.Persistence;
 using Vistara.Persistence.Derivatives.Worker;
 using Vistara.Persistence.Jobs;
+using Vistara.Persistence.Lifecycle;
 using Vistara.Persistence.Outbox;
 using Vistara.Worker.Features.Derivatives;
+using Vistara.Worker.Features.Lifecycle;
 using Vistara.Worker.Features.Reconciliation.Uploads;
 using Vistara.Worker.Runtime.Jobs;
 
@@ -224,6 +227,21 @@ public static class WorkerPlatformServiceCollectionExtensions
         services.TryAddScoped<DerivativeJobHandler>();
         services.TryAddEnumerable(
             ServiceDescriptor.Scoped<IJobHandler, DerivativeJobHandler>());
+        services.TryAddScoped<RelationalLifecycleWorkerStore>();
+        services.TryAddScoped<ILifecycleWorkerStore>(static provider =>
+            provider.GetRequiredService<RelationalLifecycleWorkerStore>());
+        services.TryAddScoped<LifecyclePurgeService>();
+        services.TryAddScoped<LifecycleRestoreService>();
+        services.TryAddScoped<LifecyclePurgeJobHandler>();
+        services.TryAddScoped<LifecycleRestoreJobHandler>();
+        services.TryAddEnumerable(
+            ServiceDescriptor.Scoped<
+                IJobHandler,
+                LifecyclePurgeJobHandler>());
+        services.TryAddEnumerable(
+            ServiceDescriptor.Scoped<
+                IJobHandler,
+                LifecycleRestoreJobHandler>());
         services.TryAddSingleton<JobWorkerRuntime>();
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IHostedService, JobWorkerHostedService>());
