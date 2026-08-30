@@ -717,7 +717,9 @@ internal sealed class DerivativeStateDatabase : IAsyncDisposable
 
     internal async ValueTask<int> CountJobsAsync()
     {
-        await using var context = new JobDbContext(_jobOptions);
+        await using var context = new JobDbContext(
+            _jobOptions,
+            new FixedTenantScope(TenantId));
         return await context.Jobs.CountAsync();
     }
 

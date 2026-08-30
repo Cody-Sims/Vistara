@@ -13,6 +13,7 @@ using Vistara.Api.Features.Derivatives;
 using Vistara.Api.Features.Events;
 using Vistara.Api.Features.Media;
 using Vistara.Application.Common.Imaging;
+using Vistara.Application.Derivatives;
 using Vistara.Application.Identity;
 using Vistara.Auth.ApiKeys;
 using Vistara.Auth.Cookies;
@@ -321,42 +322,33 @@ public sealed class ApiRuntimeCompositionTests
         services.AddVistaraApiPersistence(configuration);
         await using ServiceProvider provider = services.BuildServiceProvider();
         await using AsyncServiceScope scope = provider.CreateAsyncScope();
+        var source = new DerivativeSourceIdentity(
+            tenantId,
+            assetId,
+            revisionId,
+            revisionNumber: 1,
+            new ImageSha256(sourceHash));
+        DerivativeGenerationRequest generation =
+            DerivativePresetRegistry.Standard
+                .ResolveDefault(
+                    source,
+                    "viewer",
+                    new ImagePipelineFingerprint("runtime-composition-test"))
+                .GenerationRequest ??
+            throw new InvalidOperationException(
+                "The standard viewer derivative could not be resolved.");
         PersistedDerivativeSubmissionResult submission = await scope
             .ServiceProvider
             .GetRequiredService<RelationalDerivativeRequestStore>()
             .SubmitAsync(
                 new PersistedDerivativeSubmission(
-                    RequestId: requestId,
-                    TenantId: tenantId,
-                    AssetId: assetId,
-                    RevisionId: revisionId,
-                    JobId: Guid.CreateVersion7(),
-                    JobPayload: "{}",
-                    JobDedupeKey: $"public-media-{requestId:N}",
-                    IdempotencyKey: $"public-media-{requestId:N}",
-                    RequestHash: new string('c', 64),
-                    PresetName: "viewer",
-                    PresetRevision: 1,
-                    Width: 1,
-                    Height: 1,
-                    Fit: "contain",
-                    Format: "webp",
-                    Quality: 80,
-                    FocalPointX: null,
-                    FocalPointY: null,
-                    CropX: null,
-                    CropY: null,
-                    CropWidth: null,
-                    CropHeight: null,
-                    PipelineId: "v1",
-                    PipelineFingerprint: "runtime-composition-test",
-                    SourceSha256: sourceHash,
-                    RecipeSha256: recipeHash,
-                    GenerationIdentity: new string('d', 64),
-                    CacheKey: $"derivatives/{requestId:N}.webp",
-                    Extension: "webp",
-                    IsPublic: true,
-                    CreatedAtUtc: now),
+                    requestId,
+                    requestId,
+                    $"public-media-{requestId:N}",
+                    new string('c', 64),
+                    DerivativeJobContract.CreatePayload(generation),
+                    isPublic: true,
+                    now),
                 CancellationToken.None);
         Assert.Equal(
             PersistedDerivativeSubmissionStatus.Created,
