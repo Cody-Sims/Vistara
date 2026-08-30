@@ -13,8 +13,11 @@ using Vistara.Persistence.Lifecycle;
 using Vistara.Persistence.Outbox;
 using Vistara.Worker.Features.Derivatives;
 using Vistara.Worker.Features.Lifecycle;
+using Vistara.Worker.Features.Reconciliation.Lifecycle;
+using Vistara.Worker.Features.Reconciliation.Storage;
 using Vistara.Worker.Features.Reconciliation.Uploads;
 using Vistara.Worker.Runtime.Jobs;
+using Vistara.Worker.Runtime.Reconciliation;
 
 namespace Vistara.Worker.Composition.Platform;
 
@@ -206,6 +209,13 @@ public static class WorkerPlatformServiceCollectionExtensions
             ServiceDescriptor.Singleton<
                 IHostedService,
                 UploadReconciliationSchedulerHostedService>());
+        services.AddVistaraBlobIntegrityReconciliation();
+        services.AddVistaraPurgeRecoveryReconciliation();
+        services.AddVistaraReconciliationSchedule(
+            ReconciliationSchedules.BlobIntegrity);
+        services.AddVistaraReconciliationSchedule(
+            ReconciliationSchedules.PurgeRecovery);
+        services.AddVistaraReconciliationScheduler();
         services.TryAddSingleton(DerivativePresetRegistry.Standard);
         services.TryAddScoped<
             IDerivativeStatePort,
