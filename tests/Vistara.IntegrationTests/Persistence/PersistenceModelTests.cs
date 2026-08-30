@@ -55,6 +55,7 @@ public sealed class PersistenceModelTests
                 "idempotency_requests",
                 "ingest_operations",
                 "jobs",
+                "local_credentials",
                 "local_identities",
                 "outbox_messages",
                 "outbox_sequences",
