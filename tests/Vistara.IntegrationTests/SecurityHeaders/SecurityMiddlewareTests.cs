@@ -84,6 +84,26 @@ public sealed class SecurityMiddlewareTests
     }
 
     [Fact]
+    public async Task Production_http_redirect_can_be_disabled_for_an_http_only_proxy()
+    {
+        await using SecurityTestHost host = SecurityTestHost.Create(
+            Environments.Production,
+            new Dictionary<string, string?>
+            {
+                ["Security:Transport:RedirectHttpToHttps"] = "false",
+            });
+
+        TestResponse response = await host.SendAsync(
+            "GET",
+            "/api/v1/probe",
+            isHttps: false);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.False(response.Headers.ContainsKey("Location"));
+        Assert.False(response.Headers.ContainsKey("Strict-Transport-Security"));
+    }
+
+    [Fact]
     public async Task Cors_allows_only_the_exact_configured_origin_and_contract()
     {
         await using SecurityTestHost host = SecurityTestHost.Create(

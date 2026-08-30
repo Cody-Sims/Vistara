@@ -72,6 +72,7 @@ public sealed class SecurityProxyOptions
 
 public sealed class SecurityTransportOptions
 {
+    public bool RedirectHttpToHttps { get; set; } = true;
     public int HttpsPort { get; set; } = 443;
     public TimeSpan HstsMaxAge { get; set; } = TimeSpan.FromDays(365);
     public bool HstsIncludeSubDomains { get; set; } = true;
@@ -167,7 +168,15 @@ public static class SecurityApplicationBuilderExtensions
             .GetRequiredService<IHostEnvironment>();
         if (!environment.IsDevelopment())
         {
-            app.UseHttpsRedirection();
+            SecurityTransportOptions transport = app.ApplicationServices
+                .GetRequiredService<IOptions<VistaraSecurityOptions>>()
+                .Value
+                .Transport;
+            if (transport.RedirectHttpToHttps)
+            {
+                app.UseHttpsRedirection();
+            }
+
             app.UseHsts();
         }
 
