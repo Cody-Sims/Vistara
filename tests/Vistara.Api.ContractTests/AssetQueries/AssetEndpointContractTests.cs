@@ -34,10 +34,15 @@ public sealed class AssetEndpointContractTests
             .SelectMany(source => source.Endpoints)
             .OfType<RouteEndpoint>()
             .ToArray();
-        Assert.Equal(6, endpoints.Length);
+        Assert.Equal(7, endpoints.Length);
         AssertRoute(endpoints, "GET", "/api/v1/assets", "listAssets");
         AssertRoute(endpoints, "GET", "/api/v1/assets/{id:guid}", "getAsset");
         AssertRoute(endpoints, "PATCH", "/api/v1/assets/{id:guid}", "updateAsset");
+        AssertRoute(
+            endpoints,
+            "POST",
+            "/api/v1/assets/bulk",
+            "bulkMutateAssets");
         AssertRoute(
             endpoints,
             "GET",

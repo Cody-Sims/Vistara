@@ -6,6 +6,7 @@ namespace Vistara.Api.Features.Lifecycle;
 public enum LifecycleApiOperation
 {
     ListTrash,
+    Trash,
     Restore,
     PurgeDryRun,
     PurgeConfirm,

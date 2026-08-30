@@ -45,6 +45,10 @@ public static class AssetEndpointMapping
                         ResolveApplication(context),
                         cancellationToken)),
             "updateAsset");
+        Map(endpoints.MapPost(
+                "/api/v1/assets/bulk",
+                AssetBulkMutationEndpoint.ExecuteAsync),
+            "bulkMutateAssets");
         Map(endpoints.MapGet(
                 "/api/v1/assets/{id:guid}/metadata",
                 (Guid id, HttpContext context, CancellationToken cancellationToken) =>

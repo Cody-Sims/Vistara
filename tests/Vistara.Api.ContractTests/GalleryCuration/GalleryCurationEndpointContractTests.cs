@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Vistara.Api.Features.Albums;
+using Vistara.Api.Features.Assets;
 using Vistara.Api.Features.Favorites;
 using Vistara.Api.Features.Tags;
 using Vistara.Application.Common;
@@ -257,6 +258,7 @@ public sealed class AlbumsTagsFavoritesEndpointContractTests
         await using WebApplication app = builder.Build();
         app.MapVistaraAlbums();
         app.MapVistaraTags();
+        app.MapVistaraAssetQueries();
         app.MapVistaraFavorites();
 
         RouteEndpoint endpoint = Assert.Single(

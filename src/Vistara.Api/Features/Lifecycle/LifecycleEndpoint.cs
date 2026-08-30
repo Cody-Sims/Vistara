@@ -19,6 +19,73 @@ public static class LifecycleEndpoint
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
 
+    internal static async Task TrashAssetsAsync(
+        HttpContext context,
+        AssetBulkMutationRequest request,
+        string idempotencyKey,
+        ILifecycleAuthorizationPort authorization,
+        LifecycleService service,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(idempotencyKey);
+
+        LifecycleActorContext? actor = await AuthorizeAsync(
+            context,
+            authorization,
+            LifecycleApiOperation.Trash,
+            cancellationToken);
+        if (actor is null)
+        {
+            return;
+        }
+
+        LifecycleAssetTarget[] targets;
+        try
+        {
+            targets = request.Items.Select(ToTarget).ToArray();
+        }
+        catch (ArgumentException)
+        {
+            await WriteProblemAsync(
+                context,
+                StatusCodes.Status400BadRequest,
+                "request_invalid",
+                "The request body is invalid",
+                cancellationToken);
+            return;
+        }
+
+        Result<IReadOnlyList<LifecycleAssetMutationResult>> result =
+            await service.TrashAsync(
+                actor,
+                targets,
+                request.Action.Reason!,
+                cancellationToken);
+        if (!result.TryGetValue(
+                out IReadOnlyList<LifecycleAssetMutationResult>? items))
+        {
+            await WriteResultErrorAsync(context, result.Error!, cancellationToken);
+            return;
+        }
+
+        bool replayed = items.Count > 0 &&
+            items.All(item => item.Status == "alreadyTrashed");
+        if (replayed)
+        {
+            context.Response.Headers["Idempotency-Replayed"] = "true";
+        }
+
+        AssetMutationResultResponse[] response = items
+            .Select(ToContract)
+            .ToArray();
+        await WriteJsonAsync(
+            context,
+            StatusCodes.Status202Accepted,
+            response,
+            cancellationToken);
+    }
+
     public static async Task ListTrashAsync(
         HttpContext context,
         ILifecycleAuthorizationPort authorization,
@@ -419,6 +486,22 @@ public static class LifecycleEndpoint
 
     private static LifecycleAssetTarget ToTarget(VersionedAssetReference item) =>
         new(item.Id, item.Version.Value);
+
+    private static AssetMutationResultResponse ToContract(
+        LifecycleAssetMutationResult item)
+    {
+        bool concealed = item.Status is "notFound" or "forbidden";
+        bool failed = item.ErrorCode is not null;
+        return new(
+            item.AssetId,
+            concealed
+                ? "notFound"
+                : item.Status == "alreadyTrashed"
+                    ? "trashed"
+                    : item.Status,
+            failed ? null : new ResourceVersion(item.Version),
+            concealed ? "lifecycle.not_found" : item.ErrorCode);
+    }
 
     private static TrashAssetResponse ToContract(
         LifecycleTrashItemSnapshot item) =>
