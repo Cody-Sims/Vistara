@@ -3,6 +3,8 @@ using Vistara.Application.Common;
 using Vistara.Application.Jobs;
 using Vistara.Domain.Common;
 using Vistara.Domain.Jobs;
+using Vistara.Persistence;
+using Vistara.Persistence.Jobs;
 
 namespace Vistara.Worker.Runtime.Jobs;
 
@@ -120,21 +122,54 @@ public sealed class JobWorkerRuntime
         int? capacity = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        await using AsyncServiceScope scope = _scopeFactory.CreateAsyncScope();
-        IJobQueue queue = scope.ServiceProvider.GetRequiredService<IJobQueue>();
         int maximum = Math.Min(
             capacity ?? _options.MaximumConcurrency,
             Math.Min(_options.MaximumConcurrency, _options.ClaimBatchSize));
-        Result<IReadOnlyList<JobLeaseAssignment>> result = await queue.LeaseAsync(
-            new JobLeaseRequest(
-                _owner,
-                _clock.UtcNow,
-                _options.LeaseDuration,
-                maximum),
-            cancellationToken);
-        if (!result.TryGetValue(out IReadOnlyList<JobLeaseAssignment>? assignments))
+        IReadOnlyList<Guid> tenantIds;
+        await using (AsyncServiceScope scope =
+                     _scopeFactory.CreateAsyncScope())
         {
-            return [];
+            IWorkerTenantCatalog catalog = scope.ServiceProvider
+                .GetRequiredService<IWorkerTenantCatalog>();
+            tenantIds = await catalog.ListTenantIdsAsync(cancellationToken);
+        }
+
+        var assignments = new List<JobLeaseAssignment>(maximum);
+        foreach (Guid tenantId in tenantIds)
+        {
+            await using AsyncServiceScope scope =
+                _scopeFactory.CreateAsyncScope();
+            scope.ServiceProvider
+                .GetRequiredService<IMutableTenantScope>()
+                .Establish(tenantId);
+            IJobQueue queue =
+                scope.ServiceProvider.GetRequiredService<IJobQueue>();
+            Result<IReadOnlyList<JobLeaseAssignment>> result =
+                await queue.LeaseAsync(
+                    new JobLeaseRequest(
+                        _owner,
+                        _clock.UtcNow,
+                        _options.LeaseDuration,
+                        maximum - assignments.Count),
+                    cancellationToken);
+            if (!result.TryGetValue(
+                    out IReadOnlyList<JobLeaseAssignment>? tenantAssignments))
+            {
+                continue;
+            }
+
+            if (tenantAssignments.Any(
+                    assignment => assignment.Job.TenantId.Value != tenantId))
+            {
+                throw new InvalidOperationException(
+                    "The job queue returned work outside its tenant scope.");
+            }
+
+            assignments.AddRange(tenantAssignments);
+            if (assignments.Count == maximum)
+            {
+                break;
+            }
         }
 
         _observer.Claimed(assignments.Count);
@@ -146,6 +181,9 @@ public sealed class JobWorkerRuntime
         CancellationToken forceStop)
     {
         await using AsyncServiceScope scope = _scopeFactory.CreateAsyncScope();
+        scope.ServiceProvider
+            .GetRequiredService<IMutableTenantScope>()
+            .Establish(assignment.Job.TenantId.Value);
         IJobQueue queue = scope.ServiceProvider.GetRequiredService<IJobQueue>();
         IJobHandler? handler = scope.ServiceProvider
             .GetServices<IJobHandler>()

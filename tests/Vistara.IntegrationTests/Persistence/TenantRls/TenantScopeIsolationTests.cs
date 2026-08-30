@@ -1,7 +1,12 @@
+using System.Reflection;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Vistara.Persistence;
+using Vistara.Persistence.Jobs;
 using Vistara.Persistence.Model;
+using Vistara.Persistence.Outbox;
 using Xunit;
 
 namespace Vistara.IntegrationTests.Persistence.TenantRls;
@@ -17,6 +22,32 @@ public sealed class TenantScopeIsolationTests
         Assert.Equal(
             "SELECT set_config('vistara.tenant_id', @tenant_id, true);",
             TenantRlsCommandInterceptor.SetTenantSql);
+    }
+
+    [Fact]
+    public void Worker_job_and_outbox_contexts_install_the_tenant_rls_interceptor()
+    {
+        Guid tenantId = Guid.CreateVersion7();
+        var tenantScope = new FixedTenantScope(tenantId);
+        var jobOptions = new DbContextOptionsBuilder<JobDbContext>()
+            .UseNpgsql(
+                "Host=localhost;Database=vistara;Username=unused;******")
+            .Options;
+        var outboxOptions = new DbContextOptionsBuilder<OutboxDbContext>()
+            .UseNpgsql(
+                "Host=localhost;Database=vistara;Username=unused;******")
+            .Options;
+        using var jobs = new JobDbContext(jobOptions, tenantScope);
+        using var outbox = new OutboxDbContext(
+            outboxOptions,
+            new FixedOutboxTenantContext(tenantId));
+
+        Assert.Contains(
+            Interceptors(jobs),
+            interceptor => interceptor is TenantRlsCommandInterceptor);
+        Assert.Contains(
+            Interceptors(outbox),
+            interceptor => interceptor is TenantRlsCommandInterceptor);
     }
 
     [Fact]
@@ -38,6 +69,25 @@ public sealed class TenantScopeIsolationTests
             async () => await context.Assets.CountAsync());
 
         Assert.Contains("tenant scope", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Unset_job_tenant_fails_closed_before_sqlite_access()
+    {
+        var options = new DbContextOptionsBuilder<JobDbContext>()
+            .UseSqlite("Data Source=:memory:")
+            .Options;
+        await using var context =
+            new JobDbContext(options, new MutableTenantScope());
+
+        InvalidOperationException error =
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await context.Jobs.CountAsync());
+
+        Assert.Contains(
+            "tenant scope",
+            error.Message,
+            StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -106,10 +156,29 @@ public sealed class TenantScopeIsolationTests
         return new VistaraDbContext(options, tenantScope);
     }
 
+    private static IEnumerable<IInterceptor> Interceptors(DbContext context) =>
+        context.GetService<IDbContextOptions>()
+            .Extensions
+            .SelectMany(extension =>
+                extension.GetType()
+                    .GetProperty(
+                        "Interceptors",
+                        BindingFlags.Instance |
+                        BindingFlags.Public |
+                        BindingFlags.NonPublic)
+                    ?.GetValue(extension) as IEnumerable<IInterceptor> ??
+                []);
+
     private sealed class MutableTenantScope : IMutableTenantScope
     {
         public Guid TenantId { get; private set; }
 
         public void Establish(Guid tenantId) => TenantId = tenantId;
+    }
+
+    private sealed class FixedOutboxTenantContext(Guid tenantId) :
+        IOutboxTenantContext
+    {
+        public Guid TenantId { get; } = tenantId;
     }
 }

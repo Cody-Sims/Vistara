@@ -312,14 +312,19 @@ internal sealed class DerivativeStateDatabase : IAsyncDisposable
             staged);
     }
 
-    internal RelationalJobQueue CreateQueue() =>
-        new(
-            new JobDbContext(_jobOptions),
+    internal RelationalJobQueue CreateQueue()
+    {
+        var tenantScope = new FixedTenantScope(TenantId);
+        return new RelationalJobQueue(
+            new JobDbContext(_jobOptions, tenantScope),
             new JobQueueOptions { ConfiguredWorkerCount = 1 });
+    }
 
     internal async ValueTask<JobRow> ReadJobAsync()
     {
-        await using var context = new JobDbContext(_jobOptions);
+        await using var context = new JobDbContext(
+            _jobOptions,
+            new FixedTenantScope(TenantId));
         return await context.Jobs.AsNoTracking().SingleAsync();
     }
 
@@ -366,7 +371,7 @@ internal sealed class DerivativeStateDatabase : IAsyncDisposable
     {
         var tenantScope = new TestMutableTenantScope(TenantId);
         var vistara = new VistaraDbContext(_vistaraOptions, tenantScope);
-        var jobs = new JobDbContext(_jobOptions);
+        var jobs = new JobDbContext(_jobOptions, tenantScope);
         return new DerivativeStatePortScope(
             vistara,
             jobs,

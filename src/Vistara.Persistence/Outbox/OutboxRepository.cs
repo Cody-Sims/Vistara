@@ -41,6 +41,7 @@ public sealed class OutboxRepository(
     public async ValueTask<EventSequence> ReserveSequenceAsync(
         CancellationToken cancellationToken)
     {
+        Guid tenantId = TenantScopeGuard.RequireTenantId(_tenantContext);
         OutboxSequenceRow? sequence = _context.Set<OutboxSequenceRow>()
             .Local
             .SingleOrDefault();
@@ -50,7 +51,7 @@ public sealed class OutboxRepository(
         {
             sequence = new OutboxSequenceRow
             {
-                TenantId = _tenantContext.TenantId,
+                TenantId = tenantId,
                 CurrentSequence = 1,
                 LastPublishedSequence = 0,
                 Version = 1,
@@ -70,7 +71,8 @@ public sealed class OutboxRepository(
     {
         ArgumentNullException.ThrowIfNull(message);
         cancellationToken.ThrowIfCancellationRequested();
-        if (message.Envelope.Metadata.TenantId.Value != _tenantContext.TenantId)
+        Guid tenantId = TenantScopeGuard.RequireTenantId(_tenantContext);
+        if (message.Envelope.Metadata.TenantId.Value != tenantId)
         {
             throw new InvalidOperationException(
                 "Outbox messages can only be appended inside their tenant scope.");
@@ -92,7 +94,7 @@ public sealed class OutboxRepository(
 
             _context.Add(new OutboxSequenceRow
             {
-                TenantId = _tenantContext.TenantId,
+                TenantId = tenantId,
                 CurrentSequence = messageSequence,
                 LastPublishedSequence = 0,
                 Version = 1,
@@ -123,6 +125,7 @@ public sealed class OutboxRepository(
         CancellationToken cancellationToken)
     {
         ValidateMaximumCount(maximumCount);
+        _ = TenantScopeGuard.RequireTenantId(_tenantContext);
         OutboxMessageRow[] rows = await _context.Set<OutboxMessageRow>()
             .AsNoTracking()
             .Where(row =>
@@ -142,6 +145,7 @@ public sealed class OutboxRepository(
         CancellationToken cancellationToken)
     {
         EnsureUtc(publishedAtUtc, nameof(publishedAtUtc));
+        _ = TenantScopeGuard.RequireTenantId(_tenantContext);
         OutboxMessageRow? row = await _context.Set<OutboxMessageRow>()
             .SingleOrDefaultAsync(item => item.Id == messageId.Value, cancellationToken);
         if (row is null)
@@ -203,6 +207,7 @@ public sealed class OutboxRepository(
         }
 
         ValidateMaximumCount(maximumCount);
+        _ = TenantScopeGuard.RequireTenantId(_tenantContext);
         Guid[] candidates = await _context.Set<OutboxMessageRow>()
             .AsNoTracking()
             .Where(row =>
@@ -271,6 +276,7 @@ public sealed class OutboxRepository(
     {
         EnsureUuid7(claimId, nameof(claimId));
         EnsureUtc(publishedAtUtc, nameof(publishedAtUtc));
+        _ = TenantScopeGuard.RequireTenantId(_tenantContext);
         OutboxMessageRow? row = await _context.Set<OutboxMessageRow>()
             .SingleOrDefaultAsync(item => item.Id == messageId.Value, cancellationToken);
         if (row is null)
@@ -327,6 +333,7 @@ public sealed class OutboxRepository(
             throw new ArgumentOutOfRangeException(nameof(errorCode));
         }
 
+        _ = TenantScopeGuard.RequireTenantId(_tenantContext);
         int updated = await _context.Set<OutboxMessageRow>()
             .Where(row =>
                 row.Id == messageId.Value &&
@@ -353,7 +360,9 @@ public sealed class OutboxRepository(
         CancellationToken cancellationToken)
     {
         ValidateMaximumCount(maximumCount);
-        if (tenantId.Value != _tenantContext.TenantId)
+        Guid scopedTenantId =
+            TenantScopeGuard.RequireTenantId(_tenantContext);
+        if (tenantId.Value != scopedTenantId)
         {
             return Result.Failure<EventPage>(ResultError.NotFound(
                 "events.not_found",
@@ -387,6 +396,7 @@ public sealed class OutboxRepository(
     public async ValueTask<EventLogBounds> GetEventLogBoundsAsync(
         CancellationToken cancellationToken)
     {
+        _ = TenantScopeGuard.RequireTenantId(_tenantContext);
         IQueryable<EventLogRow> rows = _context.Set<EventLogRow>().AsNoTracking();
         long oldest = await rows
             .OrderBy(row => row.Sequence)
@@ -408,6 +418,7 @@ public sealed class OutboxRepository(
         EnsureUtc(nowUtc, nameof(nowUtc));
         ArgumentOutOfRangeException.ThrowIfLessThan(maximumRetainedEvents, 1);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(maximumAge, TimeSpan.Zero);
+        _ = TenantScopeGuard.RequireTenantId(_tenantContext);
 
         long countBoundary = await _context.Set<EventLogRow>()
             .AsNoTracking()

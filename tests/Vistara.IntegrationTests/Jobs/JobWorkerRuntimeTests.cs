@@ -3,6 +3,8 @@ using Vistara.Application.Common;
 using Vistara.Application.Jobs;
 using Vistara.Domain.Common;
 using Vistara.Domain.Jobs;
+using Vistara.Persistence;
+using Vistara.Persistence.Jobs;
 using Vistara.Worker.Runtime.Jobs;
 using Xunit;
 
@@ -134,6 +136,33 @@ public sealed class JobWorkerRuntimeTests
     }
 
     [Fact]
+    public async Task JobQueue_worker_establishes_reconciliation_tenant_in_fresh_scopes()
+    {
+        Guid tenantId = Guid.CreateVersion7();
+        var queue = new FakeQueue(
+        [
+            CreateAssignment(tenantId, "upload.reconcile", "reconciliation"),
+        ]);
+        ServiceCollection services = RuntimeServices(queue);
+        services.AddScoped<IJobHandler, TenantAwareReconciliationHandler>();
+        await using ServiceProvider provider = services.BuildServiceProvider();
+        var runtime = Runtime(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            maximumConcurrency: 1);
+
+        await runtime.RunOnceAsync(CancellationToken.None);
+
+        RuntimeScopeTracker tracker =
+            provider.GetRequiredService<RuntimeScopeTracker>();
+        Assert.Single(queue.Completed);
+        Assert.Equal([tenantId], tracker.HandledTenants);
+        Assert.Equal(3, tracker.EstablishedScopeCount);
+        Assert.All(
+            tracker.EstablishedTenants,
+            established => Assert.Equal(tenantId, established));
+    }
+
+    [Fact]
     public void JobQueue_retry_jitter_is_deterministic_and_bounded()
     {
         var policy = new JobRetryPolicy(TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30));
@@ -174,34 +203,59 @@ public sealed class JobWorkerRuntimeTests
 
     private static ServiceProvider Services(FakeQueue queue, IJobHandler handler)
     {
-        var services = new ServiceCollection();
-        services.AddSingleton<IJobQueue>(queue);
+        ServiceCollection services = RuntimeServices(queue);
         services.AddSingleton(handler);
         return services.BuildServiceProvider();
     }
 
-    private static JobLeaseAssignment[] CreateAssignments(int count) =>
-        Enumerable.Range(0, count)
-            .Select(index =>
-            {
-                DurableJob job = DurableJob.Create(
-                    new JobId(Guid.CreateVersion7()),
-                    new JobTenantId(Guid.CreateVersion7()),
-                    new JobType("test.runtime"),
-                    "{}",
-                    1,
-                    new JobDedupeKey($"runtime-{index}"),
-                    0,
-                    3,
-                    UtcNow,
-                    UtcNow);
-                JobLease lease = Required(job.TryLease(
-                    new JobLeaseOwner("test-worker"),
-                    UtcNow,
-                    TimeSpan.FromMinutes(1)));
-                return new JobLeaseAssignment(job, lease);
-            })
+    private static ServiceCollection RuntimeServices(FakeQueue queue)
+    {
+        ServiceCollection services = [];
+        services.AddSingleton<RuntimeScopeTracker>();
+        services.AddScoped<RuntimeTenantScope>();
+        services.AddScoped<ITenantScope>(
+            provider => provider.GetRequiredService<RuntimeTenantScope>());
+        services.AddScoped<IMutableTenantScope>(
+            provider => provider.GetRequiredService<RuntimeTenantScope>());
+        services.AddSingleton<IWorkerTenantCatalog>(
+            new FakeTenantCatalog(queue.TenantIds));
+        services.AddSingleton<IJobQueue>(queue);
+        return services;
+    }
+
+    private static JobLeaseAssignment[] CreateAssignments(int count)
+    {
+        Guid tenantId = Guid.CreateVersion7();
+        return Enumerable.Range(0, count)
+            .Select(index => CreateAssignment(
+                tenantId,
+                "test.runtime",
+                $"runtime-{index}"))
             .ToArray();
+    }
+
+    private static JobLeaseAssignment CreateAssignment(
+        Guid tenantId,
+        string jobType,
+        string dedupeKey)
+    {
+        DurableJob job = DurableJob.Create(
+            new JobId(Guid.CreateVersion7()),
+            new JobTenantId(tenantId),
+            new JobType(jobType),
+            "{}",
+            1,
+            new JobDedupeKey(dedupeKey),
+            0,
+            3,
+            UtcNow,
+            UtcNow);
+        JobLease lease = Required(job.TryLease(
+            new JobLeaseOwner("test-worker"),
+            UtcNow,
+            TimeSpan.FromMinutes(1)));
+        return new JobLeaseAssignment(job, lease);
+    }
 
     private static T Required<T>(Result<T> result)
         where T : notnull
@@ -218,6 +272,10 @@ public sealed class JobWorkerRuntimeTests
     private sealed class FakeQueue(IReadOnlyList<JobLeaseAssignment> assignments) : IJobQueue
     {
         private readonly Queue<JobLeaseAssignment> _assignments = new(assignments);
+        private readonly Guid[] _tenantIds = assignments
+            .Select(assignment => assignment.Job.TenantId.Value)
+            .Distinct()
+            .ToArray();
         private readonly object _gate = new();
         private long _lastHeartbeatVersion;
 
@@ -230,6 +288,7 @@ public sealed class JobWorkerRuntimeTests
         internal long LastHeartbeatVersion => Volatile.Read(ref _lastHeartbeatVersion);
         internal TaskCompletionSource HeartbeatObserved { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal IReadOnlyList<Guid> TenantIds => _tenantIds;
 
         public ValueTask<Result<JobEnqueueResult>> EnqueueAsync(
             DurableJob job,
@@ -309,6 +368,114 @@ public sealed class JobWorkerRuntimeTests
             JobExpiredLeaseRequest request,
             CancellationToken cancellationToken) =>
             throw new NotSupportedException();
+    }
+
+    private sealed class FakeTenantCatalog(IReadOnlyList<Guid> tenantIds) :
+        IWorkerTenantCatalog
+    {
+        public ValueTask<IReadOnlyList<Guid>> ListTenantIdsAsync(
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(tenantIds);
+        }
+    }
+
+    private sealed class RuntimeTenantScope(RuntimeScopeTracker tracker) :
+        IMutableTenantScope
+    {
+        private readonly Guid _scopeId = Guid.NewGuid();
+        private Guid? _tenantId;
+
+        public Guid TenantId =>
+            _tenantId ??
+            throw new InvalidOperationException(
+                "A tenant scope must be established.");
+
+        public void Establish(Guid tenantId)
+        {
+            if (_tenantId.HasValue && _tenantId.Value != tenantId)
+            {
+                throw new InvalidOperationException(
+                    "A runtime scope cannot switch tenants.");
+            }
+
+            _tenantId = tenantId;
+            tracker.RecordEstablishment(_scopeId, tenantId);
+        }
+    }
+
+    private sealed class RuntimeScopeTracker
+    {
+        private readonly object _gate = new();
+        private readonly Dictionary<Guid, Guid> _established = [];
+        private readonly List<Guid> _handled = [];
+
+        internal int EstablishedScopeCount
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _established.Count;
+                }
+            }
+        }
+
+        internal Guid[] EstablishedTenants
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return [.. _established.Values];
+                }
+            }
+        }
+
+        internal Guid[] HandledTenants
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return [.. _handled];
+                }
+            }
+        }
+
+        internal void RecordEstablishment(Guid scopeId, Guid tenantId)
+        {
+            lock (_gate)
+            {
+                _established[scopeId] = tenantId;
+            }
+        }
+
+        internal void RecordHandled(Guid tenantId)
+        {
+            lock (_gate)
+            {
+                _handled.Add(tenantId);
+            }
+        }
+    }
+
+    private sealed class TenantAwareReconciliationHandler(
+        ITenantScope tenantScope,
+        RuntimeScopeTracker tracker) : IJobHandler
+    {
+        public JobType JobType => new("upload.reconcile");
+
+        public ValueTask<JobHandlerResult> HandleAsync(
+            DurableJob job,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Assert.Equal(job.TenantId.Value, tenantScope.TenantId);
+            tracker.RecordHandled(tenantScope.TenantId);
+            return ValueTask.FromResult(JobHandlerResult.Success());
+        }
     }
 
     private sealed class ConcurrencyHandler : IJobHandler

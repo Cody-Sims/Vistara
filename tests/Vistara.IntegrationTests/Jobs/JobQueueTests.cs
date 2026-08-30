@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Vistara.Application.Derivatives;
 using Vistara.Application.Jobs;
 using Vistara.Domain.Jobs;
+using Vistara.Persistence;
 using Vistara.Persistence.Jobs;
 using Xunit;
 
@@ -15,13 +16,15 @@ public sealed class JobQueueTests
 
     private static readonly DateTimeOffset UtcNow =
         new(2026, 8, 28, 12, 0, 0, TimeSpan.Zero);
+    internal static readonly JobTenantId DefaultTenantId =
+        new(Guid.Parse("01991f9e-522b-7c80-a109-7f764ae57985"));
 
     [Fact]
     public async Task JobQueue_enqueue_deduplicates_within_tenant()
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
         RelationalJobQueue queue = database.CreateQueue();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         DurableJob first = CreateJob("same-key", tenantId: tenantId);
         DurableJob duplicate = CreateJob("same-key", tenantId: tenantId);
 
@@ -38,7 +41,7 @@ public sealed class JobQueueTests
     public async Task JobQueue_concurrent_enqueue_creates_one_tenant_dedupe_identity()
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         RelationalJobQueue firstQueue = database.CreateQueue();
         RelationalJobQueue secondQueue = database.CreateQueue();
 
@@ -70,6 +73,54 @@ public sealed class JobQueueTests
         JobId[] ids = claimed.SelectMany(items => items).Select(item => item.Job.Id).ToArray();
         Assert.Equal(12, ids.Length);
         Assert.Equal(12, ids.Distinct().Count());
+    }
+
+    [Fact]
+    public async Task JobQueue_claims_only_the_explicit_tenant_scope()
+    {
+        await using JobDatabase database = await JobDatabase.CreateAsync();
+        JobTenantId firstTenant = DefaultTenantId;
+        var secondTenant = new JobTenantId(Guid.CreateVersion7());
+        DurableJob first = CreateJob("same-cross-tenant", tenantId: firstTenant);
+        DurableJob second = CreateJob("same-cross-tenant", tenantId: secondTenant);
+        Required(await database.CreateQueue(firstTenant).EnqueueAsync(first, default));
+        Required(await database.CreateQueue(secondTenant).EnqueueAsync(second, default));
+
+        JobLeaseAssignment firstClaim = Assert.Single(
+            Required(await database.CreateQueue(firstTenant).LeaseAsync(
+                Request("first-worker", UtcNow, maximumCount: 10),
+                default)));
+        JobLeaseAssignment secondClaim = Assert.Single(
+            Required(await database.CreateQueue(secondTenant).LeaseAsync(
+                Request("second-worker", UtcNow, maximumCount: 10),
+                default)));
+
+        Assert.Equal(first.Id, firstClaim.Job.Id);
+        Assert.Equal(firstTenant, firstClaim.Job.TenantId);
+        Assert.Equal(second.Id, secondClaim.Job.Id);
+        Assert.Equal(secondTenant, secondClaim.Job.TenantId);
+    }
+
+    [Fact]
+    public async Task JobQueue_rejects_enqueue_outside_the_explicit_tenant_scope()
+    {
+        await using JobDatabase database = await JobDatabase.CreateAsync();
+        var otherTenant = new JobTenantId(Guid.CreateVersion7());
+        DurableJob job = CreateJob(
+            "wrong-tenant",
+            tenantId: otherTenant);
+
+        InvalidOperationException error =
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await database.CreateQueue().EnqueueAsync(
+                    job,
+                    CancellationToken.None));
+
+        Assert.Contains(
+            "tenant scope",
+            error.Message,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, await database.CountAsync());
     }
 
     [Fact]
@@ -242,7 +293,8 @@ public sealed class JobQueueTests
         var options = new DbContextOptionsBuilder<JobDbContext>()
             .UseSqlite("Data Source=:memory:")
             .Options;
-        using var context = new JobDbContext(options);
+        var tenantScope = new FixedTenantScope(DefaultTenantId.Value);
+        using var context = new JobDbContext(options, tenantScope);
 
         var exception = Assert.Throws<InvalidOperationException>(
             () => new RelationalJobQueue(
@@ -265,6 +317,10 @@ public sealed class JobQueueTests
             StringComparison.OrdinalIgnoreCase);
         Assert.Contains(
             "lease_expires_at_utc <=",
+            PostgreSqlJobClaimSql.Statement,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(
+            "tenant_id = {0}",
             PostgreSqlJobClaimSql.Statement,
             StringComparison.OrdinalIgnoreCase);
     }
@@ -313,7 +369,7 @@ public sealed class JobQueueTests
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
         RelationalJobQueue queue = database.CreateQueue();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         Guid uploadSessionId = Guid.CreateVersion7();
         await database.SeedCommittedJobsAsync(tenantId, 1);
         await database.SeedUploadCorrelationAsync(
@@ -346,7 +402,7 @@ public sealed class JobQueueTests
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
         RelationalJobQueue queue = database.CreateQueue();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         Guid revisionId = Guid.CreateVersion7();
         await database.SeedCommittedJobsAsync(tenantId, 1);
         await database.SeedUploadCorrelationAsync(
@@ -405,7 +461,7 @@ public sealed class JobQueueTests
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
         RelationalJobQueue queue = database.CreateQueue();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         Guid revisionId = Guid.CreateVersion7();
         await database.SeedCommittedJobsAsync(tenantId, 1);
         await database.SeedUploadCorrelationAsync(
@@ -440,7 +496,7 @@ public sealed class JobQueueTests
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
         RelationalJobQueue queue = database.CreateQueue();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         await database.SeedCommittedJobsAsync(tenantId, 1);
         DurableJob job = CreateJob("unaccounted", tenantId: tenantId);
         Required(await queue.EnqueueAsync(job, default));
@@ -464,7 +520,7 @@ public sealed class JobQueueTests
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
         RelationalJobQueue queue = database.CreateQueue();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         Guid consumedUpload = Guid.CreateVersion7();
         Guid rejectedUpload = Guid.CreateVersion7();
         await database.SeedCommittedJobsAsync(tenantId, 1);
@@ -502,7 +558,7 @@ public sealed class JobQueueTests
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
         RelationalJobQueue queue = database.CreateQueue();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         await database.SeedCommittedJobsAsync(tenantId, 1);
         await database.SeedUploadCorrelationAsync(
             tenantId,
@@ -539,7 +595,7 @@ public sealed class JobQueueTests
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
         RelationalJobQueue queue = database.CreateQueue();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         Guid revisionId = Guid.CreateVersion7();
         await database.SeedCommittedJobsAsync(tenantId, 1);
         await database.SeedUploadCorrelationAsync(
@@ -577,7 +633,7 @@ public sealed class JobQueueTests
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
         RelationalJobQueue queue = database.CreateQueue();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         Guid revisionId = Guid.CreateVersion7();
         await database.SeedCommittedJobsAsync(tenantId, 1);
         await database.SeedUploadCorrelationAsync(
@@ -614,7 +670,7 @@ public sealed class JobQueueTests
     public async Task JobQueue_two_uploads_concurrent_terminals_release_only_owned_capacity()
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         Guid activeUpload = Guid.CreateVersion7();
         Guid rejectedUpload = Guid.CreateVersion7();
         Guid activeRevision = Guid.CreateVersion7();
@@ -669,7 +725,7 @@ public sealed class JobQueueTests
     public async Task JobQueue_two_consumed_uploads_release_concurrent_owned_receipts()
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         Guid firstUpload = Guid.CreateVersion7();
         Guid secondUpload = Guid.CreateVersion7();
         Guid secondRevision = Guid.CreateVersion7();
@@ -725,7 +781,7 @@ public sealed class JobQueueTests
     public async Task JobQueue_concurrent_duplicate_recovery_releases_capacity_once()
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         Guid revisionId = Guid.CreateVersion7();
         await database.SeedCommittedJobsAsync(tenantId, 1);
         await database.SeedUploadCorrelationAsync(
@@ -767,7 +823,7 @@ public sealed class JobQueueTests
     public async Task JobQueue_duplicate_deadletter_cannot_consume_other_upload_capacity()
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         Guid firstRevision = Guid.CreateVersion7();
         await database.SeedCommittedJobsAsync(tenantId, 6);
         await database.SeedUploadCorrelationAsync(
@@ -813,7 +869,7 @@ public sealed class JobQueueTests
     public async Task JobQueue_five_receipts_cannot_consume_a_second_uploads_capacity()
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         Guid firstUpload = Guid.CreateVersion7();
         Guid secondUpload = Guid.CreateVersion7();
         Guid firstRevision = Guid.CreateVersion7();
@@ -865,7 +921,7 @@ public sealed class JobQueueTests
         TerminalPath path)
     {
         await using JobDatabase database = await JobDatabase.CreateAsync();
-        var tenantId = new JobTenantId(Guid.CreateVersion7());
+        JobTenantId tenantId = DefaultTenantId;
         Guid revisionId = Guid.CreateVersion7();
         await database.SeedCommittedJobsAsync(tenantId, 1);
         await database.SeedUploadCorrelationAsync(
@@ -1000,7 +1056,7 @@ public sealed class JobQueueTests
         string payload = """{"safe":true}""") =>
         DurableJob.Create(
             new JobId(Guid.CreateVersion7()),
-            tenantId ?? new JobTenantId(Guid.CreateVersion7()),
+            tenantId ?? DefaultTenantId,
             type ?? new JobType("test.job"),
             payload,
             1,
@@ -1046,7 +1102,9 @@ internal sealed class JobDatabase : IAsyncDisposable
         var options = new DbContextOptionsBuilder<JobDbContext>()
             .UseSqlite(connectionString)
             .Options;
-        await using var context = new JobDbContext(options);
+        await using var context = new JobDbContext(
+            options,
+            new FixedTenantScope(JobQueueTests.DefaultTenantId.Value));
         await context.Database.EnsureCreatedAsync();
         await context.Database.ExecuteSqlRawAsync(
             """
@@ -1073,17 +1131,29 @@ internal sealed class JobDatabase : IAsyncDisposable
     }
 
     internal RelationalJobQueue CreateQueue() =>
-        new(new JobDbContext(_options), new JobQueueOptions { ConfiguredWorkerCount = 1 });
+        CreateQueue(JobQueueTests.DefaultTenantId);
+
+    internal RelationalJobQueue CreateQueue(JobTenantId tenantId)
+    {
+        var tenantScope = new FixedTenantScope(tenantId.Value);
+        return new RelationalJobQueue(
+            new JobDbContext(_options, tenantScope),
+            new JobQueueOptions { ConfiguredWorkerCount = 1 });
+    }
 
     internal async Task<int> CountAsync()
     {
-        await using var context = new JobDbContext(_options);
+        await using var context = new JobDbContext(
+            _options,
+            new FixedTenantScope(JobQueueTests.DefaultTenantId.Value));
         return await context.Jobs.CountAsync();
     }
 
     internal async Task<JobRow> SingleAsync()
     {
-        await using var context = new JobDbContext(_options);
+        await using var context = new JobDbContext(
+            _options,
+            new FixedTenantScope(JobQueueTests.DefaultTenantId.Value));
         return await context.Jobs.AsNoTracking().SingleAsync();
     }
 

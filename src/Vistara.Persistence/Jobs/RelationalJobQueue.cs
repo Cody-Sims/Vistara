@@ -29,7 +29,9 @@ public sealed class RelationalJobQueue : IJobQueue
     private readonly bool _isSqlite;
     private readonly bool _isPostgreSql;
 
-    public RelationalJobQueue(JobDbContext context, JobQueueOptions options)
+    public RelationalJobQueue(
+        JobDbContext context,
+        JobQueueOptions options)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
         ArgumentNullException.ThrowIfNull(options);
@@ -61,6 +63,13 @@ public sealed class RelationalJobQueue : IJobQueue
     {
         ArgumentNullException.ThrowIfNull(job);
         cancellationToken.ThrowIfCancellationRequested();
+        Guid tenantId = _context.TenantId;
+        if (job.TenantId.Value != tenantId)
+        {
+            throw new InvalidOperationException(
+                "Jobs can only be enqueued inside their tenant scope.");
+        }
+
         _context.ChangeTracker.Clear();
         _context.Jobs.Add(JobMapper.ToRow(job));
         try
@@ -100,6 +109,7 @@ public sealed class RelationalJobQueue : IJobQueue
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+        _ = _context.TenantId;
         return _isSqlite
             ? await LeaseSqliteAsync(request, cancellationToken)
             : await LeasePostgreSqlAsync(request, cancellationToken);
@@ -110,6 +120,7 @@ public sealed class RelationalJobQueue : IJobQueue
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
+        _ = _context.TenantId;
         return await MutateAsync(
             request.JobId,
             request.ExpectedVersion,
@@ -125,6 +136,7 @@ public sealed class RelationalJobQueue : IJobQueue
     {
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
+        _ = _context.TenantId;
         await using IDbContextTransaction transaction =
             await _context.Database.BeginTransactionAsync(cancellationToken);
         _context.ChangeTracker.Clear();
@@ -177,6 +189,7 @@ public sealed class RelationalJobQueue : IJobQueue
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
+        _ = _context.TenantId;
         return await MutateAsync(
             request.JobId,
             request.ExpectedVersion,
@@ -193,6 +206,7 @@ public sealed class RelationalJobQueue : IJobQueue
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
+        _ = _context.TenantId;
         return await MutateAsync(
             request.JobId,
             request.ExpectedVersion,
@@ -207,6 +221,7 @@ public sealed class RelationalJobQueue : IJobQueue
         JobLeaseRequest request,
         CancellationToken cancellationToken)
     {
+        Guid tenantId = _context.TenantId;
         await _context.Database.OpenConnectionAsync(cancellationToken);
         var connection = (SqliteConnection)_context.Database.GetDbConnection();
         await using SqliteTransaction transaction =
@@ -218,12 +233,13 @@ public sealed class RelationalJobQueue : IJobQueue
                 await LeaseLockedRowsAsync(
                     _context.Jobs
                         .Where(row =>
-                            ((row.State == nameof(JobState.Pending) ||
-                              row.State == nameof(JobState.RetryScheduled)) &&
-                             row.AvailableAtUtc <= request.NowUtc &&
-                             row.Attempts < row.MaxAttempts) ||
-                            (row.State == nameof(JobState.Leased) &&
-                             row.LeaseExpiresAtUtc <= request.NowUtc))
+                            row.TenantId == tenantId &&
+                            (((row.State == nameof(JobState.Pending) ||
+                               row.State == nameof(JobState.RetryScheduled)) &&
+                              row.AvailableAtUtc <= request.NowUtc &&
+                              row.Attempts < row.MaxAttempts) ||
+                             (row.State == nameof(JobState.Leased) &&
+                              row.LeaseExpiresAtUtc <= request.NowUtc)))
                         .OrderByDescending(row => row.Priority)
                         .ThenBy(row => row.AvailableAtUtc)
                         .ThenBy(row => row.CreatedAtUtc)
@@ -251,12 +267,14 @@ public sealed class RelationalJobQueue : IJobQueue
         JobLeaseRequest request,
         CancellationToken cancellationToken)
     {
+        Guid tenantId = _context.TenantId;
         await using IDbContextTransaction transaction =
             await _context.Database.BeginTransactionAsync(
                 IsolationLevel.ReadCommitted,
                 cancellationToken);
         IQueryable<JobRow> query = _context.Jobs.FromSqlRaw(
             PostgreSqlJobClaimSql.Statement,
+            tenantId,
             request.NowUtc.UtcDateTime,
             request.MaximumCount);
         Result<IReadOnlyList<JobLeaseAssignment>> result =
@@ -345,6 +363,7 @@ public sealed class RelationalJobQueue : IJobQueue
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        _ = _context.TenantId;
         await using IDbContextTransaction transaction =
             await _context.Database.BeginTransactionAsync(cancellationToken);
         _context.ChangeTracker.Clear();
@@ -400,6 +419,7 @@ public sealed class RelationalJobQueue : IJobQueue
         where T : notnull
     {
         cancellationToken.ThrowIfCancellationRequested();
+        _ = _context.TenantId;
         _context.ChangeTracker.Clear();
         JobRow? row = await FindAsync(jobId, cancellationToken);
         if (row is null)
@@ -433,8 +453,13 @@ public sealed class RelationalJobQueue : IJobQueue
             : Result.Failure<T>(saved.Error!);
     }
 
-    private Task<JobRow?> FindAsync(JobId id, CancellationToken cancellationToken) =>
-        _context.Jobs.SingleOrDefaultAsync(row => row.Id == id.Value, cancellationToken);
+    private Task<JobRow?> FindAsync(JobId id, CancellationToken cancellationToken)
+    {
+        Guid tenantId = _context.TenantId;
+        return _context.Jobs.SingleOrDefaultAsync(
+            row => row.TenantId == tenantId && row.Id == id.Value,
+            cancellationToken);
+    }
 
     private async ValueTask<Result> SaveMutationAsync(
         JobRow row,

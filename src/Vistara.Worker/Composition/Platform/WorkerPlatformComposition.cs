@@ -111,7 +111,7 @@ public static class WorkerPlatformServiceCollectionExtensions
             options.ConnectionString = connectionString;
             options.ConfiguredWorkerCount = configuredWorkerCount;
         });
-        services.AddDbContext<WorkerOutboxDbContext>(options =>
+        services.AddDbContext<OutboxDbContext>(options =>
         {
             if (provider == VistaraDatabaseProvider.Sqlite)
             {
@@ -138,9 +138,11 @@ public static class WorkerPlatformServiceCollectionExtensions
         services.TryAddScoped<IOutboxTenantContext>(
             static provider => provider.GetRequiredService<WorkerTenantContext>());
         services.TryAddScoped<OutboxRepository>(static provider =>
-            new OutboxRepository(
-                provider.GetRequiredService<WorkerOutboxDbContext>(),
-                provider.GetRequiredService<IOutboxTenantContext>()));
+        {
+            OutboxDbContext context =
+                provider.GetRequiredService<OutboxDbContext>();
+            return new OutboxRepository(context, context);
+        });
 
         services.TryAddSingleton<IClock>(
             Vistara.Application.Common.SystemClock.Instance);
@@ -225,6 +227,7 @@ public static class WorkerPlatformServiceCollectionExtensions
         services.TryAddSingleton<JobWorkerRuntime>();
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IHostedService, JobWorkerHostedService>());
+        services.TryAddSingleton<OutboxPublisher>();
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IHostedService, OutboxPublisherHostedService>());
         return services;
@@ -297,7 +300,12 @@ internal sealed class WorkerTenantContext :
     IMutableTenantScope,
     IOutboxTenantContext
 {
-    public Guid TenantId { get; private set; }
+    private Guid? _tenantId;
+
+    public Guid TenantId =>
+        _tenantId ??
+        throw new InvalidOperationException(
+            "A tenant scope must be established before database access.");
 
     internal void Establish(Guid tenantId)
     {
@@ -307,18 +315,16 @@ internal sealed class WorkerTenantContext :
                 "A UUIDv7 tenant scope is required.");
         }
 
-        TenantId = tenantId;
+        if (_tenantId.HasValue && _tenantId.Value != tenantId)
+        {
+            throw new InvalidOperationException(
+                "A worker scope cannot switch tenants.");
+        }
+
+        _tenantId = tenantId;
     }
 
     void IMutableTenantScope.Establish(Guid tenantId) => Establish(tenantId);
-}
-
-internal sealed class WorkerOutboxDbContext(
-    DbContextOptions<WorkerOutboxDbContext> options,
-    IOutboxTenantContext tenantContext) : DbContext(options)
-{
-    protected override void OnModelCreating(ModelBuilder modelBuilder) =>
-        OutboxPersistenceContributor.Configure(modelBuilder, tenantContext);
 }
 
 internal sealed class JobWorkerHostedService(JobWorkerRuntime runtime) :
@@ -328,37 +334,22 @@ internal sealed class JobWorkerHostedService(JobWorkerRuntime runtime) :
         runtime.RunAsync(stoppingToken);
 }
 
-internal sealed class OutboxPublisherHostedService(
+public sealed class OutboxPublisher(
     IServiceScopeFactory scopeFactory,
     IClock clock,
-    IOptions<WorkerPlatformOptions> options) : BackgroundService
+    IOptions<WorkerPlatformOptions> options)
 {
     private readonly Guid _owner = Guid.CreateVersion7();
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public async Task<bool> PublishAvailableAsync(
+        CancellationToken cancellationToken)
     {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            bool published = await PublishAvailableAsync(stoppingToken);
-            if (!published)
-            {
-                await Task.Delay(options.Value.Outbox.PollInterval, stoppingToken);
-            }
-        }
-    }
-
-    private async Task<bool> PublishAvailableAsync(CancellationToken cancellationToken)
-    {
-        Guid[] tenants;
+        IReadOnlyList<Guid> tenants;
         await using (AsyncServiceScope catalogScope = scopeFactory.CreateAsyncScope())
         {
-            VistaraDbContext database =
-                catalogScope.ServiceProvider.GetRequiredService<VistaraDbContext>();
-            tenants = await database.Tenants
-                .IgnoreQueryFilters()
-                .AsNoTracking()
-                .Select(tenant => tenant.Id.Value)
-                .ToArrayAsync(cancellationToken);
+            IWorkerTenantCatalog catalog = catalogScope.ServiceProvider
+                .GetRequiredService<IWorkerTenantCatalog>();
+            tenants = await catalog.ListTenantIdsAsync(cancellationToken);
         }
 
         bool published = false;
@@ -366,7 +357,7 @@ internal sealed class OutboxPublisherHostedService(
         {
             await using AsyncServiceScope scope = scopeFactory.CreateAsyncScope();
             scope.ServiceProvider
-                .GetRequiredService<WorkerTenantContext>()
+                .GetRequiredService<IMutableTenantScope>()
                 .Establish(tenantId);
             OutboxRepository repository =
                 scope.ServiceProvider.GetRequiredService<OutboxRepository>();
@@ -391,5 +382,23 @@ internal sealed class OutboxPublisherHostedService(
         }
 
         return published;
+    }
+}
+
+internal sealed class OutboxPublisherHostedService(
+    OutboxPublisher publisher,
+    IOptions<WorkerPlatformOptions> options) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            bool published =
+                await publisher.PublishAvailableAsync(stoppingToken);
+            if (!published)
+            {
+                await Task.Delay(options.Value.Outbox.PollInterval, stoppingToken);
+            }
+        }
     }
 }

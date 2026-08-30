@@ -23,7 +23,7 @@ public sealed class UploadReconciliationSchedulerTests
         await anchor.OpenAsync();
         Guid firstTenant = Guid.CreateVersion7();
         Guid secondTenant = Guid.CreateVersion7();
-        var tenantScope = new SchedulerTenantScope(firstTenant);
+        Guid uncatalogedTenant = Guid.CreateVersion7();
         var clock = new SchedulerClock(
             new DateTimeOffset(2026, 8, 29, 12, 0, 0, TimeSpan.Zero));
         var metadata = new UploadReconciliationScheduleMetadata
@@ -32,25 +32,27 @@ public sealed class UploadReconciliationSchedulerTests
             Interval = TimeSpan.FromMinutes(15),
         };
         ServiceCollection services = [];
-        services.AddSingleton<ITenantScope>(tenantScope);
-        services.AddDbContext<VistaraDbContext>(
-            options => options.UseSqlite(connectionString));
-        services.AddDbContext<JobDbContext>(
-            options => options.UseSqlite(connectionString));
-        services.AddScoped<IJobQueue>(provider =>
-            new RelationalJobQueue(
-                provider.GetRequiredService<JobDbContext>(),
-                new JobQueueOptions { ConfiguredWorkerCount = 1 }));
+        services.AddScoped<SchedulerTenantScope>();
+        services.AddScoped<ITenantScope>(
+            provider => provider.GetRequiredService<SchedulerTenantScope>());
+        services.AddScoped<IMutableTenantScope>(
+            provider => provider.GetRequiredService<SchedulerTenantScope>());
+        services.AddVistaraJobQueue(options =>
+        {
+            options.Provider = VistaraDatabaseProvider.Sqlite;
+            options.ConnectionString = connectionString;
+            options.ConfiguredWorkerCount = 1;
+        });
         services.AddSingleton<IClock>(clock);
         services.AddSingleton<IUuid7Generator, Uuid7Generator>();
         services.AddSingleton(metadata);
         services.AddSingleton<UploadReconciliationScheduler>();
         await using ServiceProvider provider = services.BuildServiceProvider();
         await SeedTenantsAsync(
-            provider,
-            tenantScope,
+            connectionString,
             firstTenant,
             secondTenant,
+            uncatalogedTenant,
             clock.UtcNow);
         UploadReconciliationScheduler scheduler =
             provider.GetRequiredService<UploadReconciliationScheduler>();
@@ -60,14 +62,13 @@ public sealed class UploadReconciliationSchedulerTests
         clock.Advance(metadata.Interval);
         Assert.Equal(2, await scheduler.EnqueueCurrentWindowAsync(CancellationToken.None));
 
-        await using AsyncServiceScope scope = provider.CreateAsyncScope();
-        JobRow[] jobs = await scope.ServiceProvider
-            .GetRequiredService<JobDbContext>()
-            .Jobs
-            .AsNoTracking()
-            .OrderBy(job => job.TenantId)
-            .ThenBy(job => job.CreatedAtUtc)
-            .ToArrayAsync();
+        JobRow[] jobs =
+        [
+            .. await ReadJobsAsync(connectionString, firstTenant),
+            .. await ReadJobsAsync(connectionString, secondTenant),
+        ];
+        Assert.Empty(
+            await ReadJobsAsync(connectionString, uncatalogedTenant));
         Assert.Equal(4, jobs.Length);
         Assert.Equal(2, jobs.Select(job => job.TenantId).Distinct().Count());
         Assert.All(
@@ -83,29 +84,52 @@ public sealed class UploadReconciliationSchedulerTests
     }
 
     private static async Task SeedTenantsAsync(
-        ServiceProvider provider,
-        SchedulerTenantScope tenantScope,
+        string connectionString,
         Guid firstTenant,
         Guid secondTenant,
+        Guid uncatalogedTenant,
         DateTimeOffset now)
     {
-        await using AsyncServiceScope scope = provider.CreateAsyncScope();
-        VistaraDbContext database =
-            scope.ServiceProvider.GetRequiredService<VistaraDbContext>();
+        var options = new DbContextOptionsBuilder<VistaraDbContext>()
+            .UseSqlite(connectionString)
+            .Options;
+        await using var database = new VistaraDbContext(
+            options,
+            new FixedTenantScope(firstTenant));
         await database.Database.EnsureCreatedAsync();
-        await AddTenantAsync(database, tenantScope, firstTenant, "first", now);
-        await AddTenantAsync(database, tenantScope, secondTenant, "second", now);
+        await AddTenantAsync(
+            connectionString,
+            firstTenant,
+            "first",
+            now,
+            addCatalogRoute: true);
+        await AddTenantAsync(
+            connectionString,
+            secondTenant,
+            "second",
+            now,
+            addCatalogRoute: true);
+        await AddTenantAsync(
+            connectionString,
+            uncatalogedTenant,
+            "uncataloged",
+            now,
+            addCatalogRoute: false);
     }
 
     private static async Task AddTenantAsync(
-        VistaraDbContext database,
-        SchedulerTenantScope tenantScope,
+        string connectionString,
         Guid tenantId,
         string slug,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        bool addCatalogRoute)
     {
-        tenantScope.Establish(tenantId);
-        database.ChangeTracker.Clear();
+        var options = new DbContextOptionsBuilder<VistaraDbContext>()
+            .UseSqlite(connectionString)
+            .Options;
+        await using var database = new VistaraDbContext(
+            options,
+            new FixedTenantScope(tenantId));
         database.Tenants.Add(new TenantRow
         {
             Id = tenantId,
@@ -118,6 +142,44 @@ public sealed class UploadReconciliationSchedulerTests
             Version = 1,
         });
         await database.SaveChangesAsync();
+        if (!addCatalogRoute)
+        {
+            return;
+        }
+
+        await database.Database.ExecuteSqlInterpolatedAsync(
+            $"""
+             INSERT INTO authentication_routes (
+                 lookup_digest,
+                 kind,
+                 routed_tenant_id,
+                 principal_id,
+                 credential_id,
+                 created_at_utc)
+             VALUES (
+                 {$"worker-{slug}"},
+                 {"ApiKey"},
+                 {tenantId},
+                 {Guid.CreateVersion7()},
+                 {Guid.CreateVersion7()},
+                 {now})
+             """);
+    }
+
+    private static async Task<JobRow[]> ReadJobsAsync(
+        string connectionString,
+        Guid tenantId)
+    {
+        var options = new DbContextOptionsBuilder<JobDbContext>()
+            .UseSqlite(connectionString)
+            .Options;
+        await using var context = new JobDbContext(
+            options,
+            new FixedTenantScope(tenantId));
+        return await context.Jobs
+            .AsNoTracking()
+            .OrderBy(job => job.CreatedAtUtc)
+            .ToArrayAsync();
     }
 
     private sealed class SchedulerClock(DateTimeOffset utcNow) : IClock
@@ -127,10 +189,24 @@ public sealed class UploadReconciliationSchedulerTests
         internal void Advance(TimeSpan duration) => UtcNow = UtcNow.Add(duration);
     }
 
-    private sealed class SchedulerTenantScope(Guid tenantId) : ITenantScope
+    private sealed class SchedulerTenantScope : IMutableTenantScope
     {
-        public Guid TenantId { get; private set; } = tenantId;
+        private Guid? _tenantId;
 
-        internal void Establish(Guid tenantId) => TenantId = tenantId;
+        public Guid TenantId =>
+            _tenantId ??
+            throw new InvalidOperationException(
+                "A tenant scope must be established.");
+
+        public void Establish(Guid tenantId)
+        {
+            if (_tenantId.HasValue && _tenantId.Value != tenantId)
+            {
+                throw new InvalidOperationException(
+                    "A scheduler scope cannot switch tenants.");
+            }
+
+            _tenantId = tenantId;
+        }
     }
 }

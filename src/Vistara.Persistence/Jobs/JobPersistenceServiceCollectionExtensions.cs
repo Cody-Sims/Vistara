@@ -46,10 +46,31 @@ public static class JobPersistenceServiceCollectionExtensions
                     "The job database provider is not supported.");
             }
         });
+        services.AddDbContext<WorkerTenantCatalogDbContext>(builder =>
+        {
+            if (options.Provider == VistaraDatabaseProvider.Sqlite)
+            {
+                builder.UseSqlite(options.ConnectionString);
+            }
+            else if (options.Provider == VistaraDatabaseProvider.PostgreSql)
+            {
+                builder.UseNpgsql(options.ConnectionString);
+            }
+            else
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(configure),
+                    options.Provider,
+                    "The worker tenant catalog provider is not supported.");
+            }
+        });
         services.AddSingleton(new JobQueueOptions
         {
             ConfiguredWorkerCount = options.ConfiguredWorkerCount,
         });
+        services.AddScoped<
+            IWorkerTenantCatalog,
+            RelationalWorkerTenantCatalog>();
         services.AddScoped<IJobQueue, RelationalJobQueue>();
         return services;
     }

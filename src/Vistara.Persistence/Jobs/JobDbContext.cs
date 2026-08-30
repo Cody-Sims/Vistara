@@ -4,9 +4,36 @@ using Vistara.Domain.Jobs;
 
 namespace Vistara.Persistence.Jobs;
 
-public sealed class JobDbContext(DbContextOptions<JobDbContext> options) : DbContext(options)
+public sealed class JobDbContext(
+    DbContextOptions<JobDbContext> options,
+    ITenantScope tenantScope) : DbContext(options)
 {
+    private readonly ITenantScope _tenantScope =
+        tenantScope ?? throw new ArgumentNullException(nameof(tenantScope));
+
+    public Guid TenantId => TenantScopeGuard.RequireTenantId(_tenantScope);
+
     public DbSet<JobRow> Jobs => Set<JobRow>();
+
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        ValidateTenantWrites();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(
+        bool acceptAllChangesOnSuccess,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateTenantWrites();
+        return base.SaveChangesAsync(
+            acceptAllChangesOnSuccess,
+            cancellationToken);
+    }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder) =>
+        optionsBuilder.AddInterceptors(
+            new TenantRlsCommandInterceptor(_tenantScope));
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -43,6 +70,7 @@ public sealed class JobDbContext(DbContextOptions<JobDbContext> options) : DbCon
             entity.Property(row => row.Payload).HasColumnType("text");
             entity.Property(row => row.TraceParent).HasMaxLength(512);
             entity.Property(row => row.Version).IsConcurrencyToken();
+            entity.HasQueryFilter(row => row.TenantId == TenantId);
         });
 
         var dateTimeOffsetConverter = new ValueConverter<DateTimeOffset, DateTime>(
@@ -83,5 +111,29 @@ public sealed class JobDbContext(DbContextOptions<JobDbContext> options) : DbCon
         }
 
         return result.ToString();
+    }
+
+    private void ValidateTenantWrites()
+    {
+        Guid tenantId = TenantId;
+        foreach (var entry in ChangeTracker.Entries<JobRow>()
+                     .Where(entry => entry.State is
+                         EntityState.Added or
+                         EntityState.Modified or
+                         EntityState.Deleted))
+        {
+            if (entry.Entity.TenantId != tenantId)
+            {
+                throw new InvalidOperationException(
+                    "Job rows can only be changed inside their tenant scope.");
+            }
+
+            if (entry.State == EntityState.Modified &&
+                entry.Property(row => row.TenantId).IsModified)
+            {
+                throw new InvalidOperationException(
+                    "Job tenant ownership cannot be changed.");
+            }
+        }
     }
 }

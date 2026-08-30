@@ -1,10 +1,10 @@
 using System.Text.Json;
-using Microsoft.EntityFrameworkCore;
 using Vistara.Application.Common;
 using Vistara.Application.Jobs;
 using Vistara.Domain.Common;
 using Vistara.Domain.Jobs;
 using Vistara.Persistence;
+using Vistara.Persistence.Jobs;
 using Vistara.Worker.Features.Reconciliation.Uploads;
 
 namespace Vistara.Worker.Runtime.Jobs;
@@ -73,18 +73,24 @@ public sealed class UploadReconciliationScheduler
         string payload = JsonSerializer.Serialize(
             new SchedulePayload(Cursor: null, _schedule.DryRun),
             JsonOptions);
-        await using AsyncServiceScope scope = _scopeFactory.CreateAsyncScope();
-        VistaraDbContext database =
-            scope.ServiceProvider.GetRequiredService<VistaraDbContext>();
-        Guid[] tenantIds = await database.Tenants
-            .IgnoreQueryFilters()
-            .AsNoTracking()
-            .Select(tenant => tenant.Id.Value)
-            .ToArrayAsync(cancellationToken);
-        IJobQueue queue = scope.ServiceProvider.GetRequiredService<IJobQueue>();
+        IReadOnlyList<Guid> tenantIds;
+        await using (AsyncServiceScope scope = _scopeFactory.CreateAsyncScope())
+        {
+            IWorkerTenantCatalog catalog = scope.ServiceProvider
+                .GetRequiredService<IWorkerTenantCatalog>();
+            tenantIds = await catalog.ListTenantIdsAsync(cancellationToken);
+        }
+
         int created = 0;
         foreach (Guid tenantId in tenantIds)
         {
+            await using AsyncServiceScope scope =
+                _scopeFactory.CreateAsyncScope();
+            scope.ServiceProvider
+                .GetRequiredService<IMutableTenantScope>()
+                .Establish(tenantId);
+            IJobQueue queue =
+                scope.ServiceProvider.GetRequiredService<IJobQueue>();
             DurableJob job = DurableJob.Create(
                 new JobId(_idGenerator.NewId()),
                 new JobTenantId(tenantId),

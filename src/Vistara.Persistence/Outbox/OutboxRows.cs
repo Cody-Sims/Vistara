@@ -1,8 +1,7 @@
 namespace Vistara.Persistence.Outbox;
 
-public interface IOutboxTenantContext
+public interface IOutboxTenantContext : ITenantScope
 {
-    Guid TenantId { get; }
 }
 
 internal sealed class OutboxMessageRow

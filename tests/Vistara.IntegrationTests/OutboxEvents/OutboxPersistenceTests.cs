@@ -12,6 +12,29 @@ public sealed class OutboxPersistenceTests
         new(2026, 8, 28, 20, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public async Task Unset_outbox_tenant_fails_closed_before_sqlite_access()
+    {
+        var options = new DbContextOptionsBuilder<OutboxTestDbContext>()
+            .UseSqlite("Data Source=:memory:")
+            .Options;
+        await using var context =
+            new OutboxTestDbContext(options, Guid.Empty);
+        var repository = new OutboxRepository(context, context);
+
+        InvalidOperationException error =
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await repository.ReadPendingAsync(
+                    new EventCursor(0),
+                    10,
+                    CancellationToken.None));
+
+        Assert.Contains(
+            "tenant scope",
+            error.Message,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Domain_state_and_outbox_commit_or_roll_back_together()
     {
         Guid tenantId = Guid.CreateVersion7();
