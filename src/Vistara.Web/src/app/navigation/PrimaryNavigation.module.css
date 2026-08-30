@@ -98,6 +98,63 @@
   opacity: 0.72;
 }
 
+.accountMenu {
+  position: relative;
+  margin-block-start: auto;
+}
+
+.accountMenu .account {
+  cursor: pointer;
+}
+
+.accountMenu .account:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.accountMenu .linkLabel {
+  display: grid;
+  min-inline-size: 0;
+}
+
+.accountRole {
+  color: var(--color-text-faint);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.accountPanel {
+  position: absolute;
+  z-index: 25;
+  inset-block-end: calc(100% + var(--space-2));
+  inset-inline-start: 0;
+  display: grid;
+  inline-size: min(16rem, calc(100vw - var(--space-6)));
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-overlay);
+  box-shadow: var(--shadow-overlay);
+}
+
+.accountPanel[hidden] {
+  display: none;
+}
+
+.accountEmail {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  overflow-wrap: anywhere;
+}
+
+.accountPanel .menuLink {
+  inline-size: 100%;
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+}
+
 .icon {
   flex: 0 0 auto;
   inline-size: 1.3rem;

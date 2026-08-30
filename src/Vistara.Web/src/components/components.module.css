@@ -1,0 +1,146 @@
+.status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-6);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  text-align: start;
+}
+
+.status[data-tone="pending"] {
+  border-style: dashed;
+}
+
+.status[data-tone="danger"] {
+  border-color: color-mix(in srgb, var(--color-status-danger) 45%, transparent);
+  background: var(--color-status-danger-soft);
+}
+
+.status[data-tone="success"] {
+  border-color: color-mix(in srgb, var(--color-status-success) 45%, transparent);
+  background: var(--color-status-success-soft);
+}
+
+.status[data-tone="empty"] {
+  border-style: dashed;
+  background: none;
+}
+
+.statusTitle {
+  margin: 0;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+}
+
+.status[data-tone="danger"] .statusTitle {
+  color: var(--color-status-danger);
+}
+
+.status[data-tone="success"] .statusTitle {
+  color: var(--color-status-success);
+}
+
+.statusDescription {
+  max-inline-size: 60ch;
+  margin: 0;
+  color: var(--color-text-muted);
+  line-height: 1.6;
+}
+
+.statusAction {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-block-start: var(--space-2);
+}
+
+.statusSpinner {
+  inline-size: 1.15rem;
+  block-size: 1.15rem;
+  border: 2px solid var(--color-border-strong);
+  border-block-start-color: var(--color-accent);
+  border-radius: 50%;
+  animation: spin 900ms linear infinite;
+}
+
+.skeleton {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.skeleton[data-shape="tile"] {
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+}
+
+.skeletonBlock {
+  display: block;
+  block-size: 0.9rem;
+  border-radius: var(--radius-sm);
+  background:
+    linear-gradient(
+      100deg,
+      var(--color-surface-raised) 30%,
+      var(--color-surface-hover) 50%,
+      var(--color-surface-raised) 70%
+    );
+  background-size: 220% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+.skeleton[data-shape="text"] .skeletonBlock:nth-child(3n) {
+  inline-size: 62%;
+}
+
+.skeleton[data-shape="text"] .skeletonBlock:nth-child(3n + 2) {
+  inline-size: 84%;
+}
+
+.skeleton[data-shape="row"] .skeletonBlock {
+  block-size: 3.25rem;
+}
+
+.skeleton[data-shape="card"] .skeletonBlock {
+  block-size: 7rem;
+}
+
+.skeleton[data-shape="tile"] .skeletonBlock {
+  aspect-ratio: 1;
+  block-size: auto;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 180% 0;
+  }
+
+  to {
+    background-position: -20% 0;
+  }
+}
+
+@keyframes spin {
+  to {
+    rotate: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeletonBlock,
+  .statusSpinner {
+    animation: none;
+  }
+
+  .skeletonBlock {
+    background: var(--color-surface-raised);
+  }
+}
+
+@media (forced-colors: active) {
+  .skeletonBlock {
+    background: ButtonFace;
+    border: 1px solid ButtonBorder;
+  }
+}

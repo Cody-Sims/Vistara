@@ -85,6 +85,39 @@ export function parseCssColorTokens(
   return tokens;
 }
 
+export function parseCssThemeTokens(
+  css: string,
+): Readonly<Record<string, Readonly<Record<string, string>>>> {
+  const themes: Record<string, Record<string, string>> = {};
+  const shared: Record<string, string> = {};
+  const block = /([^{}]+)\{([^{}]*)\}/g;
+
+  for (const match of css.matchAll(block)) {
+    const selector = match[1] ?? '';
+    const body = match[2] ?? '';
+    const tokens = parseCssColorTokens(body);
+    const names = [...selector.matchAll(/\[data-theme="([\w-]+)"\]/g)].map(
+      (theme) => theme[1] as string,
+    );
+
+    if (names.length === 0) {
+      Object.assign(shared, tokens);
+      continue;
+    }
+
+    for (const name of names) {
+      themes[name] = { ...(themes[name] ?? {}), ...tokens };
+    }
+  }
+
+  return Object.fromEntries(
+    Object.entries(themes).map(([name, tokens]) => [
+      name,
+      { ...shared, ...tokens },
+    ]),
+  );
+}
+
 export function auditContrastPairs(
   tokens: Readonly<Record<string, string>>,
   pairs: readonly ContrastPair[],

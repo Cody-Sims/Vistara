@@ -1,16 +1,59 @@
 import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { SessionSnapshot, TenantRole } from '../../api/platform';
+import { SessionProvider } from '../../features/session';
 import { PrimaryNavigation } from './PrimaryNavigation';
+
+function snapshot(role: TenantRole): SessionSnapshot {
+  return {
+    user: {
+      id: 'user-1',
+      displayName: 'Ada Lovelace',
+      email: 'ada@example.test',
+      platformAdmin: false,
+    },
+    memberships: [
+      { tenantId: 'tenant-1', tenantName: 'Studio', role, status: 'active' },
+    ],
+    activeTenantId: 'tenant-1',
+    preferences: {},
+  };
+}
+
+function client(role: TenantRole) {
+  return {
+    getSession: vi.fn(async () => snapshot(role)),
+    login: vi.fn(async () => snapshot(role)),
+    logout: vi.fn(async () => undefined),
+    updatePreferences: vi.fn(async () => snapshot(role)),
+  };
+}
+
+function renderNavigation(
+  path = '/library',
+  sessionClient?: ReturnType<typeof client>,
+) {
+  const router = createMemoryRouter(
+    [{ path: '*', element: <PrimaryNavigation /> }],
+    { initialEntries: [path] },
+  );
+
+  if (!sessionClient) {
+    return render(<RouterProvider router={router} />);
+  }
+
+  return render(
+    <SessionProvider client={sessionClient}>
+      <RouterProvider router={router} />
+    </SessionProvider>,
+  );
+}
 
 describe('primary navigation', () => {
   it('provides rail and mobile navigation variants with a primary upload action', () => {
-    const router = createMemoryRouter(
-      [{ path: '*', element: <PrimaryNavigation /> }],
-      { initialEntries: ['/library'] },
-    );
-
-    render(<RouterProvider router={router} />);
+    renderNavigation();
 
     const rail = screen.getByRole('navigation', {
       name: 'Primary navigation',
@@ -31,12 +74,7 @@ describe('primary navigation', () => {
   });
 
   it('keeps search and utility destinations URL-addressed without inventing data', () => {
-    const router = createMemoryRouter(
-      [{ path: '*', element: <PrimaryNavigation /> }],
-      { initialEntries: ['/shared/links'] },
-    );
-
-    render(<RouterProvider router={router} />);
+    renderNavigation('/shared/links');
 
     const rail = screen.getByRole('navigation', {
       name: 'Primary navigation',
@@ -60,10 +98,70 @@ describe('primary navigation', () => {
     expect(
       within(rail).getByRole('link', { name: 'Shared links' }),
     ).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('offers sign-in instead of an account menu without a session', () => {
+    renderNavigation();
+
+    const rail = screen.getByRole('navigation', { name: 'Primary navigation' });
+
+    expect(within(rail).getByRole('link', { name: 'Sign in' })).toHaveAttribute(
+      'href',
+      '/login',
+    );
     expect(
-      within(rail).getByRole('button', {
-        name: 'Account controls (not connected)',
-      }),
-    ).toBeDisabled();
+      within(rail).queryByRole('link', { name: 'People' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('hides administration from members', async () => {
+    renderNavigation('/library', client('Member'));
+
+    expect(
+      await screen.findAllByRole('button', { name: /Ada Lovelace/ }),
+    ).not.toHaveLength(0);
+    expect(
+      screen.queryByRole('navigation', { name: 'Administration' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows administration destinations to workspace administrators', async () => {
+    renderNavigation('/admin/jobs', client('TenantAdmin'));
+
+    const administration = await screen.findByRole('navigation', {
+      name: 'Administration',
+    });
+
+    for (const [name, href] of [
+      ['People', '/admin/users'],
+      ['Storage', '/admin/storage'],
+      ['Jobs', '/admin/jobs'],
+      ['Policies', '/admin/policies'],
+      ['Audit log', '/admin/audit'],
+    ]) {
+      expect(
+        within(administration).getByRole('link', { name }),
+      ).toHaveAttribute('href', href);
+    }
+    expect(
+      within(administration).getByRole('link', { name: 'Jobs' }),
+    ).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('signs out from the account menu', async () => {
+    const sessionClient = client('Member');
+    const user = userEvent.setup();
+    renderNavigation('/library', sessionClient);
+
+    const [account] = await screen.findAllByRole('button', {
+      name: /Ada Lovelace/,
+    });
+    await user.click(account!);
+    await user.click(screen.getAllByRole('button', { name: 'Sign out' })[0]!);
+
+    expect(sessionClient.logout).toHaveBeenCalledTimes(1);
+    expect(
+      await screen.findAllByRole('link', { name: 'Sign in' }),
+    ).not.toHaveLength(0);
   });
 });

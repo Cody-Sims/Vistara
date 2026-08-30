@@ -10,6 +10,7 @@ import {
   cssViewportWidthAtZoom,
   contrastRatio,
   parseCssColorTokens,
+  parseCssThemeTokens,
 } from './audit';
 import { VisuallyHidden } from './VisuallyHidden';
 
@@ -45,6 +46,50 @@ describe('accessibility audit foundations', () => {
     );
 
     expect(findings).toEqual([]);
+  });
+
+  it('keeps every theme readable for text and semantic status colors', () => {
+    const themes = parseCssThemeTokens(themeTokens);
+
+    expect(Object.keys(themes).sort()).toEqual(['dark', 'light']);
+
+    for (const [theme, tokens] of Object.entries(themes)) {
+      const findings = auditContrastPairs(tokens, [
+        { foreground: '--color-text', background: '--color-canvas', minimum: 4.5 },
+        { foreground: '--color-text', background: '--color-surface', minimum: 4.5 },
+        {
+          foreground: '--color-text-muted',
+          background: '--color-surface',
+          minimum: 4.5,
+        },
+        {
+          foreground: '--color-on-accent',
+          background: '--color-accent',
+          minimum: 4.5,
+        },
+        {
+          foreground: '--color-focus',
+          background: '--color-canvas',
+          minimum: 3,
+        },
+        ...(['info', 'success', 'warning', 'danger'] as const).flatMap(
+          (status) => [
+            {
+              foreground: `--color-status-${status}`,
+              background: '--color-surface',
+              minimum: 4.5,
+            },
+            {
+              foreground: `--color-status-${status}`,
+              background: `--color-status-${status}-soft`,
+              minimum: 4.5,
+            },
+          ],
+        ),
+      ]);
+
+      expect({ theme, findings }).toEqual({ theme, findings: [] });
+    }
   });
 
   it('checks minimum and preferred touch target dimensions', () => {

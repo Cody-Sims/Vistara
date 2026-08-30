@@ -8,7 +8,6 @@ import {
   useParams,
   useSearchParams,
 } from 'react-router-dom';
-import { VistaraApiClient } from '../../api/generated';
 import { AlbumDetailView, AlbumsView } from '../../features/albums';
 import { FavoritesView } from '../../features/favorites';
 import { LibraryPage } from '../../features/library';
@@ -22,9 +21,10 @@ import {
   UploadQueueView,
 } from '../../features/uploads';
 import { ViewerPage } from '../../features/viewer';
+import { galleryClient } from '../apiClients';
 import styles from './galleryRoutes.module.css';
 
-const client = new VistaraApiClient();
+const client = galleryClient;
 const uploadClient = new FrozenUploadClient();
 const uploadQueue = new UploadQueue({
   client: uploadClient,

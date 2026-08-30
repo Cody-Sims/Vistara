@@ -17,6 +17,7 @@ createRoot(rootElement).render(
     <ApplicationProviders
       queryClient={createAppQueryClient()}
       router={createAppRouter()}
+      sessionMode={import.meta.env.MODE === 'pages' ? 'preview' : 'live'}
     />
   </StrictMode>,
 );

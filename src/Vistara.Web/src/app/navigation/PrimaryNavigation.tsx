@@ -1,15 +1,21 @@
-import type { ReactNode } from 'react';
-import { NavLink } from 'react-router-dom';
+import { useId, useRef, useState, type ReactNode } from 'react';
+import { Link, NavLink } from 'react-router-dom';
+import { describeRole, useSession } from '../../features/session';
 import styles from './PrimaryNavigation.module.css';
 
 type NavigationVariant = 'rail' | 'bottom';
 type IconName =
+  | 'admin'
   | 'albums'
   | 'favorite'
   | 'library'
   | 'more'
+  | 'audit'
+  | 'jobs'
+  | 'policies'
   | 'search'
   | 'settings'
+  | 'storage'
   | 'share'
   | 'tags'
   | 'trash'
@@ -35,6 +41,14 @@ const utilityDestinations = [
   { label: 'Settings', to: '/settings', icon: 'settings' },
 ] as const;
 
+const administrationDestinations = [
+  { label: 'People', to: '/admin/users', icon: 'admin' },
+  { label: 'Storage', to: '/admin/storage', icon: 'storage' },
+  { label: 'Jobs', to: '/admin/jobs', icon: 'jobs' },
+  { label: 'Policies', to: '/admin/policies', icon: 'policies' },
+  { label: 'Audit log', to: '/admin/audit', icon: 'audit' },
+] as const;
+
 export function PrimaryNavigation({ variant }: PrimaryNavigationProps) {
   return (
     <>
@@ -45,6 +59,8 @@ export function PrimaryNavigation({ variant }: PrimaryNavigationProps) {
 }
 
 function RailNavigation() {
+  const session = useSession();
+
   return (
     <nav
       className={`${styles.navigation} ${styles.rail}`}
@@ -61,22 +77,97 @@ function RailNavigation() {
         {utilityDestinations.map((destination) => (
           <NavigationLink key={destination.to} {...destination} />
         ))}
-        <button
-          className={styles.account}
-          type="button"
-          aria-label="Account controls (not connected)"
-          title="Account controls are not connected yet"
-          disabled
-        >
-          <NavigationIcon name="user" />
-          <span className={styles.linkLabel}>Account</span>
-        </button>
       </div>
+      {session.canAdminister ? (
+        <nav className={styles.utilityGroup} aria-label="Administration">
+          <span className={styles.groupLabel}>Administration</span>
+          {administrationDestinations.map((destination) => (
+            <NavigationLink key={destination.to} {...destination} />
+          ))}
+        </nav>
+      ) : null}
+      <AccountControl />
     </nav>
   );
 }
 
+function AccountControl({ compact = false }: { readonly compact?: boolean }) {
+  const session = useSession();
+  const [open, setOpen] = useState(false);
+  const menuId = useId();
+  const container = useRef<HTMLDivElement>(null);
+
+  if (session.status !== 'authenticated' || !session.user) {
+    return (
+      <Link
+        className={compact ? styles.menuLink : styles.account}
+        to="/login"
+        data-account-state="anonymous"
+      >
+        <NavigationIcon name="user" />
+        <span className={styles.linkLabel}>Sign in</span>
+      </Link>
+    );
+  }
+
+  const { displayName } = session.user;
+
+  return (
+    <div
+      className={styles.accountMenu}
+      ref={container}
+      onBlur={(event) => {
+        if (!container.current?.contains(event.relatedTarget)) {
+          setOpen(false);
+        }
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && open) {
+          event.stopPropagation();
+          setOpen(false);
+        }
+      }}
+    >
+      <button
+        className={compact ? styles.menuAccount : styles.account}
+        type="button"
+        aria-expanded={open}
+        aria-controls={menuId}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <NavigationIcon name="user" />
+        <span className={styles.linkLabel}>
+          {displayName}
+          <span className={styles.accountRole}>
+            {describeRole(session.role)}
+          </span>
+        </span>
+      </button>
+      <div className={styles.accountPanel} id={menuId} hidden={!open}>
+        <p className={styles.accountEmail}>{session.user.email}</p>
+        <NavLink className={styles.menuLink} to="/settings">
+          <NavigationIcon name="settings" />
+          Settings
+        </NavLink>
+        <button
+          className={styles.menuLink}
+          type="button"
+          onClick={() => {
+            setOpen(false);
+            void session.signOut();
+          }}
+        >
+          <NavigationIcon name="more" />
+          Sign out
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function BottomNavigation() {
+  const { canAdminister: administration } = useSession();
+
   return (
     <nav
       className={`${styles.navigation} ${styles.bottom}`}
@@ -106,15 +197,19 @@ function BottomNavigation() {
               {destination.label}
             </NavLink>
           ))}
-          <button
-            className={styles.menuAccount}
-            type="button"
-            aria-label="Account controls (not connected)"
-            disabled
-          >
-            <NavigationIcon name="user" />
-            Account unavailable
-          </button>
+          {administration
+            ? administrationDestinations.map((destination) => (
+                <NavLink
+                  key={destination.to}
+                  className={styles.menuLink}
+                  to={destination.to}
+                >
+                  <NavigationIcon name={destination.icon} />
+                  {destination.label}
+                </NavLink>
+              ))
+            : null}
+          <AccountControl compact />
         </div>
       </details>
     </nav>
@@ -153,6 +248,13 @@ function NavigationLink({
 
 function NavigationIcon({ name }: { readonly name: IconName }) {
   const paths: Record<IconName, ReactNode> = {
+    admin: (
+      <>
+        <circle cx="9" cy="8.5" r="3.2" />
+        <path d="M3.6 20a5.6 5.6 0 0 1 10.8 0" />
+        <path d="M16.5 6.5h4.2M16.5 10h4.2M16.5 13.5h2.6" />
+      </>
+    ),
     albums: (
       <>
         <rect x="4" y="5" width="16" height="14" rx="2" />
@@ -176,10 +278,36 @@ function NavigationIcon({ name }: { readonly name: IconName }) {
         <circle cx="19" cy="12" r="1" />
       </>
     ),
+    audit: (
+      <>
+        <path d="M6 3.5h8.5L19 8v12.5H6z" />
+        <path d="M14 3.5V8h5" />
+        <path d="M9 12.5h6M9 16h4" />
+      </>
+    ),
+    jobs: (
+      <>
+        <circle cx="12" cy="12" r="7.5" />
+        <path d="M12 7.8V12l2.9 1.8" />
+      </>
+    ),
+    policies: (
+      <>
+        <path d="M12 3.5 19 6v5.6c0 4-2.9 7.3-7 8.9-4.1-1.6-7-4.9-7-8.9V6Z" />
+        <path d="m9 12 2.2 2.2L15.4 10" />
+      </>
+    ),
     search: (
       <>
         <circle cx="10.5" cy="10.5" r="6.5" />
         <path d="m16 16 4 4" />
+      </>
+    ),
+    storage: (
+      <>
+        <ellipse cx="12" cy="6.5" rx="7" ry="2.8" />
+        <path d="M5 6.5v11c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8v-11" />
+        <path d="M5 12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8" />
       </>
     ),
     settings: (
