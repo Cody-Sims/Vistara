@@ -82,11 +82,26 @@ jobs:
       - name: Check web application
         run: npm --prefix src/Vistara.Web run check
 
+  container-context:
+    name: Validate container contexts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate Docker build context allowlists
+        run: ./deploy/containers/tests/context.sh
+
   container-build:
     name: Build ${{ matrix.image }} container
     needs:
       - build-test
       - web-check
+      - container-context
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -95,6 +110,7 @@ jobs:
         image:
           - api
           - worker
+          - migration
 
     steps:
       - name: Check out repository
