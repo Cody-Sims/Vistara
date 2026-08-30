@@ -3,11 +3,11 @@ using Vistara.Application.Common;
 using Vistara.Application.Common.Storage;
 using Vistara.Application.Lifecycle;
 using Vistara.Domain.Common;
+using Vistara.IntegrationTests.Persistence;
 using Vistara.Persistence;
 using Vistara.Persistence.Jobs;
 using Vistara.Persistence.Lifecycle;
 using Vistara.Persistence.Model;
-using Vistara.IntegrationTests.Persistence;
 using Vistara.Worker.Features.Lifecycle;
 using Xunit;
 
