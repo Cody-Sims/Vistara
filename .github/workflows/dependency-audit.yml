@@ -4,19 +4,9 @@ on:
   push:
     branches:
       - main
-    paths:
-      - Directory.Packages.props
-      - "**/package.json"
-      - "**/package-lock.json"
-      - eng/audit-dependencies.sh
-      - .github/workflows/dependency-audit.yml
+  # No path filters: this workflow is a required status check, and a filtered
+  # workflow never reports on pull requests that do not touch those paths.
   pull_request:
-    paths:
-      - Directory.Packages.props
-      - "**/package.json"
-      - "**/package-lock.json"
-      - eng/audit-dependencies.sh
-      - .github/workflows/dependency-audit.yml
   schedule:
     - cron: "17 6 * * 2"
   workflow_dispatch:

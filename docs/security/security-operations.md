@@ -10,12 +10,16 @@ security requirements live in `docs/specification.md`.
 |---|---|---|---|
 | CodeQL with the extended security query suite | `.github/workflows/codeql.yml` | Push to `main`, every pull request, weekly | A C# or TypeScript pattern matched a security query |
 | Dependency review | `.github/workflows/dependency-review.yml` | Every pull request | A changed dependency carries an advisory of low severity or higher, or a denied license |
-| Vulnerable dependency audit | `.github/workflows/dependency-audit.yml` | Manifest changes, weekly, dispatch | A restored .NET or npm dependency has a known advisory |
+| Vulnerable dependency audit | `.github/workflows/dependency-audit.yml` | Every pull request, push to `main`, weekly, dispatch | A restored .NET or npm dependency has a known advisory |
 | Dependabot updates | `.github/dependabot.yml` | Weekly | Actions, NuGet, every npm manifest, and deployment images have pending updates |
 | Workflow policy validation | `eng/validate-agent-workflows.mjs` | `repository-tooling.yml` | A workflow broke a pinning, permission, artifact, secret, or Dependabot rule |
 | Container context allowlists | `deploy/containers/tests/context.sh` | `ci.yml` | A Dockerfile build context would include unexpected files |
 | Compose startup and health | `deploy/containers/tests/compose-startup.sh` | `deployment-gates.yml` | A hardened topology failed to start or stayed unhealthy |
 | Migration lock and idempotency | `deploy/containers/tests/migration-lock.sh` | `deployment-gates.yml` | Concurrent migrations were unsafe or non-idempotent |
+
+The pull-request gates that must be marked required on `main` are listed in
+`docs/operations/release-runbook.md`; every one of them runs unfiltered so it
+always reports.
 
 Denied licenses are the copyleft and source-available families that conflict
 with the Apache-2.0 distribution: AGPL, GPL, SSPL, and BUSL. The LGPL native

@@ -49,6 +49,46 @@ measurements captured against a populated reference instance:
 gh workflow run performance.yml -f measurements-run-id=<run-id-with-k6-summaries>
 ```
 
+## Branch protection
+
+Mark exactly these status checks as required on `main`. Each one runs on every
+pull request without a path filter, so it always reports and never leaves a
+pull request waiting on a check that will not run.
+
+| Required status check | Workflow |
+|---|---|
+| `Restore, build, and test` | `ci.yml` |
+| `Lint, typecheck, test, and build web` | `ci.yml` |
+| `Validate container contexts` | `ci.yml` |
+| `Build api container` | `ci.yml` |
+| `Build worker container` | `ci.yml` |
+| `Build migration container` | `ci.yml` |
+| `Gallery smoke (Playwright)` | `gallery-smoke.yml` |
+| `Migration lock and idempotency` | `deployment-gates.yml` |
+| `Compose startup and health` | `deployment-gates.yml` |
+| `Deterministic performance budgets` | `performance.yml` |
+| `Audit vulnerable dependencies` | `dependency-audit.yml` |
+| `Review dependency changes` | `dependency-review.yml` |
+| `Analyze csharp` | `codeql.yml` |
+| `Analyze javascript-typescript` | `codeql.yml` |
+
+Do not mark these as required:
+
+- `Validate repository tooling` (`repository-tooling.yml`) is filtered to
+  `.github/**`, `.shadow/**`, `eng/**`, and agent files. A filtered workflow
+  reports nothing on unrelated pull requests, so requiring it would block every
+  such pull request indefinitely. Remove its path filters first if it must
+  become a required check.
+- `Reference host release gate` (`performance.yml`) only runs on a dispatch that
+  supplies reference measurements.
+- The Pages and provider live-test jobs, which are branch-, schedule-, or
+  secret-scoped and never gate a pull request.
+
+Also enable "Require branches to be up to date before merging" so a gate result
+always reflects the merge target, and keep the checks listed above in step with
+this table whenever a job name changes; renaming a job silently retires its
+required check.
+
 ## Ordered deployment
 
 1. Take a fresh backup and confirm the most recent drill report.
