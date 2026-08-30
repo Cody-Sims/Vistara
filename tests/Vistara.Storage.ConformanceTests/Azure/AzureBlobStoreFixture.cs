@@ -196,6 +196,29 @@ internal sealed class InMemoryAzureBlobClient : AzureBlobClientBase
         _blocks[(key, blockId)] = bytes;
     }
 
+    public override ValueTask<AzureBlobBlockList> GetBlockListAsync(
+        string key,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _blobs.TryGetValue(key, out StoredBlob? blob);
+        AzureBlobBlock[] uncommitted = _blocks
+            .Where(pair => pair.Key.Key == key)
+            .Select(pair => new AzureBlobBlock(
+                pair.Key.BlockId,
+                pair.Value.LongLength))
+            .OrderBy(block => block.Name, StringComparer.Ordinal)
+            .ToArray();
+        if (blob is null && uncommitted.Length == 0)
+        {
+            throw Error(AzureBlobClientErrorCode.NotFound);
+        }
+
+        return ValueTask.FromResult(new AzureBlobBlockList(
+            blob?.CommittedBlocks ?? [],
+            uncommitted));
+    }
+
     public override ValueTask<AzureBlobObject> CommitBlockListAsync(
         string key,
         IReadOnlyList<string> blockIds,
@@ -206,6 +229,7 @@ internal sealed class InMemoryAzureBlobClient : AzureBlobClientBase
         _blobs.TryGetValue(key, out StoredBlob? existing);
         CheckConditions(existing, options.Conditions);
         using MemoryStream content = new();
+        List<AzureBlobBlock> committedBlocks = [];
         foreach (string blockId in blockIds)
         {
             if (!_blocks.TryGetValue((key, blockId), out byte[]? block))
@@ -214,6 +238,8 @@ internal sealed class InMemoryAzureBlobClient : AzureBlobClientBase
             }
 
             content.Write(block);
+            committedBlocks.Add(
+                new AzureBlobBlock(blockId, block.LongLength));
         }
 
         byte[] bytes = content.ToArray();
@@ -232,8 +258,16 @@ internal sealed class InMemoryAzureBlobClient : AzureBlobClientBase
             options.ContentType,
             options.ContentMd5.ToArray(),
             new Dictionary<string, string>(options.Metadata, StringComparer.Ordinal),
-            NextVersion());
+            NextVersion(),
+            committedBlocks);
         _blobs[key] = stored;
+        foreach ((string Key, string BlockId) staged in _blocks.Keys
+                     .Where(candidate => candidate.Key == key)
+                     .ToArray())
+        {
+            _blocks.Remove(staged);
+        }
+
         return ValueTask.FromResult(ToObject(key, stored));
     }
 
@@ -367,5 +401,6 @@ internal sealed class InMemoryAzureBlobClient : AzureBlobClientBase
         string ContentType,
         byte[] ContentMd5,
         IReadOnlyDictionary<string, string> Metadata,
-        string Version);
+        string Version,
+        IReadOnlyList<AzureBlobBlock> CommittedBlocks);
 }

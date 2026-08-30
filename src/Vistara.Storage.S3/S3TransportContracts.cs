@@ -33,6 +33,16 @@ internal interface IS3Transport : IAsyncDisposable
         S3BeginMultipartCommand command,
         CancellationToken cancellationToken);
 
+    ValueTask<IReadOnlyList<S3MultipartUploadDescriptor>>
+        ListMultipartUploadsAsync(
+            string key,
+            CancellationToken cancellationToken);
+
+    ValueTask<IReadOnlyList<S3UploadedPartDescriptor>> ListPartsAsync(
+        string key,
+        string uploadId,
+        CancellationToken cancellationToken);
+
     ValueTask<S3ObjectDescriptor> CompleteMultipartAsync(
         S3CompleteMultipartCommand command,
         CancellationToken cancellationToken);
@@ -200,6 +210,17 @@ internal sealed record S3CompletedPart(
     string EntityTag,
     S3WireChecksum? Checksum,
     long SizeBytes);
+
+internal sealed record S3UploadedPartDescriptor(
+    int PartNumber,
+    string EntityTag,
+    long SizeBytes,
+    IReadOnlyList<S3ChecksumValue> Checksums);
+
+internal sealed record S3MultipartUploadDescriptor(
+    string Key,
+    string UploadId,
+    DateTimeOffset InitiatedAtUtc);
 
 internal sealed record S3CompleteMultipartCommand(
     string Key,

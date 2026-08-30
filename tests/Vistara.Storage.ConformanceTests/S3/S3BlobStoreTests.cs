@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using Vistara.Application.Common.Storage;
 using Vistara.Storage.ConformanceTests.Fixtures;
 using Vistara.Storage.S3;
@@ -771,6 +772,333 @@ public sealed class S3BlobStoreTests
     }
 
     [Fact]
+    public async Task Durable_multipart_issuance_survives_serialization_and_a_new_store_instance()
+    {
+        RecordingS3Transport transport = new();
+        S3ValidatedOptions options =
+            new S3BlobStoreOptions(S3ProviderKind.Aws, "bucket", "us-east-1")
+                .Validate();
+        MultipartRequest request = new(
+            new BlobKey("multipart/durable"),
+            5 * 1024 * 1024,
+            new BlobMediaType("image/jpeg"),
+            null,
+            BlobRequestConditions.CreateOnly,
+            TimeSpan.FromMinutes(30),
+            TimeSpan.FromMinutes(5),
+            new BlobMetadata(
+            [
+                new("vistara-multipart-issuance-id", "mpi-01"),
+            ]));
+        IDurableMultipartBlobStore first = Assert.IsAssignableFrom<
+            IDurableMultipartBlobStore>(
+            new S3BlobStore(options, transport, new FixedTimeProvider(Now)));
+
+        MultipartSession issued = await first.GetOrCreateMultipartAsync(
+            "mpi-01",
+            request,
+            CancellationToken.None);
+        string persistedState = JsonSerializer.Deserialize<string>(
+            JsonSerializer.Serialize(issued.ProviderState))!;
+        MultipartSession persisted = new(
+            issued.UploadId,
+            issued.Key,
+            issued.ExpiresAtUtc,
+            issued.ContentLength,
+            issued.CompletionConditions,
+            issued.MaxParts,
+            issued.MinPartBytes,
+            issued.MaxPartBytes,
+            issued.PartPlanLifetime,
+            issued.ContentType,
+            issued.Checksum,
+            issued.Metadata,
+            persistedState);
+        IDurableMultipartBlobStore second = Assert.IsAssignableFrom<
+            IDurableMultipartBlobStore>(
+            new S3BlobStore(
+                options,
+                transport,
+                new FixedTimeProvider(Now.AddMinutes(2))));
+        MultipartSession recovered = await second.GetOrCreateMultipartAsync(
+            "mpi-01",
+            request,
+            CancellationToken.None);
+
+        Assert.Equal(issued.UploadId, recovered.UploadId);
+        Assert.Equal(issued.ProviderState, recovered.ProviderState);
+        Assert.Equal(issued, persisted);
+        Assert.InRange(issued.ProviderState.Length, 1, 8_192);
+        Assert.DoesNotContain("signature", issued.ProviderState, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("credential", issued.ProviderState, StringComparison.OrdinalIgnoreCase);
+        string decodedState = DecodeProviderState(issued.ProviderState);
+        Assert.DoesNotContain("signature", decodedState, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("credential", decodedState, StringComparison.OrdinalIgnoreCase);
+        using CancellationTokenSource cancellation = new();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await second.GetOrCreateMultipartAsync(
+                "mpi-cancelled",
+                request,
+                cancellation.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await second.InspectMultipartAsync(
+                persisted,
+                [],
+                cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Durable_multipart_issuance_recovers_an_unrecorded_native_upload()
+    {
+        const string key = "multipart/unrecorded";
+        RecordingS3Transport transport = new()
+        {
+            ActiveMultipartUploads =
+            [
+                new S3MultipartUploadDescriptor(
+                    key,
+                    "provider-recovered-upload",
+                    Now.AddMinutes(-1)),
+            ],
+        };
+        S3BlobStore store = CreateStore(S3ProviderKind.Aws, transport);
+
+        MultipartSession recovered = await store.GetOrCreateMultipartAsync(
+            "mpi-unrecorded",
+            new MultipartRequest(
+                new BlobKey(key),
+                5 * 1024 * 1024,
+                new BlobMediaType("image/jpeg"),
+                null,
+                BlobRequestConditions.CreateOnly,
+                TimeSpan.FromMinutes(30),
+                TimeSpan.FromMinutes(5),
+                BlobMetadata.Empty),
+            CancellationToken.None);
+
+        Assert.Equal("provider-recovered-upload", recovered.UploadId);
+        Assert.Empty(transport.BeginMultipartCommands);
+    }
+
+    [Fact]
+    public async Task Durable_multipart_inventory_completion_and_abort_work_from_new_instances()
+    {
+        RecordingS3Transport transport = new()
+        {
+            HeadResultFactory = _ => null,
+            UploadedParts =
+            [
+                new S3UploadedPartDescriptor(
+                    1,
+                    "\"provider-etag\"",
+                    5 * 1024 * 1024,
+                    []),
+            ],
+        };
+        S3ValidatedOptions options =
+            new S3BlobStoreOptions(S3ProviderKind.Aws, "bucket", "us-east-1")
+                .Validate();
+        MultipartRequest request = new(
+            new BlobKey("multipart/recovered"),
+            5 * 1024 * 1024,
+            new BlobMediaType("image/jpeg"),
+            null,
+            BlobRequestConditions.CreateOnly,
+            TimeSpan.FromMinutes(30),
+            TimeSpan.FromMinutes(5),
+            BlobMetadata.Empty);
+        S3BlobStore first = new(
+            options,
+            transport,
+            new FixedTimeProvider(Now));
+        MultipartSession issued =
+            await first.GetOrCreateMultipartAsync(
+                "mpi-recovered",
+                request,
+                CancellationToken.None);
+        MultipartSession persisted = CloneSession(
+            issued,
+            providerState: JsonSerializer.Deserialize<string>(
+                JsonSerializer.Serialize(issued.ProviderState))!);
+        S3BlobStore second = new(
+            options,
+            transport,
+            new FixedTimeProvider(Now.AddMinutes(2)));
+
+        MultipartInventory inventory = await second.InspectMultipartAsync(
+            persisted,
+            [
+                new UploadedPart(
+                    1,
+                    new BlobEntityTag("\"claimed-etag\""),
+                    null,
+                    5 * 1024 * 1024),
+            ],
+            CancellationToken.None);
+        MultipartPartPlan refreshed = await second.CreatePartPlanAsync(
+            persisted,
+            1,
+            CancellationToken.None);
+        MultipartCompletion completed = await second.CompleteMultipartAsync(
+            persisted,
+            inventory.Parts,
+            CancellationToken.None);
+
+        Assert.Equal(MultipartInventoryState.Active, inventory.State);
+        UploadedPart observed = Assert.Single(inventory.Parts);
+        Assert.Equal("\"provider-etag\"", observed.EntityTag.Value);
+        Assert.Null(observed.Checksum);
+        Assert.Equal(Now.AddMinutes(7), refreshed.ExpiresAtUtc);
+        Assert.Equal(persisted.Key, completed.Head.Identity.Key);
+
+        transport.HeadResultFactory = key => new S3ObjectDescriptor(
+            key,
+            persisted.ContentLength,
+            persisted.ContentType.Value,
+            Now.AddMinutes(3),
+            "\"completed\"",
+            [],
+            persisted.Metadata.AsReadOnly());
+        S3BlobStore recovering = new(
+            options,
+            transport,
+            new FixedTimeProvider(Now.AddMinutes(31)));
+        MultipartInventory recovered = await recovering.InspectMultipartAsync(
+            persisted,
+            inventory.Parts,
+            CancellationToken.None);
+        Assert.Equal(MultipartInventoryState.Completed, recovered.State);
+        Assert.NotNull(recovered.CompletedHead);
+
+        MultipartSession aborted = await first.GetOrCreateMultipartAsync(
+            "mpi-aborted-bound",
+            new MultipartRequest(
+                new BlobKey("multipart/aborted"),
+                5 * 1024 * 1024,
+                new BlobMediaType("image/jpeg"),
+                null,
+                BlobRequestConditions.CreateOnly,
+                TimeSpan.FromMinutes(30),
+                TimeSpan.FromMinutes(5),
+                BlobMetadata.Empty),
+            CancellationToken.None);
+        transport.HeadResultFactory = _ => null;
+        S3BlobStore abortingReplica = recovering;
+        await abortingReplica.AbortMultipartAsync(
+            aborted,
+            CancellationToken.None);
+        MultipartInventory abortedInventory =
+            await abortingReplica.InspectMultipartAsync(
+                aborted,
+                [],
+                CancellationToken.None);
+
+        Assert.Equal(MultipartInventoryState.Aborted, abortedInventory.State);
+    }
+
+    [Fact]
+    public async Task Durable_multipart_state_rejects_tampering_and_cross_scope_use()
+    {
+        RecordingS3Transport transport = new();
+        S3ValidatedOptions options =
+            new S3BlobStoreOptions(S3ProviderKind.Aws, "bucket", "us-east-1")
+                .Validate();
+        S3BlobStore store = new(
+            options,
+            transport,
+            new FixedTimeProvider(Now));
+        MultipartSession session = await store.GetOrCreateMultipartAsync(
+            "mpi-bound",
+            new MultipartRequest(
+                new BlobKey("multipart/bound"),
+                5 * 1024 * 1024,
+                new BlobMediaType("image/jpeg"),
+                null,
+                BlobRequestConditions.CreateOnly,
+                TimeSpan.FromMinutes(30),
+                TimeSpan.FromMinutes(5),
+                BlobMetadata.Empty),
+            CancellationToken.None);
+        string tamperedState = Tamper(session.ProviderState);
+        MultipartSession tampered = CloneSession(
+            session,
+            providerState: tamperedState);
+        MultipartSession crossKey = CloneSession(
+            session,
+            key: new BlobKey("multipart/other"));
+        MultipartSession crossUpload = CloneSession(
+            session,
+            uploadId: "different-upload");
+        S3BlobStore crossContainer = new(
+            new S3BlobStoreOptions(
+                S3ProviderKind.Aws,
+                "other-bucket",
+                "us-east-1").Validate(),
+            transport,
+            new FixedTimeProvider(Now));
+        S3BlobStore crossProfile = new(
+            new S3BlobStoreOptions(
+                S3ProviderKind.Minio,
+                "bucket",
+                "us-east-1")
+            {
+                ServiceUrl = new Uri("https://minio.example"),
+                ForcePathStyle = true,
+                AllowedEndpointHosts = ["minio.example"],
+            }.Validate(),
+            transport,
+            new FixedTimeProvider(Now));
+        MultipartSession malformed = CloneSession(
+            session,
+            providerState: "s3-multipart:v2:not-valid");
+
+        await AssertInvalidStateAsync(
+            () => store.CreatePartPlanAsync(
+                tampered,
+                1,
+                CancellationToken.None));
+        await AssertInvalidStateAsync(
+            () => store.CreatePartPlanAsync(
+                crossKey,
+                1,
+                CancellationToken.None));
+        await AssertInvalidStateAsync(
+            () => store.CreatePartPlanAsync(
+                crossUpload,
+                1,
+                CancellationToken.None));
+        await AssertInvalidStateAsync(
+            () => crossContainer.CreatePartPlanAsync(
+                session,
+                1,
+                CancellationToken.None));
+        await AssertInvalidStateAsync(
+            () => crossProfile.CreatePartPlanAsync(
+                session,
+                1,
+                CancellationToken.None));
+        await AssertInvalidStateAsync(
+            () => store.CreatePartPlanAsync(
+                malformed,
+                1,
+                CancellationToken.None));
+        await AssertInvalidStateAsync(
+            () => store.GetOrCreateMultipartAsync(
+                "mpi-bound",
+                new MultipartRequest(
+                    new BlobKey("multipart/rebound"),
+                    5 * 1024 * 1024,
+                    new BlobMediaType("image/jpeg"),
+                    null,
+                    BlobRequestConditions.CreateOnly,
+                    TimeSpan.FromMinutes(30),
+                    TimeSpan.FromMinutes(5),
+                    BlobMetadata.Empty),
+                CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Multipart_session_survives_new_store_instances_and_issues_fresh_part_plans()
     {
         RecordingS3Transport transport = new();
@@ -850,7 +1178,7 @@ public sealed class S3BlobStoreTests
     }
 
     [Fact]
-    public async Task Multipart_abort_is_replayable_without_process_local_state()
+    public async Task Multipart_abort_is_idempotent_without_process_local_state()
     {
         RecordingS3Transport transport = new();
         S3BlobStore store = CreateStore(S3ProviderKind.Aws, transport);
@@ -868,7 +1196,7 @@ public sealed class S3BlobStoreTests
         await store.AbortMultipartAsync(session, CancellationToken.None);
         await store.AbortMultipartAsync(session, CancellationToken.None);
 
-        Assert.Equal(2, transport.AbortMultipartCommands.Count);
+        Assert.Single(transport.AbortMultipartCommands);
     }
 
     [Fact]
@@ -990,6 +1318,55 @@ public sealed class S3BlobStoreTests
             options.Validate(),
             transport,
             new FixedTimeProvider(Now));
+    }
+
+    private static MultipartSession CloneSession(
+        MultipartSession session,
+        string? uploadId = null,
+        BlobKey? key = null,
+        string? providerState = null) =>
+        new(
+            uploadId ?? session.UploadId,
+            key ?? session.Key,
+            session.ExpiresAtUtc,
+            session.ContentLength,
+            session.CompletionConditions,
+            session.MaxParts,
+            session.MinPartBytes,
+            session.MaxPartBytes,
+            session.PartPlanLifetime,
+            session.ContentType,
+            session.Checksum,
+            session.Metadata,
+            providerState ?? session.ProviderState);
+
+    private static string Tamper(string value)
+    {
+        int offset = value.IndexOf(':', value.IndexOf(':') + 1) + 1;
+        char replacement = value[offset] == 'a' ? 'b' : 'a';
+        return string.Concat(
+            value[..offset],
+            replacement,
+            value[(offset + 1)..]);
+    }
+
+    private static string DecodeProviderState(string value)
+    {
+        string encoded = value[(value.LastIndexOf(':') + 1)..]
+            .Replace('-', '+')
+            .Replace('_', '/');
+        encoded = encoded.PadRight(
+            encoded.Length + ((4 - (encoded.Length % 4)) % 4),
+            '=');
+        return Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
+    }
+
+    private static async Task AssertInvalidStateAsync<T>(
+        Func<ValueTask<T>> operation)
+    {
+        BlobStoreException error = await Assert.ThrowsAsync<BlobStoreException>(
+            async () => await operation());
+        Assert.Equal(BlobStoreErrorCode.InvalidRequest, error.Code);
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider

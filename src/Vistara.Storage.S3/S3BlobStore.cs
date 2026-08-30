@@ -7,7 +7,10 @@ using Vistara.Application.Common.Storage;
 
 namespace Vistara.Storage.S3;
 
-public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
+public sealed class S3BlobStore :
+    IBlobStore,
+    IDurableMultipartBlobStore,
+    IAsyncDisposable
 {
     private const string VerifiedSha256MetadataKey = "vistara-sha256";
     private readonly S3ValidatedOptions _options;
@@ -567,6 +570,11 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
                 throw Map(error);
             }
 
+            if (S3DurableMultipartState.IsControlKey(descriptor.Key))
+            {
+                continue;
+            }
+
             yield return ToHead(descriptor);
         }
     }
@@ -627,18 +635,253 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
         MultipartRequest request,
         CancellationToken cancellationToken)
     {
+        return await GetOrCreateMultipartCoreAsync(
+            $"begin-{Guid.CreateVersion7():N}",
+            request,
+            recoverUnmarkedUpload: false,
+            cancellationToken);
+    }
+
+    public ValueTask<MultipartSession> GetOrCreateMultipartAsync(
+        string issuanceId,
+        MultipartRequest request,
+        CancellationToken cancellationToken) =>
+        GetOrCreateMultipartCoreAsync(
+            issuanceId,
+            request,
+            recoverUnmarkedUpload: true,
+            cancellationToken);
+
+    public async ValueTask<MultipartInventory> InspectMultipartAsync(
+        MultipartSession session,
+        IReadOnlyList<UploadedPart> claimedParts,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(claimedParts);
+        ValidatedS3Session validated = ValidateSession(
+            session,
+            requireActive: false);
+        if (claimedParts.Count > session.MaxParts)
+        {
+            throw Invalid("The claimed multipart part count exceeds the session limit.");
+        }
+
+        S3MarkerHandle marker = await RequireMarkerAsync(
+            validated.Identity,
+            cancellationToken);
+        BlobHead? completed = await HeadAsync(session.Key, cancellationToken);
+        if (completed is not null)
+        {
+            ValidateCompletedInventory(session, completed);
+            return new MultipartInventory(
+                MultipartInventoryState.Completed,
+                [],
+                completed);
+        }
+
+        if (marker.Marker.Status == S3DurableMultipartState.Aborted)
+        {
+            return new MultipartInventory(
+                MultipartInventoryState.Aborted,
+                []);
+        }
+
+        if (marker.Marker.Status == S3DurableMultipartState.Completed)
+        {
+            return new MultipartInventory(
+                MultipartInventoryState.Missing,
+                []);
+        }
+
+        try
+        {
+            IReadOnlyList<S3UploadedPartDescriptor> parts =
+                await _transport.ListPartsAsync(
+                    session.Key.Value,
+                    session.UploadId,
+                    cancellationToken);
+            return new MultipartInventory(
+                MultipartInventoryState.Active,
+                TranslateUploadedParts(session, parts));
+        }
+        catch (S3TransportException error) when (
+            error.Error == S3TransportError.NotFound)
+        {
+            completed = await HeadAsync(session.Key, cancellationToken);
+            if (completed is not null)
+            {
+                ValidateCompletedInventory(session, completed);
+                return new MultipartInventory(
+                    MultipartInventoryState.Completed,
+                    [],
+                    completed);
+            }
+
+            return new MultipartInventory(
+                MultipartInventoryState.Missing,
+                []);
+        }
+        catch (S3TransportException error)
+        {
+            throw Map(error);
+        }
+    }
+
+    private async ValueTask<MultipartSession> GetOrCreateMultipartCoreAsync(
+        string issuanceId,
+        MultipartRequest request,
+        bool recoverUnmarkedUpload,
+        CancellationToken cancellationToken)
+    {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(request);
+        DateTimeOffset expiresAt = ValidateMultipartRequest(request);
+        string issuanceHash =
+            S3DurableMultipartState.IssuanceHash(issuanceId);
+        string markerKey = S3DurableMultipartState.ControlKey(issuanceHash);
+        S3MarkerHandle? existing = await ReadMarkerAsync(
+            markerKey,
+            cancellationToken);
+        if (existing is not null)
+        {
+            S3DurableMultipartState.ValidateConfiguration(
+                existing.Marker.Identity,
+                _options);
+            S3DurableMultipartState.ValidateRequest(
+                existing.Marker.Identity,
+                request);
+            return CreateSession(existing.Marker.Identity, request);
+        }
+
+        IReadOnlyList<S3MultipartUploadDescriptor> activeUploads = [];
+        if (recoverUnmarkedUpload)
+        {
+            try
+            {
+                activeUploads = await _transport.ListMultipartUploadsAsync(
+                    request.Key.Value,
+                    cancellationToken);
+            }
+            catch (S3TransportException error)
+            {
+                throw Map(error);
+            }
+        }
+
+        if (activeUploads.Any(upload =>
+                !string.Equals(
+                    upload.Key,
+                    request.Key.Value,
+                    StringComparison.Ordinal) ||
+                string.IsNullOrWhiteSpace(upload.UploadId) ||
+                upload.UploadId.Length > 1_024 ||
+                upload.UploadId.Any(char.IsControl) ||
+                upload.InitiatedAtUtc.Offset != TimeSpan.Zero ||
+                upload.InitiatedAtUtc < DateTimeOffset.UnixEpoch))
+        {
+            throw new BlobStoreException(
+                BlobStoreErrorCode.IntegrityMismatch,
+                "The S3 provider returned invalid active multipart uploads.");
+        }
+
+        string uploadId;
+        S3MultipartUploadDescriptor? recovered = activeUploads
+            .OrderBy(upload => upload.InitiatedAtUtc)
+            .ThenBy(upload => upload.UploadId, StringComparer.Ordinal)
+            .FirstOrDefault();
+        if (recovered is not null)
+        {
+            uploadId = recovered.UploadId;
+        }
+        else
+        {
+            try
+            {
+                uploadId = await _transport.BeginMultipartAsync(
+                    new S3BeginMultipartCommand(
+                        request.Key.Value,
+                        request.ContentType.Value,
+                        request.Metadata.AsReadOnly(),
+                        request.Checksum?.Algorithm),
+                    cancellationToken);
+            }
+            catch (S3TransportException error)
+            {
+                throw Map(error);
+            }
+        }
+
+        S3MultipartIdentity identity =
+            S3DurableMultipartState.CreateIdentity(
+                _options,
+                issuanceHash,
+                request,
+                uploadId,
+                expiresAt);
+        var marker = new S3MultipartMarker(
+            identity,
+            S3DurableMultipartState.Active);
+        try
+        {
+            _ = await WriteMarkerAsync(
+                marker,
+                new S3Conditions(null, RequireMissing: true),
+                cancellationToken);
+            return CreateSession(identity, request);
+        }
+        catch (BlobStoreException error)
+            when (error.Code is BlobStoreErrorCode.PreconditionFailed or
+                BlobStoreErrorCode.OutcomeUnknown)
+        {
+            S3MarkerHandle? winner = await ReadMarkerAsync(
+                markerKey,
+                cancellationToken);
+            if (winner is null)
+            {
+                throw;
+            }
+
+            S3DurableMultipartState.ValidateConfiguration(
+                winner.Marker.Identity,
+                _options);
+            S3DurableMultipartState.ValidateRequest(
+                winner.Marker.Identity,
+                request);
+            if (!string.Equals(
+                    winner.Marker.Identity.UploadId,
+                    uploadId,
+                    StringComparison.Ordinal))
+            {
+                try
+                {
+                    await _transport.AbortMultipartAsync(
+                        request.Key.Value,
+                        uploadId,
+                        cancellationToken);
+                }
+                catch (S3TransportException abortError)
+                {
+                    throw Map(abortError);
+                }
+            }
+
+            return CreateSession(winner.Marker.Identity, request);
+        }
+    }
+
+    private DateTimeOffset ValidateMultipartRequest(MultipartRequest request)
+    {
         ValidateKey(request.Key);
         if (!Capabilities.SupportsMultipartUpload)
         {
-            throw Unsupported("The configured S3 profile does not support multipart upload.");
+            throw Unsupported(
+                "The configured S3 profile does not support multipart upload.");
         }
 
         ValidateObjectLength(request.ContentLength);
         ValidateMetadata(request.Metadata);
         _ = TranslateMultipartConditions(request.Conditions);
-        BlobChecksumAlgorithm? checksumAlgorithm = request.Checksum?.Algorithm;
         if (request.Checksum is not null)
         {
             _ = TranslateChecksums([request.Checksum]);
@@ -650,37 +893,26 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
             }
         }
 
-        DateTimeOffset expiresAt = ValidateMultipartLifetimes(request);
-        try
-        {
-            string uploadId = await _transport.BeginMultipartAsync(
-                new S3BeginMultipartCommand(
-                    request.Key.Value,
-                    request.ContentType.Value,
-                    request.Metadata.AsReadOnly(),
-                    checksumAlgorithm),
-                cancellationToken);
-            BlobStoreLimits limits = Capabilities.Limits;
-            return new MultipartSession(
-                uploadId,
-                request.Key,
-                expiresAt,
-                request.ContentLength,
-                request.Conditions,
-                limits.MaxMultipartParts,
-                limits.MinMultipartPartBytes,
-                limits.MaxMultipartPartBytes,
-                request.PartPlanLifetime,
-                request.ContentType,
-                request.Checksum,
-                request.Metadata,
-                ProviderState(uploadId));
-        }
-        catch (S3TransportException error)
-        {
-            throw Map(error);
-        }
+        return ValidateMultipartLifetimes(request);
     }
+
+    private static MultipartSession CreateSession(
+        S3MultipartIdentity identity,
+        MultipartRequest request) =>
+        new(
+            identity.UploadId,
+            request.Key,
+            S3DurableMultipartState.ExpiresAt(identity),
+            request.ContentLength,
+            request.Conditions,
+            identity.MaxParts,
+            identity.MinPartBytes,
+            identity.MaxPartBytes,
+            request.PartPlanLifetime,
+            request.ContentType,
+            request.Checksum,
+            request.Metadata,
+            S3DurableMultipartState.Encode(identity));
 
     public async ValueTask<MultipartPartPlan> CreatePartPlanAsync(
         MultipartSession session,
@@ -688,7 +920,11 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        ValidateSession(session);
+        ValidatedS3Session validated = ValidateSession(session);
+        S3MarkerHandle marker = await RequireMarkerAsync(
+            validated.Identity,
+            cancellationToken);
+        EnsureMarkerActive(marker.Marker);
         if (partNumber < 1 || partNumber > session.MaxParts)
         {
             throw Invalid("The multipart part number is outside the provider limit.");
@@ -721,8 +957,28 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(parts);
-        S3Conditions completionConditions =
-            ValidateSession(session, requireActive: false);
+        ValidatedS3Session validated = ValidateSession(
+            session,
+            requireActive: false);
+        S3MarkerHandle marker = await RequireMarkerAsync(
+            validated.Identity,
+            cancellationToken);
+        if (marker.Marker.Status == S3DurableMultipartState.Completed)
+        {
+            BlobHead? existing = await HeadAsync(
+                session.Key,
+                cancellationToken);
+            if (existing is null)
+            {
+                throw OutcomeUnknown(
+                    "The S3 multipart completion marker exists without its object.");
+            }
+
+            ValidateCompletedInventory(session, existing);
+            return new MultipartCompletion(existing);
+        }
+
+        EnsureMarkerActive(marker.Marker);
         ValidateParts(session, parts);
         S3WireChecksum? checksum = session.Checksum is null
             ? null
@@ -757,10 +1013,16 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
                         session.Key.Value,
                         session.UploadId,
                         translated.AsReadOnly(),
-                        completionConditions,
+                        validated.CompletionConditions,
                         checksum),
                     cancellationToken);
-            return new MultipartCompletion(ToHead(descriptor, session.Key));
+            BlobHead head = ToHead(descriptor, session.Key);
+            ValidateCompletedInventory(session, head);
+            await UpdateMarkerStatusAsync(
+                marker,
+                S3DurableMultipartState.Completed,
+                cancellationToken);
+            return new MultipartCompletion(head);
         }
         catch (S3TransportException error)
         {
@@ -773,12 +1035,27 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        _ = ValidateSession(session, requireActive: false);
+        ValidatedS3Session validated = ValidateSession(
+            session,
+            requireActive: false);
+        S3MarkerHandle marker = await RequireMarkerAsync(
+            validated.Identity,
+            cancellationToken);
+        if (marker.Marker.Status == S3DurableMultipartState.Aborted)
+        {
+            return;
+        }
+
+        EnsureMarkerActive(marker.Marker);
         try
         {
             await _transport.AbortMultipartAsync(
                 session.Key.Value,
                 session.UploadId,
+                cancellationToken);
+            await UpdateMarkerStatusAsync(
+                marker,
+                S3DurableMultipartState.Aborted,
                 cancellationToken);
         }
         catch (S3TransportException error)
@@ -1051,7 +1328,7 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
         }
     }
 
-    private S3Conditions ValidateSession(
+    private ValidatedS3Session ValidateSession(
         MultipartSession session,
         bool requireActive = true)
     {
@@ -1059,11 +1336,11 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
         ValidateKey(session.Key);
         ValidateObjectLength(session.ContentLength);
         ValidateMetadata(session.Metadata);
-        if (!string.Equals(
-                session.ProviderState,
-                ProviderState(session.UploadId),
-                StringComparison.Ordinal) ||
-            session.MaxParts != Capabilities.Limits.MaxMultipartParts ||
+        S3MultipartIdentity identity =
+            S3DurableMultipartState.Decode(session.ProviderState);
+        S3DurableMultipartState.ValidateConfiguration(identity, _options);
+        S3DurableMultipartState.ValidateSession(identity, session);
+        if (session.MaxParts != Capabilities.Limits.MaxMultipartParts ||
             session.MinPartBytes != Capabilities.Limits.MinMultipartPartBytes ||
             session.MaxPartBytes != Capabilities.Limits.MaxMultipartPartBytes ||
             (requireActive &&
@@ -1085,10 +1362,253 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
             }
         }
 
-        return TranslateMultipartConditions(session.CompletionConditions);
+        return new ValidatedS3Session(
+            identity,
+            TranslateMultipartConditions(session.CompletionConditions));
     }
 
-    private static string ProviderState(string uploadId) => $"s3:v1:{uploadId}";
+    private async ValueTask<S3MarkerHandle> RequireMarkerAsync(
+        S3MultipartIdentity identity,
+        CancellationToken cancellationToken)
+    {
+        S3MarkerHandle? handle = await ReadMarkerAsync(
+            identity.MarkerKey,
+            cancellationToken);
+        if (handle is null)
+        {
+            throw Invalid(
+                "The durable S3 multipart provider state is no longer recognized.");
+        }
+
+        S3DurableMultipartState.ValidateMarkerIdentity(
+            identity,
+            handle.Marker.Identity);
+        return handle;
+    }
+
+    private async ValueTask<S3MarkerHandle?> ReadMarkerAsync(
+        string markerKey,
+        CancellationToken cancellationToken)
+    {
+        S3ReadResult result;
+        try
+        {
+            result = await _transport.GetAsync(
+                new S3GetCommand(markerKey, null, S3Conditions.None),
+                cancellationToken);
+        }
+        catch (S3TransportException error) when (
+            error.Error == S3TransportError.NotFound)
+        {
+            return null;
+        }
+        catch (S3TransportException error)
+        {
+            throw Map(error);
+        }
+
+        await using Stream content = result.Content;
+        if (result.ContentRange is not null ||
+            !string.Equals(
+                result.Descriptor.Key,
+                markerKey,
+                StringComparison.Ordinal) ||
+            result.Descriptor.ContentLength is <= 0 or > 16 * 1024)
+        {
+            throw Invalid(
+                "The durable S3 multipart control record is invalid.");
+        }
+
+        byte[] bytes = new byte[checked((int)result.Descriptor.ContentLength)];
+        try
+        {
+            await content.ReadExactlyAsync(bytes, cancellationToken);
+            if (await content.ReadAsync(
+                    new byte[1],
+                    cancellationToken) != 0)
+            {
+                throw Invalid(
+                    "The durable S3 multipart control record is invalid.");
+            }
+        }
+        catch (EndOfStreamException error)
+        {
+            throw new BlobStoreException(
+                BlobStoreErrorCode.IntegrityMismatch,
+                "The durable S3 multipart control record was truncated.",
+                error);
+        }
+
+        return new S3MarkerHandle(
+            S3DurableMultipartState.DecodeMarker(bytes),
+            result.Descriptor.EntityTag);
+    }
+
+    private async ValueTask<S3MarkerHandle> WriteMarkerAsync(
+        S3MultipartMarker marker,
+        S3Conditions conditions,
+        CancellationToken cancellationToken)
+    {
+        byte[] bytes = S3DurableMultipartState.EncodeMarker(marker);
+        using MemoryStream content = new(bytes, writable: false);
+        try
+        {
+            S3ObjectDescriptor descriptor = await _transport.PutAsync(
+                new S3PutCommand(
+                    marker.Identity.MarkerKey,
+                    content,
+                    bytes.LongLength,
+                    "application/vnd.vistara.multipart-state+json",
+                    new ReadOnlyDictionary<string, string>(
+                        new Dictionary<string, string>(
+                            StringComparer.Ordinal)),
+                    [],
+                    conditions),
+                cancellationToken);
+            if (!string.Equals(
+                    descriptor.Key,
+                    marker.Identity.MarkerKey,
+                    StringComparison.Ordinal))
+            {
+                throw new BlobStoreException(
+                    BlobStoreErrorCode.IntegrityMismatch,
+                    "The S3 provider returned a different multipart control key.");
+            }
+
+            return new S3MarkerHandle(marker, descriptor.EntityTag);
+        }
+        catch (S3TransportException error)
+        {
+            throw Map(error);
+        }
+    }
+
+    private async ValueTask UpdateMarkerStatusAsync(
+        S3MarkerHandle current,
+        string status,
+        CancellationToken cancellationToken)
+    {
+        if (current.Marker.Status == status)
+        {
+            return;
+        }
+
+        if (current.Marker.Status != S3DurableMultipartState.Active)
+        {
+            throw Invalid(
+                "The durable S3 multipart control record is not active.");
+        }
+
+        var updated = current.Marker with
+        {
+            Status = status,
+        };
+        try
+        {
+            _ = await WriteMarkerAsync(
+                updated,
+                new S3Conditions(current.EntityTag, RequireMissing: false),
+                cancellationToken);
+        }
+        catch (BlobStoreException error)
+            when (error.Code == BlobStoreErrorCode.PreconditionFailed)
+        {
+            S3MarkerHandle observed;
+            try
+            {
+                observed = await RequireMarkerAsync(
+                    current.Marker.Identity,
+                    cancellationToken);
+            }
+            catch (BlobStoreException lookupError)
+            {
+                throw OutcomeUnknown(
+                    "The durable S3 multipart status update could not be reconciled.",
+                    lookupError);
+            }
+
+            if (observed.Marker.Status != status)
+            {
+                throw OutcomeUnknown(
+                    "The durable S3 multipart status update raced another operation.",
+                    error);
+            }
+        }
+    }
+
+    private static void EnsureMarkerActive(S3MultipartMarker marker)
+    {
+        if (marker.Status != S3DurableMultipartState.Active)
+        {
+            throw Invalid(
+                "The durable S3 multipart session is no longer active.");
+        }
+    }
+
+    private static ReadOnlyCollection<UploadedPart> TranslateUploadedParts(
+        MultipartSession session,
+        IReadOnlyList<S3UploadedPartDescriptor> descriptors)
+    {
+        var parts = new List<UploadedPart>(descriptors.Count);
+        int previous = 0;
+        foreach (S3UploadedPartDescriptor descriptor in descriptors)
+        {
+            if (descriptor.PartNumber <= previous ||
+                descriptor.PartNumber > session.MaxParts ||
+                descriptor.SizeBytes <= 0 ||
+                descriptor.SizeBytes > session.MaxPartBytes)
+            {
+                throw new BlobStoreException(
+                    BlobStoreErrorCode.IntegrityMismatch,
+                    "The S3 provider returned invalid multipart inventory.");
+            }
+
+            previous = descriptor.PartNumber;
+            try
+            {
+                BlobChecksum? checksum = descriptor.Checksums.Count == 0
+                    ? null
+                    : new BlobChecksum(
+                        descriptor.Checksums[0].Algorithm,
+                        descriptor.Checksums[0].Value);
+                parts.Add(new UploadedPart(
+                    descriptor.PartNumber,
+                    new BlobEntityTag(descriptor.EntityTag),
+                    checksum,
+                    descriptor.SizeBytes));
+            }
+            catch (ArgumentException error)
+            {
+                throw new BlobStoreException(
+                    BlobStoreErrorCode.IntegrityMismatch,
+                    "The S3 provider returned invalid multipart inventory.",
+                    error);
+            }
+        }
+
+        return parts.AsReadOnly();
+    }
+
+    private static void ValidateCompletedInventory(
+        MultipartSession session,
+        BlobHead head)
+    {
+        if (head.Identity.Key != session.Key ||
+            head.Properties.ContentLength != session.ContentLength ||
+            head.Properties.ContentType != session.ContentType ||
+            session.Metadata.AsReadOnly().Any(pair =>
+                !head.Properties.Metadata.TryGetValue(
+                    pair.Key,
+                    out string? value) ||
+                !string.Equals(value, pair.Value, StringComparison.Ordinal)) ||
+            (session.Checksum is not null &&
+             !head.Properties.Checksums.Contains(session.Checksum)))
+        {
+            throw new BlobStoreException(
+                BlobStoreErrorCode.IntegrityMismatch,
+                "The completed S3 multipart object does not match its session.");
+        }
+    }
 
     private void ValidateParts(
         MultipartSession session,
@@ -1187,7 +1707,10 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
     private static void ValidateKey(BlobKey key)
     {
         ArgumentNullException.ThrowIfNull(key);
-        _ = key.Value;
+        if (S3DurableMultipartState.IsControlKey(key.Value))
+        {
+            throw Invalid("The S3 blob key uses a reserved internal prefix.");
+        }
     }
 
     private static void ValidatePrefix(string? prefix)
@@ -1198,6 +1721,7 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
         }
 
         if (prefix.Length > 1_024 ||
+            S3DurableMultipartState.IsControlKey(prefix) ||
             prefix[0] == '/' ||
             prefix.Contains("//", StringComparison.Ordinal) ||
             prefix.Split('/').Any(segment => segment is "." or "..") ||
@@ -1268,6 +1792,11 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
     private static BlobStoreException Invalid(string message) =>
         new(BlobStoreErrorCode.InvalidRequest, message);
 
+    private static BlobStoreException OutcomeUnknown(
+        string message,
+        Exception? error = null) =>
+        new(BlobStoreErrorCode.OutcomeUnknown, message, error);
+
     private static Dependencies CreateDependencies(
         S3BlobStoreOptions options,
         AWSCredentials credentials,
@@ -1286,4 +1815,12 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
         S3ValidatedOptions Options,
         IS3Transport Transport,
         TimeProvider TimeProvider);
+
+    private sealed record ValidatedS3Session(
+        S3MultipartIdentity Identity,
+        S3Conditions CompletionConditions);
+
+    private sealed record S3MarkerHandle(
+        S3MultipartMarker Marker,
+        string EntityTag);
 }

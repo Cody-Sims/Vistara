@@ -148,6 +148,34 @@ internal sealed class AzureSdkBlobClient : AzureBlobClientBase
         }
     }
 
+    public override async ValueTask<AzureBlobBlockList> GetBlockListAsync(
+        string key,
+        CancellationToken cancellationToken)
+    {
+        BlockBlobClient client = _container.GetBlockBlobClient(key);
+        try
+        {
+            Response<BlockList> response = await client.GetBlockListAsync(
+                BlockListTypes.All,
+                cancellationToken: cancellationToken);
+            return new AzureBlobBlockList(
+                response.Value.CommittedBlocks
+                    .Select(block => new AzureBlobBlock(
+                        block.Name,
+                        block.Size))
+                    .ToArray(),
+                response.Value.UncommittedBlocks
+                    .Select(block => new AzureBlobBlock(
+                        block.Name,
+                        block.Size))
+                    .ToArray());
+        }
+        catch (RequestFailedException error)
+        {
+            throw Translate(error);
+        }
+    }
+
     public override async ValueTask<AzureBlobObject> CommitBlockListAsync(
         string key,
         IReadOnlyList<string> blockIds,

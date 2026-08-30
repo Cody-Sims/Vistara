@@ -320,6 +320,18 @@ public sealed class LocalBlobStoreTests
                 () => fixture.Store.AbortMultipartAsync(
                     fixture.Session(key),
                     CancellationToken.None));
+            IDurableMultipartBlobStore durable = Assert.IsAssignableFrom<
+                IDurableMultipartBlobStore>(fixture.Store);
+            await AssertUnsupportedAsync(
+                () => durable.GetOrCreateMultipartAsync(
+                    "mpi-local",
+                    fixture.MultipartRequest(key),
+                    CancellationToken.None));
+            await AssertUnsupportedAsync(
+                () => durable.InspectMultipartAsync(
+                    fixture.Session(key),
+                    [],
+                    CancellationToken.None));
             await AssertUnsupportedAsync(
                 () => fixture.Store.CreateReadGrantAsync(
                     key,

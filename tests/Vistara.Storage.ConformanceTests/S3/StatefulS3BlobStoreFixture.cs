@@ -291,6 +291,24 @@ internal sealed class StatefulS3Transport : IS3Transport
         return ValueTask.FromResult(Guid.NewGuid().ToString("N"));
     }
 
+    public ValueTask<IReadOnlyList<S3MultipartUploadDescriptor>>
+        ListMultipartUploadsAsync(
+            string key,
+            CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult<IReadOnlyList<S3MultipartUploadDescriptor>>([]);
+    }
+
+    public ValueTask<IReadOnlyList<S3UploadedPartDescriptor>> ListPartsAsync(
+        string key,
+        string uploadId,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult<IReadOnlyList<S3UploadedPartDescriptor>>([]);
+    }
+
     public ValueTask<S3ObjectDescriptor> CompleteMultipartAsync(
         S3CompleteMultipartCommand command,
         CancellationToken cancellationToken)

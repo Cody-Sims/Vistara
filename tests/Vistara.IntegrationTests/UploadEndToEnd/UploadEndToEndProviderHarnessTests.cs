@@ -408,6 +408,35 @@ public sealed class UploadEndToEndProviderHarnessTests(ITestOutputHelper output)
             return ValueTask.FromResult(blob is null ? null : ToObject(key, blob));
         }
 
+        public override ValueTask<AzureBlobDownload> DownloadAsync(
+            string key,
+            AzureBlobRange? range,
+            AzureBlobConditions conditions,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_blobs.TryGetValue(key, out StoredBlob? blob))
+            {
+                throw new AzureBlobClientException(
+                    AzureBlobClientErrorCode.NotFound,
+                    "The offline blob was not found.");
+            }
+
+            CheckConditions(blob, conditions);
+            if (range is not null)
+            {
+                throw new AzureBlobClientException(
+                    AzureBlobClientErrorCode.InvalidRange,
+                    "The offline harness does not use ranged control reads.");
+            }
+
+            return ValueTask.FromResult(new AzureBlobDownload(
+                new MemoryStream(blob.Bytes, writable: false),
+                ToObject(key, blob),
+                null,
+                blob.Bytes.LongLength));
+        }
+
         public override async ValueTask StageBlockAsync(
             string key,
             string blockId,

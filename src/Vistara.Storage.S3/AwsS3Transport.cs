@@ -360,6 +360,15 @@ internal sealed class AwsS3Transport : IS3Transport
                 await _client.InitiateMultipartUploadAsync(
                     request,
                     cancellationToken);
+            if (string.IsNullOrWhiteSpace(response.UploadId) ||
+                response.UploadId.Length > 1_024 ||
+                response.UploadId.Any(char.IsControl))
+            {
+                throw new S3TransportException(
+                    S3TransportError.IntegrityMismatch,
+                    "The S3 service returned an invalid multipart upload identifier.");
+            }
+
             return response.UploadId;
         }
         catch (AmazonS3Exception error)
@@ -370,6 +379,196 @@ internal sealed class AwsS3Transport : IS3Transport
         {
             throw Unknown(error);
         }
+    }
+
+    public async ValueTask<IReadOnlyList<S3MultipartUploadDescriptor>>
+        ListMultipartUploadsAsync(
+            string key,
+            CancellationToken cancellationToken)
+    {
+        var uploads = new List<S3MultipartUploadDescriptor>();
+        string? keyMarker = null;
+        string? uploadIdMarker = null;
+        do
+        {
+            try
+            {
+                ListMultipartUploadsResponse response =
+                    await _client.ListMultipartUploadsAsync(
+                        new ListMultipartUploadsRequest
+                        {
+                            BucketName = _bucketName,
+                            Prefix = key,
+                            KeyMarker = keyMarker,
+                            UploadIdMarker = uploadIdMarker,
+                        },
+                        cancellationToken);
+                foreach (MultipartUpload upload in response.MultipartUploads)
+                {
+                    if (!string.Equals(
+                            upload.Key,
+                            key,
+                            StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(upload.UploadId) ||
+                        upload.Initiated is not { } initiated)
+                    {
+                        throw new S3TransportException(
+                            S3TransportError.IntegrityMismatch,
+                            "The S3 service returned invalid multipart upload identity.");
+                    }
+
+                    uploads.Add(new S3MultipartUploadDescriptor(
+                        upload.Key,
+                        upload.UploadId,
+                        new DateTimeOffset(
+                            DateTime.SpecifyKind(
+                                initiated,
+                                DateTimeKind.Utc))));
+                }
+
+                if (response.IsTruncated == true)
+                {
+                    string? nextKey = response.NextKeyMarker;
+                    string? nextUploadId = response.NextUploadIdMarker;
+                    if (string.IsNullOrWhiteSpace(nextKey) ||
+                        string.IsNullOrWhiteSpace(nextUploadId) ||
+                        (string.Equals(
+                             nextKey,
+                             keyMarker,
+                             StringComparison.Ordinal) &&
+                         string.Equals(
+                             nextUploadId,
+                             uploadIdMarker,
+                             StringComparison.Ordinal)))
+                    {
+                        throw new S3TransportException(
+                            S3TransportError.IntegrityMismatch,
+                            "The S3 service returned invalid multipart upload pagination.");
+                    }
+
+                    keyMarker = nextKey;
+                    uploadIdMarker = nextUploadId;
+                }
+                else
+                {
+                    keyMarker = null;
+                    uploadIdMarker = null;
+                }
+            }
+            catch (AmazonS3Exception error)
+            {
+                throw Translate(error);
+            }
+            catch (HttpRequestException error)
+            {
+                throw Unknown(error);
+            }
+        }
+        while (keyMarker is not null);
+
+        return uploads.AsReadOnly();
+    }
+
+    public async ValueTask<IReadOnlyList<S3UploadedPartDescriptor>> ListPartsAsync(
+        string key,
+        string uploadId,
+        CancellationToken cancellationToken)
+    {
+        var parts = new List<S3UploadedPartDescriptor>();
+        int? partNumberMarker = null;
+        do
+        {
+            try
+            {
+                ListPartsResponse response = await _client.ListPartsAsync(
+                    new ListPartsRequest
+                    {
+                        BucketName = _bucketName,
+                        Key = key,
+                        UploadId = uploadId,
+                        PartNumberMarker = partNumberMarker?.ToString(
+                            CultureInfo.InvariantCulture),
+                    },
+                    cancellationToken);
+                if (!string.Equals(
+                        response.Key,
+                        key,
+                        StringComparison.Ordinal) ||
+                    !string.Equals(
+                        response.UploadId,
+                        uploadId,
+                        StringComparison.Ordinal))
+                {
+                    throw new S3TransportException(
+                        S3TransportError.IntegrityMismatch,
+                        "The S3 service returned multipart inventory for a different upload.");
+                }
+
+                foreach (PartDetail part in response.Parts)
+                {
+                    if (part.PartNumber is not { } partNumber ||
+                        part.Size is not { } size ||
+                        string.IsNullOrWhiteSpace(part.ETag))
+                    {
+                        throw new S3TransportException(
+                            S3TransportError.IntegrityMismatch,
+                            "The S3 service returned invalid multipart inventory.");
+                    }
+
+                    parts.Add(new S3UploadedPartDescriptor(
+                        partNumber,
+                        part.ETag,
+                        size,
+                        PartChecksums(
+                            part.ChecksumSHA256,
+                            part.ChecksumCRC32,
+                            part.ChecksumCRC32C,
+                            part.ChecksumCRC64NVME)));
+                }
+
+                if (response.IsTruncated == true)
+                {
+                    int? next = response.NextPartNumberMarker;
+                    if (next is null ||
+                        (partNumberMarker is not null &&
+                         next <= partNumberMarker))
+                    {
+                        throw new S3TransportException(
+                            S3TransportError.IntegrityMismatch,
+                            "The S3 service returned invalid multipart pagination.");
+                    }
+
+                    partNumberMarker = next;
+                }
+                else
+                {
+                    partNumberMarker = null;
+                }
+            }
+            catch (AmazonS3Exception error) when (
+                error.ErrorCode == "NoSuchUpload")
+            {
+                throw new S3TransportException(
+                    S3TransportError.NotFound,
+                    "The S3 multipart upload was not found.",
+                    error);
+            }
+            catch (AmazonS3Exception error)
+            {
+                throw Translate(error);
+            }
+            catch (HttpRequestException error)
+            {
+                throw Unknown(error);
+            }
+        }
+        while (partNumberMarker is not null);
+
+        return parts.AsReadOnly();
     }
 
     public async ValueTask<S3ObjectDescriptor> CompleteMultipartAsync(
@@ -553,6 +752,27 @@ internal sealed class AwsS3Transport : IS3Transport
         List<S3ChecksumValue> values = [];
         if (!string.IsNullOrWhiteSpace(sha256) &&
             checksumType != ChecksumType.COMPOSITE)
+        {
+            values.Add(
+                new S3ChecksumValue(
+                    BlobChecksumAlgorithm.Sha256,
+                    DecodeSha256(sha256)));
+        }
+
+        AddChecksum(values, BlobChecksumAlgorithm.Crc32, crc32);
+        AddChecksum(values, BlobChecksumAlgorithm.Crc32C, crc32C);
+        AddChecksum(values, BlobChecksumAlgorithm.Crc64Nvme, crc64Nvme);
+        return values;
+    }
+
+    private static List<S3ChecksumValue> PartChecksums(
+        string? sha256,
+        string? crc32,
+        string? crc32C,
+        string? crc64Nvme)
+    {
+        var values = new List<S3ChecksumValue>();
+        if (!string.IsNullOrWhiteSpace(sha256))
         {
             values.Add(
                 new S3ChecksumValue(

@@ -40,6 +40,10 @@ public interface IAzureBlobClient
         byte[] contentMd5,
         CancellationToken cancellationToken);
 
+    ValueTask<AzureBlobBlockList> GetBlockListAsync(
+        string key,
+        CancellationToken cancellationToken);
+
     ValueTask<AzureBlobObject> CommitBlockListAsync(
         string key,
         IReadOnlyList<string> blockIds,
@@ -96,6 +100,11 @@ public abstract class AzureBlobClientBase : IAzureBlobClient
         CancellationToken cancellationToken) =>
         throw new NotSupportedException();
 
+    public virtual ValueTask<AzureBlobBlockList> GetBlockListAsync(
+        string key,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+
     public virtual ValueTask<AzureBlobObject> CommitBlockListAsync(
         string key,
         IReadOnlyList<string> blockIds,
@@ -141,6 +150,12 @@ public sealed record AzureBlobConditions(
     bool RequireMissing = false);
 
 public sealed record AzureBlobRange(long Offset, long Length);
+
+public sealed record AzureBlobBlock(string Name, long SizeBytes);
+
+public sealed record AzureBlobBlockList(
+    IReadOnlyList<AzureBlobBlock> Committed,
+    IReadOnlyList<AzureBlobBlock> Uncommitted);
 
 public sealed record AzureBlobObject(
     string Key,

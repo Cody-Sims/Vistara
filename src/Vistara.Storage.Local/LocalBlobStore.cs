@@ -17,7 +17,7 @@ namespace Vistara.Storage.Local;
 /// and its ancestors must not be concurrently writable by untrusted principals;
 /// portable path APIs cannot eliminate directory-swap TOCTOU attacks otherwise.
 /// </remarks>
-public sealed class LocalBlobStore : IBlobStore
+public sealed class LocalBlobStore : IBlobStore, IDurableMultipartBlobStore
 {
     private static readonly byte[] FooterMagic = "VISTAR01"u8.ToArray();
     private const int FooterLength = 16;
@@ -356,6 +356,30 @@ public sealed class LocalBlobStore : IBlobStore
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(session);
         throw Unsupported("Local storage does not support multipart abort.");
+    }
+
+    public ValueTask<MultipartSession> GetOrCreateMultipartAsync(
+        string issuanceId,
+        MultipartRequest request,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentException.ThrowIfNullOrWhiteSpace(issuanceId);
+        ArgumentNullException.ThrowIfNull(request);
+        throw Unsupported(
+            "Local storage does not support durable multipart upload sessions.");
+    }
+
+    public ValueTask<MultipartInventory> InspectMultipartAsync(
+        MultipartSession session,
+        IReadOnlyList<UploadedPart> claimedParts,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(claimedParts);
+        throw Unsupported(
+            "Local storage does not support multipart upload inventory.");
     }
 
     public ValueTask<SignedAccessPlan> CreateReadGrantAsync(

@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Vistara.Application.Common.Storage;
 using Vistara.Storage.Azure;
 using Vistara.Storage.ConformanceTests.Fixtures;
@@ -276,7 +277,12 @@ public sealed class AzureBlobStoreTests
     public async Task Azure_multipart_uses_canonical_block_ids_and_stateless_abort()
     {
         RecordingAzureClient client = new();
-        client.CommitResult = Blob("contract/multipart", "abcdefgh");
+        client.CommitResult = Blob(
+            "contract/multipart",
+            "abcdefgh") with
+        {
+            ContentType = "image/jpeg",
+        };
         AzureBlobStore store = CreateStore(client);
         MultipartSession session = await store.BeginMultipartAsync(
             new MultipartRequest(
@@ -326,11 +332,13 @@ public sealed class AzureBlobStoreTests
                 BlobMetadata.Empty),
             CancellationToken.None);
         await store.AbortMultipartAsync(aborted, CancellationToken.None);
-        MultipartPartPlan replayed = await store.CreatePartPlanAsync(
-            aborted,
-            1,
-            CancellationToken.None);
-        Assert.Equal(1, replayed.PartNumber);
+        BlobStoreException abortedPlan =
+            await Assert.ThrowsAsync<BlobStoreException>(
+                async () => await store.CreatePartPlanAsync(
+                    aborted,
+                    1,
+                    CancellationToken.None));
+        Assert.Equal(BlobStoreErrorCode.InvalidRequest, abortedPlan.Code);
     }
 
     [Fact]
@@ -369,11 +377,382 @@ public sealed class AzureBlobStoreTests
     }
 
     [Fact]
+    public async Task Azure_durable_multipart_issuance_survives_serialization_and_a_new_instance()
+    {
+        RecordingAzureClient client = new();
+        MultipartRequest request = new(
+            new BlobKey("contract/durable-multipart"),
+            8,
+            new BlobMediaType("image/jpeg"),
+            null,
+            BlobRequestConditions.CreateOnly,
+            TimeSpan.FromMinutes(30),
+            TimeSpan.FromMinutes(5),
+            new BlobMetadata(
+            [
+                new("vistara-multipart-issuance-id", "mpi-azure-01"),
+            ]));
+        IDurableMultipartBlobStore first = Assert.IsAssignableFrom<
+            IDurableMultipartBlobStore>(CreateStore(client));
+
+        MultipartSession issued = await first.GetOrCreateMultipartAsync(
+            "mpi-azure-01",
+            request,
+            CancellationToken.None);
+        string persistedState = JsonSerializer.Deserialize<string>(
+            JsonSerializer.Serialize(issued.ProviderState))!;
+        MultipartSession persisted = new(
+            issued.UploadId,
+            issued.Key,
+            issued.ExpiresAtUtc,
+            issued.ContentLength,
+            issued.CompletionConditions,
+            issued.MaxParts,
+            issued.MinPartBytes,
+            issued.MaxPartBytes,
+            issued.PartPlanLifetime,
+            issued.ContentType,
+            issued.Checksum,
+            issued.Metadata,
+            persistedState);
+        IDurableMultipartBlobStore second = Assert.IsAssignableFrom<
+            IDurableMultipartBlobStore>(
+            CreateStore(
+                client,
+                options => options.TimeProvider =
+                    new FixedTimeProvider(Now.AddMinutes(2))));
+        MultipartSession recovered = await second.GetOrCreateMultipartAsync(
+            "mpi-azure-01",
+            request,
+            CancellationToken.None);
+
+        Assert.Equal(issued.UploadId, recovered.UploadId);
+        Assert.Equal(issued.ProviderState, recovered.ProviderState);
+        Assert.Equal(issued, persisted);
+        Assert.InRange(issued.ProviderState.Length, 1, 8_192);
+        Assert.DoesNotContain("sig=", issued.ProviderState, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("accountkey", issued.ProviderState, StringComparison.OrdinalIgnoreCase);
+        string decodedState = DecodeProviderState(issued.ProviderState);
+        Assert.DoesNotContain("sig=", decodedState, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("accountkey", decodedState, StringComparison.OrdinalIgnoreCase);
+        using CancellationTokenSource cancellation = new();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await second.GetOrCreateMultipartAsync(
+                "mpi-azure-cancelled",
+                request,
+                cancellation.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await second.InspectMultipartAsync(
+                persisted,
+                [],
+                cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Azure_durable_state_does_not_capture_connection_credentials()
+    {
+        const string secret = "super-secret-account-key";
+        RecordingAzureClient client = new();
+        AzureBlobStoreOptions options = new(
+            "account123",
+            "media",
+            new Uri("https://account123.blob.core.windows.net"))
+        {
+            CredentialMode = AzureBlobCredentialMode.ConnectionString,
+            ConnectionString =
+                $"DefaultEndpointsProtocol=https;AccountName=account123;AccountKey={secret};",
+            SasMode = AzureBlobSasMode.SharedKey,
+            AllowSharedKeySas = true,
+            TimeProvider = new FixedTimeProvider(Now),
+        };
+        AzureBlobStore store = new(options, new FixedFactory(client));
+
+        MultipartSession session = await store.GetOrCreateMultipartAsync(
+            "mpi-credential-check",
+            new MultipartRequest(
+                new BlobKey("contract/credential-check"),
+                8,
+                new BlobMediaType("image/jpeg"),
+                null,
+                BlobRequestConditions.CreateOnly,
+                TimeSpan.FromMinutes(30),
+                TimeSpan.FromMinutes(5),
+                BlobMetadata.Empty),
+            CancellationToken.None);
+
+        string decodedState = DecodeProviderState(session.ProviderState);
+        Assert.DoesNotContain(secret, session.ProviderState, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, decodedState, StringComparison.Ordinal);
+        Assert.DoesNotContain("accountKey", decodedState, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Azure_durable_inventory_completion_abort_and_recovery_use_new_instances()
+    {
+        RecordingAzureClient client = new()
+        {
+            CommitResult = Blob(
+                "contract/durable-recovery",
+                "abcdefgh") with
+            {
+                ContentType = "image/jpeg",
+            },
+        };
+        MultipartRequest request = new(
+            new BlobKey("contract/durable-recovery"),
+            8,
+            new BlobMediaType("image/jpeg"),
+            null,
+            BlobRequestConditions.CreateOnly,
+            TimeSpan.FromMinutes(30),
+            TimeSpan.FromMinutes(5),
+            BlobMetadata.Empty);
+        AzureBlobStore first = CreateStore(client);
+        MultipartSession issued = await first.GetOrCreateMultipartAsync(
+            "mpi-azure-recovery",
+            request,
+            CancellationToken.None);
+        MultipartPartPlan firstPart = await first.CreatePartPlanAsync(
+            issued,
+            1,
+            CancellationToken.None);
+        MultipartPartPlan secondPart = await first.CreatePartPlanAsync(
+            issued,
+            2,
+            CancellationToken.None);
+        string firstBlockId = client.SasRequests[^2].BlockId!;
+        string secondBlockId = client.SasRequests[^1].BlockId!;
+        client.BlockListResult = new AzureBlobBlockList(
+            [],
+            [
+                new AzureBlobBlock(firstBlockId, 4),
+                new AzureBlobBlock(secondBlockId, 4),
+            ]);
+        MultipartSession persisted = CloneSession(
+            issued,
+            providerState: JsonSerializer.Deserialize<string>(
+                JsonSerializer.Serialize(issued.ProviderState))!);
+        AzureBlobStore second = CreateStore(
+            client,
+            options => options.TimeProvider =
+                new FixedTimeProvider(Now.AddMinutes(2)));
+        UploadedPart[] claims =
+        [
+            new UploadedPart(
+                1,
+                new BlobEntityTag("\"first\""),
+                null,
+                5),
+            new UploadedPart(
+                2,
+                new BlobEntityTag("\"second\""),
+                null,
+                4),
+            new UploadedPart(
+                3,
+                new BlobEntityTag("\"not-uploaded\""),
+                null,
+                1),
+        ];
+
+        MultipartInventory active = await second.InspectMultipartAsync(
+            persisted,
+            claims,
+            CancellationToken.None);
+        MultipartCompletion completed = await second.CompleteMultipartAsync(
+            persisted,
+            active.Parts,
+            CancellationToken.None);
+
+        Assert.Equal(MultipartInventoryState.Active, active.State);
+        Assert.Equal([1, 2], active.Parts.Select(part => part.PartNumber));
+        Assert.Equal([4L, 4L], active.Parts.Select(part => part.SizeBytes));
+        Assert.Equal(issued.UploadId, firstPart.UploadId);
+        Assert.Equal(issued.UploadId, secondPart.UploadId);
+        Assert.Equal(persisted.Key, completed.Head.Identity.Key);
+
+        client.HeadResult = Blob(
+            "contract/durable-recovery",
+            "abcdefgh") with
+        {
+            ContentType = "image/jpeg",
+        };
+        client.BlockListResult = new AzureBlobBlockList(
+            [
+                new AzureBlobBlock(firstBlockId, 4),
+                new AzureBlobBlock(secondBlockId, 4),
+            ],
+            []);
+        AzureBlobStore recovering = CreateStore(
+            client,
+            options => options.TimeProvider =
+                new FixedTimeProvider(Now.AddMinutes(31)));
+        MultipartInventory recovered = await recovering.InspectMultipartAsync(
+            persisted,
+            active.Parts,
+            CancellationToken.None);
+        Assert.Equal(MultipartInventoryState.Completed, recovered.State);
+        Assert.Equal([1, 2], recovered.Parts.Select(part => part.PartNumber));
+
+        MultipartSession aborted = await first.GetOrCreateMultipartAsync(
+            "mpi-azure-aborted",
+            new MultipartRequest(
+                new BlobKey("contract/durable-aborted"),
+                4,
+                new BlobMediaType("image/jpeg"),
+                null,
+                BlobRequestConditions.CreateOnly,
+                TimeSpan.FromMinutes(30),
+                TimeSpan.FromMinutes(5),
+                BlobMetadata.Empty),
+            CancellationToken.None);
+        await recovering.AbortMultipartAsync(
+            aborted,
+            CancellationToken.None);
+        client.HeadResult = null;
+        MultipartInventory abortedInventory =
+            await recovering.InspectMultipartAsync(
+                aborted,
+                [],
+                CancellationToken.None);
+        Assert.Equal(MultipartInventoryState.Aborted, abortedInventory.State);
+    }
+
+    [Fact]
+    public async Task Azure_durable_state_rejects_tampering_and_cross_scope_use()
+    {
+        RecordingAzureClient client = new();
+        AzureBlobStore store = CreateStore(client);
+        MultipartSession session = await store.GetOrCreateMultipartAsync(
+            "mpi-azure-bound",
+            new MultipartRequest(
+                new BlobKey("contract/durable-bound"),
+                8,
+                new BlobMediaType("image/jpeg"),
+                null,
+                BlobRequestConditions.CreateOnly,
+                TimeSpan.FromMinutes(30),
+                TimeSpan.FromMinutes(5),
+                BlobMetadata.Empty),
+            CancellationToken.None);
+        MultipartSession tampered = CloneSession(
+            session,
+            providerState: Tamper(session.ProviderState));
+        MultipartSession crossKey = CloneSession(
+            session,
+            key: new BlobKey("contract/durable-other"));
+        MultipartSession crossUpload = CloneSession(
+            session,
+            uploadId: "different-upload");
+        AzureBlobStore crossContainer = CreateStore(
+            client,
+            options => options.ContainerName = "other-media");
+        MultipartSession malformed = CloneSession(
+            session,
+            providerState: "azure-multipart:v2:not-valid");
+
+        await AssertInvalidStateAsync(
+            () => store.CreatePartPlanAsync(
+                tampered,
+                1,
+                CancellationToken.None));
+        await AssertInvalidStateAsync(
+            () => store.CreatePartPlanAsync(
+                crossKey,
+                1,
+                CancellationToken.None));
+        await AssertInvalidStateAsync(
+            () => store.CreatePartPlanAsync(
+                crossUpload,
+                1,
+                CancellationToken.None));
+        await AssertInvalidStateAsync(
+            () => crossContainer.CreatePartPlanAsync(
+                session,
+                1,
+                CancellationToken.None));
+        await AssertInvalidStateAsync(
+            () => store.CreatePartPlanAsync(
+                malformed,
+                1,
+                CancellationToken.None));
+        await AssertInvalidStateAsync(
+            () => store.GetOrCreateMultipartAsync(
+                "mpi-azure-bound",
+                new MultipartRequest(
+                    new BlobKey("contract/durable-rebound"),
+                    8,
+                    new BlobMediaType("image/jpeg"),
+                    null,
+                    BlobRequestConditions.CreateOnly,
+                    TimeSpan.FromMinutes(30),
+                    TimeSpan.FromMinutes(5),
+                    BlobMetadata.Empty),
+                CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Azure_durable_completion_ambiguity_remains_reconcilable()
+    {
+        RecordingAzureClient client = new();
+        AzureBlobStore store = CreateStore(client);
+        MultipartSession session = await store.GetOrCreateMultipartAsync(
+            "mpi-azure-ambiguous",
+            new MultipartRequest(
+                new BlobKey("contract/durable-ambiguous"),
+                8,
+                new BlobMediaType("image/jpeg"),
+                null,
+                BlobRequestConditions.CreateOnly,
+                TimeSpan.FromMinutes(30),
+                TimeSpan.FromMinutes(5),
+                BlobMetadata.Empty),
+            CancellationToken.None);
+        client.TargetCommitError = new AzureBlobClientException(
+            AzureBlobClientErrorCode.OutcomeUnknown,
+            "provider response contained sensitive details");
+
+        BlobStoreException error = await Assert.ThrowsAsync<BlobStoreException>(
+            async () => await store.CompleteMultipartAsync(
+                session,
+                [
+                    new UploadedPart(
+                        1,
+                        new BlobEntityTag("\"one\""),
+                        null,
+                        4),
+                    new UploadedPart(
+                        2,
+                        new BlobEntityTag("\"two\""),
+                        null,
+                        4),
+                ],
+                CancellationToken.None));
+        MultipartInventory inventory = await store.InspectMultipartAsync(
+            session,
+            [],
+            CancellationToken.None);
+
+        Assert.Equal(BlobStoreErrorCode.OutcomeUnknown, error.Code);
+        Assert.DoesNotContain(
+            "sensitive",
+            error.Message,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(MultipartInventoryState.Active, inventory.State);
+    }
+
+    [Fact]
     public async Task Azure_multipart_session_survives_new_instances_and_replica_part_refresh()
     {
         RecordingAzureClient client = new()
         {
-            CommitResult = Blob("contract/multipart-restart", "abcdefgh"),
+            CommitResult = Blob(
+                "contract/multipart-restart",
+                "abcdefgh") with
+            {
+                ContentType = "image/jpeg",
+            },
         };
         MutableTimeProvider time = new(Now);
         AzureBlobStore first = CreateStore(
@@ -558,7 +937,7 @@ public sealed class AzureBlobStoreTests
         AzureBlobStoreOptions options =
             new(
                 "account123",
-                "media",
+                mutable.ContainerName,
                 new Uri("https://account123.blob.core.windows.net"))
             {
                 TokenCredential = new TestTokenCredential(),
@@ -606,8 +985,59 @@ public sealed class AzureBlobStoreTests
         return await reader.ReadToEndAsync(CancellationToken.None);
     }
 
+    private static MultipartSession CloneSession(
+        MultipartSession session,
+        string? uploadId = null,
+        BlobKey? key = null,
+        string? providerState = null) =>
+        new(
+            uploadId ?? session.UploadId,
+            key ?? session.Key,
+            session.ExpiresAtUtc,
+            session.ContentLength,
+            session.CompletionConditions,
+            session.MaxParts,
+            session.MinPartBytes,
+            session.MaxPartBytes,
+            session.PartPlanLifetime,
+            session.ContentType,
+            session.Checksum,
+            session.Metadata,
+            providerState ?? session.ProviderState);
+
+    private static string Tamper(string value)
+    {
+        int offset = value.IndexOf(':', value.IndexOf(':') + 1) + 1;
+        char replacement = value[offset] == 'a' ? 'b' : 'a';
+        return string.Concat(
+            value[..offset],
+            replacement,
+            value[(offset + 1)..]);
+    }
+
+    private static string DecodeProviderState(string value)
+    {
+        string encoded = value[(value.LastIndexOf(':') + 1)..]
+            .Replace('-', '+')
+            .Replace('_', '/');
+        encoded = encoded.PadRight(
+            encoded.Length + ((4 - (encoded.Length % 4)) % 4),
+            '=');
+        return Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
+    }
+
+    private static async Task AssertInvalidStateAsync<T>(
+        Func<ValueTask<T>> operation)
+    {
+        BlobStoreException error = await Assert.ThrowsAsync<BlobStoreException>(
+            async () => await operation());
+        Assert.Equal(BlobStoreErrorCode.InvalidRequest, error.Code);
+    }
+
     private sealed class MutableOptions
     {
+        public string ContainerName { get; set; } = "media";
+
         public int TransferBlockBytes { get; set; } = 4 * 1024 * 1024;
 
         public TimeSpan CopyPollInterval { get; set; } = TimeSpan.FromMilliseconds(250);
@@ -639,6 +1069,11 @@ public sealed class AzureBlobStoreTests
 
     private sealed class RecordingAzureClient : AzureBlobClientBase
     {
+        private readonly Dictionary<(string Key, string BlockId), byte[]>
+            _stagedBlocks = [];
+        private readonly Dictionary<string, StoredControlBlob> _controlBlobs =
+            new(StringComparer.Ordinal);
+        private long _controlVersion;
         public string? HeadKey { get; private set; }
         public string? DownloadKey { get; private set; }
         public AzureBlobRange? DownloadRange { get; private set; }
@@ -654,6 +1089,7 @@ public sealed class AzureBlobStoreTests
         public AzureBlobDeleteResult DeleteResult { get; set; } =
             new(false, null);
         public AzureBlobClientException? HeadError { get; set; }
+        public AzureBlobClientException? TargetCommitError { get; set; }
         public Uri? SasUri { get; set; }
         public Func<string, Uri>? BlobUriFactory { get; set; }
         public List<AzureBlobObject> ListResults { get; set; } = [];
@@ -665,6 +1101,8 @@ public sealed class AzureBlobStoreTests
         public Queue<AzureBlobCopyState> CopyStates { get; } = new();
         public AzureBlobCopyState DefaultCopyState { get; set; } =
             new(AzureBlobCopyStatus.Success, null);
+        public AzureBlobBlockList BlockListResult { get; set; } =
+            new([], []);
 
         public override ValueTask<AzureBlobObject?> HeadAsync(
             string key,
@@ -679,6 +1117,16 @@ public sealed class AzureBlobStoreTests
 
             HeadKey = key;
             HeadConditions = conditions;
+            if (IsControlKey(key))
+            {
+                _controlBlobs.TryGetValue(
+                    key,
+                    out StoredControlBlob? control);
+                CheckControlConditions(control, conditions);
+                return ValueTask.FromResult<AzureBlobObject?>(
+                    control?.Descriptor);
+            }
+
             return ValueTask.FromResult(HeadResult);
         }
 
@@ -692,6 +1140,25 @@ public sealed class AzureBlobStoreTests
             DownloadKey = key;
             DownloadRange = range;
             DownloadConditions = conditions;
+            if (IsControlKey(key))
+            {
+                if (!_controlBlobs.TryGetValue(
+                        key,
+                        out StoredControlBlob? control))
+                {
+                    throw new AzureBlobClientException(
+                        AzureBlobClientErrorCode.NotFound,
+                        "Control blob not found.");
+                }
+
+                CheckControlConditions(control, conditions);
+                return ValueTask.FromResult(new AzureBlobDownload(
+                    new MemoryStream(control.Content, writable: false),
+                    control.Descriptor,
+                    null,
+                    control.Content.LongLength));
+            }
+
             return ValueTask.FromResult(DownloadResult!);
         }
 
@@ -704,8 +1171,18 @@ public sealed class AzureBlobStoreTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             StagedBlockIds.Add(blockId);
-            StagedContents.Add(await ReadAsync(content));
+            string value = await ReadAsync(content);
+            StagedContents.Add(value);
             StagedMd5.Add(contentMd5);
+            _stagedBlocks[(key, blockId)] = Encoding.UTF8.GetBytes(value);
+        }
+
+        public override ValueTask<AzureBlobBlockList> GetBlockListAsync(
+            string key,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(BlockListResult);
         }
 
         public override ValueTask<AzureBlobObject> CommitBlockListAsync(
@@ -715,9 +1192,59 @@ public sealed class AzureBlobStoreTests
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (IsControlKey(key))
+            {
+                _controlBlobs.TryGetValue(
+                    key,
+                    out StoredControlBlob? existing);
+                CheckControlConditions(existing, options.Conditions);
+                using MemoryStream content = new();
+                foreach (string blockId in blockIds)
+                {
+                    if (!_stagedBlocks.TryGetValue(
+                            (key, blockId),
+                            out byte[]? block))
+                    {
+                        throw new AzureBlobClientException(
+                            AzureBlobClientErrorCode.InvalidRequest,
+                            "Control block not found.");
+                    }
+
+                    content.Write(block);
+                }
+
+                byte[] bytes = content.ToArray();
+                string version =
+                    $"\"control-{Interlocked.Increment(ref _controlVersion)}\"";
+                AzureBlobObject descriptor = new(
+                    key,
+                    bytes.LongLength,
+                    options.ContentType,
+                    Now,
+                    version,
+                    version,
+                    null,
+                    options.Metadata);
+                _controlBlobs[key] = new StoredControlBlob(bytes, descriptor);
+                return ValueTask.FromResult(descriptor);
+            }
+
+            if (TargetCommitError is not null)
+            {
+                throw TargetCommitError;
+            }
+
             CommittedBlockIds = blockIds.ToArray();
             CommitOptions = options;
-            return ValueTask.FromResult(CommitResult!);
+            AzureBlobObject result = CommitResult!;
+            return ValueTask.FromResult(result with
+            {
+                ContentType = options.ContentType,
+                ContentMd5 = options.ContentMd5.Length == 0
+                    ? result.ContentMd5
+                    : options.ContentMd5,
+                Metadata = options.Metadata,
+            });
         }
 
         public override ValueTask<AzureBlobCopyState> StartCopyAsync(
@@ -784,6 +1311,32 @@ public sealed class AzureBlobStoreTests
             CopyStates.TryDequeue(out AzureBlobCopyState? state)
                 ? state
                 : DefaultCopyState;
+
+        private static bool IsControlKey(string key) =>
+            key.StartsWith(
+                "vistara-internal/multipart/v1/",
+                StringComparison.Ordinal);
+
+        private static void CheckControlConditions(
+            StoredControlBlob? blob,
+            AzureBlobConditions conditions)
+        {
+            if ((conditions.RequireMissing && blob is not null) ||
+                (conditions.IfMatch is not null &&
+                 !string.Equals(
+                     blob?.Descriptor.EntityTag,
+                     conditions.IfMatch,
+                     StringComparison.Ordinal)))
+            {
+                throw new AzureBlobClientException(
+                    AzureBlobClientErrorCode.PreconditionFailed,
+                    "Control blob precondition failed.");
+            }
+        }
+
+        private sealed record StoredControlBlob(
+            byte[] Content,
+            AzureBlobObject Descriptor);
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider

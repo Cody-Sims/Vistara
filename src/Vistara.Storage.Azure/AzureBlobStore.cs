@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -9,7 +10,7 @@ using TokenCredential = global::Azure.Core.TokenCredential;
 
 namespace Vistara.Storage.Azure;
 
-public sealed class AzureBlobStore : IBlobStore
+public sealed class AzureBlobStore : IBlobStore, IDurableMultipartBlobStore
 {
     private const string Sha256MetadataKey = "vistara_sha256";
     private const string UserMetadataPrefix = "vistara_m_";
@@ -457,6 +458,11 @@ public sealed class AzureBlobStore : IBlobStore
                 throw Map(error, "Azure Blob listing failed.");
             }
 
+            if (AzureDurableMultipartState.IsControlKey(blob.Key))
+            {
+                continue;
+            }
+
             cancellationToken.ThrowIfCancellationRequested();
             BlobKey key;
             try
@@ -536,37 +542,206 @@ public sealed class AzureBlobStore : IBlobStore
 
     public ValueTask<MultipartSession> BeginMultipartAsync(
         MultipartRequest request,
+        CancellationToken cancellationToken) =>
+        GetOrCreateMultipartCoreAsync(
+            $"begin-{Guid.CreateVersion7():N}",
+            request,
+            cancellationToken);
+
+    public ValueTask<MultipartSession> GetOrCreateMultipartAsync(
+        string issuanceId,
+        MultipartRequest request,
+        CancellationToken cancellationToken) =>
+        GetOrCreateMultipartCoreAsync(
+            issuanceId,
+            request,
+            cancellationToken);
+
+    public async ValueTask<MultipartInventory> InspectMultipartAsync(
+        MultipartSession session,
+        IReadOnlyList<UploadedPart> claimedParts,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(claimedParts);
+        ValidatedAzureSession validated = ValidateSession(
+            session,
+            requireActive: false);
+        if (claimedParts.Count > session.MaxParts)
+        {
+            throw InvalidRequest(
+                "The claimed multipart part count exceeds the session limit.");
+        }
+
+        AzureMarkerHandle marker = await RequireMarkerAsync(
+            validated.Identity,
+            cancellationToken);
+        BlobHead? completed = await HeadAsync(session.Key, cancellationToken);
+        if (completed is not null)
+        {
+            ValidateCompletedInventory(session, completed);
+        }
+
+        if (completed is null &&
+            marker.Marker.Status == AzureDurableMultipartState.Aborted)
+        {
+            return new MultipartInventory(
+                MultipartInventoryState.Aborted,
+                []);
+        }
+
+        AzureBlobBlockList blockList;
+        try
+        {
+            blockList = await _client.GetBlockListAsync(
+                session.Key.Value,
+                cancellationToken);
+        }
+        catch (AzureBlobClientException error)
+            when (error.Code == AzureBlobClientErrorCode.NotFound)
+        {
+            if (completed is not null)
+            {
+                return new MultipartInventory(
+                    MultipartInventoryState.Completed,
+                    [],
+                    completed);
+            }
+
+            return marker.Marker.Status == AzureDurableMultipartState.Completed
+                ? new MultipartInventory(MultipartInventoryState.Missing, [])
+                : new MultipartInventory(MultipartInventoryState.Active, []);
+        }
+        catch (AzureBlobClientException error)
+        {
+            throw Map(error, "Azure Blob multipart inventory failed.");
+        }
+
+        if (completed is not null)
+        {
+            ValidateCompletedInventory(session, completed);
+            return new MultipartInventory(
+                MultipartInventoryState.Completed,
+                MatchClaimedBlocks(
+                    session,
+                    claimedParts,
+                    blockList.Committed),
+                completed);
+        }
+
+        if (marker.Marker.Status == AzureDurableMultipartState.Completed)
+        {
+            return new MultipartInventory(
+                MultipartInventoryState.Missing,
+                []);
+        }
+
+        return new MultipartInventory(
+            MultipartInventoryState.Active,
+            MatchClaimedBlocks(
+                session,
+                claimedParts,
+                blockList.Uncommitted));
+    }
+
+    private async ValueTask<MultipartSession> GetOrCreateMultipartCoreAsync(
+        string issuanceId,
+        MultipartRequest request,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(request);
+        DateTimeOffset expiresAt = ValidateMultipartRequest(request);
+        string issuanceHash =
+            AzureDurableMultipartState.IssuanceHash(issuanceId);
+        string markerKey =
+            AzureDurableMultipartState.ControlKey(issuanceHash);
+        AzureMarkerHandle? existing = await ReadMarkerAsync(
+            markerKey,
+            cancellationToken);
+        if (existing is not null)
+        {
+            AzureDurableMultipartState.ValidateConfiguration(
+                existing.Marker.Identity,
+                _options);
+            AzureDurableMultipartState.ValidateRequest(
+                existing.Marker.Identity,
+                request);
+            return CreateSession(existing.Marker.Identity, request);
+        }
+
+        AzureMultipartIdentity identity =
+            AzureDurableMultipartState.CreateIdentity(
+                _options,
+                issuanceHash,
+                request,
+                Guid.CreateVersion7().ToString("N"),
+                expiresAt);
+        var marker = new AzureMultipartMarker(
+            identity,
+            AzureDurableMultipartState.Active);
+        try
+        {
+            _ = await WriteMarkerAsync(
+                marker,
+                new AzureBlobConditions(RequireMissing: true),
+                cancellationToken);
+            return CreateSession(identity, request);
+        }
+        catch (BlobStoreException error)
+            when (error.Code is BlobStoreErrorCode.PreconditionFailed or
+                BlobStoreErrorCode.OutcomeUnknown)
+        {
+            AzureMarkerHandle? winner = await ReadMarkerAsync(
+                markerKey,
+                cancellationToken);
+            if (winner is null)
+            {
+                throw;
+            }
+
+            AzureDurableMultipartState.ValidateConfiguration(
+                winner.Marker.Identity,
+                _options);
+            AzureDurableMultipartState.ValidateRequest(
+                winner.Marker.Identity,
+                request);
+            return CreateSession(winner.Marker.Identity, request);
+        }
+    }
+
+    private DateTimeOffset ValidateMultipartRequest(MultipartRequest request)
+    {
         ValidateKey(request.Key);
         ValidateMetadata(request.Metadata);
         ValidateChecksum(request.Checksum);
         ValidateMultipartLifetimes(request);
         if (request.ContentLength > Capabilities.Limits.MaxObjectBytes)
         {
-            throw InvalidRequest("The multipart upload exceeds Azure Blob adapter limits.");
+            throw InvalidRequest(
+                "The multipart upload exceeds Azure Blob adapter limits.");
         }
 
-        DateTimeOffset expiresAt =
-            _options.TimeProvider.GetUtcNow() + request.SessionLifetime;
-        string uploadId = Guid.NewGuid().ToString("N");
-        return ValueTask.FromResult(new MultipartSession(
-            uploadId,
+        return _options.TimeProvider.GetUtcNow() + request.SessionLifetime;
+    }
+
+    private static MultipartSession CreateSession(
+        AzureMultipartIdentity identity,
+        MultipartRequest request) =>
+        new(
+            identity.UploadId,
             request.Key,
-            expiresAt,
+            AzureDurableMultipartState.ExpiresAt(identity),
             request.ContentLength,
             request.Conditions,
-            MaximumBlocks,
-            1,
-            MaximumBlockBytes,
+            identity.MaxParts,
+            identity.MinPartBytes,
+            identity.MaxPartBytes,
             request.PartPlanLifetime,
             request.ContentType,
             request.Checksum,
             request.Metadata,
-            ProviderState(uploadId)));
-    }
+            AzureDurableMultipartState.Encode(identity));
 
     public async ValueTask<MultipartPartPlan> CreatePartPlanAsync(
         MultipartSession session,
@@ -574,7 +749,11 @@ public sealed class AzureBlobStore : IBlobStore
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        ValidateSession(session);
+        ValidatedAzureSession validated = ValidateSession(session);
+        AzureMarkerHandle marker = await RequireMarkerAsync(
+            validated.Identity,
+            cancellationToken);
+        EnsureMarkerActive(marker.Marker);
         ArgumentOutOfRangeException.ThrowIfLessThan(partNumber, 1);
         if (partNumber > session.MaxParts)
         {
@@ -607,7 +786,28 @@ public sealed class AzureBlobStore : IBlobStore
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        ValidateSession(session, requireActive: false);
+        ValidatedAzureSession validated = ValidateSession(
+            session,
+            requireActive: false);
+        AzureMarkerHandle marker = await RequireMarkerAsync(
+            validated.Identity,
+            cancellationToken);
+        if (marker.Marker.Status == AzureDurableMultipartState.Completed)
+        {
+            BlobHead? existing = await HeadAsync(
+                session.Key,
+                cancellationToken);
+            if (existing is null)
+            {
+                throw OutcomeUnknown(
+                    "The Azure multipart completion marker exists without its blob.");
+            }
+
+            ValidateCompletedInventory(session, existing);
+            return new MultipartCompletion(existing);
+        }
+
+        EnsureMarkerActive(marker.Marker);
         ArgumentNullException.ThrowIfNull(parts);
         ValidateParts(session, parts);
         List<string> blockIds = parts
@@ -639,7 +839,13 @@ public sealed class AzureBlobStore : IBlobStore
                     metadata,
                     ToAzureConditions(session.CompletionConditions)),
                 cancellationToken);
-            return new MultipartCompletion(ToHead(session.Key, result));
+            BlobHead head = ToHead(session.Key, result);
+            ValidateCompletedInventory(session, head);
+            await UpdateMarkerStatusAsync(
+                marker,
+                AzureDurableMultipartState.Completed,
+                cancellationToken);
+            return new MultipartCompletion(head);
         }
         catch (AzureBlobClientException error)
         {
@@ -647,13 +853,27 @@ public sealed class AzureBlobStore : IBlobStore
         }
     }
 
-    public ValueTask AbortMultipartAsync(
+    public async ValueTask AbortMultipartAsync(
         MultipartSession session,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        ValidateSession(session, requireActive: false);
-        return ValueTask.CompletedTask;
+        ValidatedAzureSession validated = ValidateSession(
+            session,
+            requireActive: false);
+        AzureMarkerHandle marker = await RequireMarkerAsync(
+            validated.Identity,
+            cancellationToken);
+        if (marker.Marker.Status == AzureDurableMultipartState.Aborted)
+        {
+            return;
+        }
+
+        EnsureMarkerActive(marker.Marker);
+        await UpdateMarkerStatusAsync(
+            marker,
+            AzureDurableMultipartState.Aborted,
+            cancellationToken);
     }
 
     public async ValueTask<SignedAccessPlan> CreateReadGrantAsync(
@@ -701,7 +921,7 @@ public sealed class AzureBlobStore : IBlobStore
             options.Range);
     }
 
-    private void ValidateSession(
+    private ValidatedAzureSession ValidateSession(
         MultipartSession session,
         bool requireActive = true)
     {
@@ -709,11 +929,11 @@ public sealed class AzureBlobStore : IBlobStore
         ValidateKey(session.Key);
         ValidateMetadata(session.Metadata);
         ValidateChecksum(session.Checksum);
-        if (!string.Equals(
-                session.ProviderState,
-                ProviderState(session.UploadId),
-                StringComparison.Ordinal) ||
-            session.ContentLength > Capabilities.Limits.MaxObjectBytes ||
+        AzureMultipartIdentity identity =
+            AzureDurableMultipartState.Decode(session.ProviderState);
+        AzureDurableMultipartState.ValidateConfiguration(identity, _options);
+        AzureDurableMultipartState.ValidateSession(identity, session);
+        if (session.ContentLength > Capabilities.Limits.MaxObjectBytes ||
             session.MaxParts != MaximumBlocks ||
             session.MinPartBytes != 1 ||
             session.MaxPartBytes != MaximumBlockBytes ||
@@ -729,6 +949,291 @@ public sealed class AzureBlobStore : IBlobStore
         {
             throw InvalidRequest("The Azure Blob multipart session has expired.");
         }
+
+        return new ValidatedAzureSession(identity);
+    }
+
+    private async ValueTask<AzureMarkerHandle> RequireMarkerAsync(
+        AzureMultipartIdentity identity,
+        CancellationToken cancellationToken)
+    {
+        AzureMarkerHandle? handle = await ReadMarkerAsync(
+            identity.MarkerKey,
+            cancellationToken);
+        if (handle is null)
+        {
+            throw InvalidRequest(
+                "The durable Azure multipart provider state is no longer recognized.");
+        }
+
+        AzureDurableMultipartState.ValidateMarkerIdentity(
+            identity,
+            handle.Marker.Identity);
+        return handle;
+    }
+
+    private async ValueTask<AzureMarkerHandle?> ReadMarkerAsync(
+        string markerKey,
+        CancellationToken cancellationToken)
+    {
+        AzureBlobDownload download;
+        try
+        {
+            download = await _client.DownloadAsync(
+                markerKey,
+                range: null,
+                new AzureBlobConditions(),
+                cancellationToken);
+        }
+        catch (AzureBlobClientException error)
+            when (error.Code == AzureBlobClientErrorCode.NotFound)
+        {
+            return null;
+        }
+        catch (AzureBlobClientException error)
+        {
+            throw Map(error, "Azure Blob multipart control lookup failed.");
+        }
+
+        await using Stream content = download.Content;
+        if (download.Range is not null ||
+            !string.Equals(
+                download.Blob.Key,
+                markerKey,
+                StringComparison.Ordinal) ||
+            download.Blob.ContentLength is <= 0 or > 16 * 1024)
+        {
+            throw InvalidRequest(
+                "The durable Azure multipart control record is invalid.");
+        }
+
+        byte[] bytes = new byte[checked((int)download.Blob.ContentLength)];
+        try
+        {
+            await content.ReadExactlyAsync(bytes, cancellationToken);
+            if (await content.ReadAsync(new byte[1], cancellationToken) != 0)
+            {
+                throw InvalidRequest(
+                    "The durable Azure multipart control record is invalid.");
+            }
+        }
+        catch (EndOfStreamException error)
+        {
+            throw new BlobStoreException(
+                BlobStoreErrorCode.IntegrityMismatch,
+                "The durable Azure multipart control record was truncated.",
+                error);
+        }
+
+        return new AzureMarkerHandle(
+            AzureDurableMultipartState.DecodeMarker(bytes),
+            download.Blob.EntityTag);
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Security",
+        "CA5351:Do Not Use Broken Cryptographic Algorithms",
+        Justification = "Azure Blob MD5 values are transport integrity checks, not security primitives.")]
+    private async ValueTask<AzureMarkerHandle> WriteMarkerAsync(
+        AzureMultipartMarker marker,
+        AzureBlobConditions conditions,
+        CancellationToken cancellationToken)
+    {
+        byte[] bytes = AzureDurableMultipartState.EncodeMarker(marker);
+        string blockId = Convert.ToBase64String(SHA256.HashData(bytes));
+        using MemoryStream content = new(bytes, writable: false);
+        try
+        {
+            await _client.StageBlockAsync(
+                marker.Identity.MarkerKey,
+                blockId,
+                content,
+                MD5.HashData(bytes),
+                cancellationToken);
+            AzureBlobObject result = await _client.CommitBlockListAsync(
+                marker.Identity.MarkerKey,
+                [blockId],
+                new AzureBlobCommitOptions(
+                    "application/vnd.vistara.multipart-state+json",
+                    [],
+                    new Dictionary<string, string>(StringComparer.Ordinal),
+                    conditions),
+                cancellationToken);
+            if (!string.Equals(
+                    result.Key,
+                    marker.Identity.MarkerKey,
+                    StringComparison.Ordinal))
+            {
+                throw new BlobStoreException(
+                    BlobStoreErrorCode.IntegrityMismatch,
+                    "Azure Blob returned a different multipart control key.");
+            }
+
+            return new AzureMarkerHandle(marker, result.EntityTag);
+        }
+        catch (AzureBlobClientException error)
+        {
+            throw Map(error, "Azure Blob multipart control update failed.");
+        }
+    }
+
+    private async ValueTask UpdateMarkerStatusAsync(
+        AzureMarkerHandle current,
+        string status,
+        CancellationToken cancellationToken)
+    {
+        if (current.Marker.Status == status)
+        {
+            return;
+        }
+
+        if (current.Marker.Status != AzureDurableMultipartState.Active)
+        {
+            throw InvalidRequest(
+                "The durable Azure multipart control record is not active.");
+        }
+
+        var updated = current.Marker with
+        {
+            Status = status,
+        };
+        try
+        {
+            _ = await WriteMarkerAsync(
+                updated,
+                new AzureBlobConditions(current.EntityTag),
+                cancellationToken);
+        }
+        catch (BlobStoreException error)
+            when (error.Code == BlobStoreErrorCode.PreconditionFailed)
+        {
+            AzureMarkerHandle observed;
+            try
+            {
+                observed = await RequireMarkerAsync(
+                    current.Marker.Identity,
+                    cancellationToken);
+            }
+            catch (BlobStoreException lookupError)
+            {
+                throw OutcomeUnknown(
+                    "The durable Azure multipart status update could not be reconciled.",
+                    lookupError);
+            }
+
+            if (observed.Marker.Status != status)
+            {
+                throw OutcomeUnknown(
+                    "The durable Azure multipart status update raced another operation.",
+                    error);
+            }
+        }
+    }
+
+    private static void EnsureMarkerActive(AzureMultipartMarker marker)
+    {
+        if (marker.Status != AzureDurableMultipartState.Active)
+        {
+            throw InvalidRequest(
+                "The durable Azure multipart session is no longer active.");
+        }
+    }
+
+    private static ReadOnlyCollection<UploadedPart> MatchClaimedBlocks(
+        MultipartSession session,
+        IReadOnlyList<UploadedPart> claimedParts,
+        IReadOnlyList<AzureBlobBlock> blocks)
+    {
+        Dictionary<string, AzureBlobBlock> byName;
+        try
+        {
+            byName = blocks.ToDictionary(
+                block => block.Name,
+                block => block,
+                StringComparer.Ordinal);
+        }
+        catch (ArgumentException error)
+        {
+            throw new BlobStoreException(
+                BlobStoreErrorCode.IntegrityMismatch,
+                "Azure Blob returned duplicate multipart block identifiers.",
+                error);
+        }
+
+        var matched = new List<UploadedPart>(claimedParts.Count);
+        foreach (UploadedPart claimed in claimedParts)
+        {
+            string blockId = CreateBlockId(
+                session.UploadId,
+                claimed.PartNumber);
+            if (!byName.TryGetValue(blockId, out AzureBlobBlock? observed))
+            {
+                continue;
+            }
+
+            if (observed.SizeBytes <= 0 ||
+                observed.SizeBytes > session.MaxPartBytes)
+            {
+                throw new BlobStoreException(
+                    BlobStoreErrorCode.IntegrityMismatch,
+                    "Azure Blob returned an invalid multipart block size.");
+            }
+
+            matched.Add(new UploadedPart(
+                claimed.PartNumber,
+                claimed.EntityTag,
+                claimed.Checksum,
+                observed.SizeBytes));
+        }
+
+        return matched.AsReadOnly();
+    }
+
+    private static void ValidateCompletedInventory(
+        MultipartSession session,
+        BlobHead head)
+    {
+        if (head.Identity.Key != session.Key ||
+            head.Properties.ContentLength != session.ContentLength ||
+            head.Properties.ContentType != session.ContentType ||
+            session.Metadata.AsReadOnly().Any(pair =>
+                !head.Properties.Metadata.TryGetValue(
+                    pair.Key,
+                    out string? value) ||
+                !string.Equals(value, pair.Value, StringComparison.Ordinal)) ||
+            (session.Checksum is not null &&
+             !CompletedChecksumMatches(
+                 session.Checksum,
+                 head.Properties.Checksums)))
+        {
+            throw new BlobStoreException(
+                BlobStoreErrorCode.IntegrityMismatch,
+                "The completed Azure multipart blob does not match its session.");
+        }
+    }
+
+    private static bool CompletedChecksumMatches(
+        BlobChecksum expected,
+        IReadOnlyList<BlobChecksum> observed)
+    {
+        BlobChecksum? actual = observed.SingleOrDefault(
+            checksum => checksum.Algorithm == expected.Algorithm);
+        if (actual is null)
+        {
+            return false;
+        }
+
+        if (expected.Algorithm != BlobChecksumAlgorithm.Md5)
+        {
+            return string.Equals(
+                expected.Value,
+                actual.Value,
+                StringComparison.Ordinal);
+        }
+
+        return CryptographicOperations.FixedTimeEquals(
+            Convert.FromBase64String(NormalizeMd5(expected.Value)),
+            Convert.FromBase64String(NormalizeMd5(actual.Value)));
     }
 
     private DateTimeOffset PartPlanExpiry(MultipartSession session)
@@ -1059,15 +1564,14 @@ public sealed class AzureBlobStore : IBlobStore
         ValidateLifetime(request.PartPlanLifetime);
     }
 
-    private static string ProviderState(string uploadId) =>
-        $"azure-block:v1:{uploadId}";
-
     private static void ValidateKey(BlobKey key)
     {
         ArgumentNullException.ThrowIfNull(key);
-        if (Encoding.UTF8.GetByteCount(key.Value) > 1_024)
+        if (Encoding.UTF8.GetByteCount(key.Value) > 1_024 ||
+            AzureDurableMultipartState.IsControlKey(key.Value))
         {
-            throw InvalidRequest("The Azure Blob key exceeds 1,024 UTF-8 bytes.");
+            throw InvalidRequest(
+                "The Azure Blob key is too long or uses a reserved internal prefix.");
         }
     }
 
@@ -1079,6 +1583,7 @@ public sealed class AzureBlobStore : IBlobStore
         }
 
         if (Encoding.UTF8.GetByteCount(prefix) > 1_024 ||
+            AzureDurableMultipartState.IsControlKey(prefix) ||
             (prefix.Length > 0 && prefix[0] == '/') ||
             prefix.Contains("//", StringComparison.Ordinal) ||
             prefix.Split('/').Any(segment => segment is "." or "..") ||
@@ -1120,9 +1625,17 @@ public sealed class AzureBlobStore : IBlobStore
     private static BlobStoreException IntegrityMismatch(string message) =>
         new(BlobStoreErrorCode.IntegrityMismatch, message);
 
-    private static BlobStoreException OutcomeUnknown(string message) =>
-        new(BlobStoreErrorCode.OutcomeUnknown, message);
+    private static BlobStoreException OutcomeUnknown(
+        string message,
+        Exception? error = null) =>
+        new(BlobStoreErrorCode.OutcomeUnknown, message, error);
 
+    private sealed record ValidatedAzureSession(
+        AzureMultipartIdentity Identity);
+
+    private sealed record AzureMarkerHandle(
+        AzureMultipartMarker Marker,
+        string EntityTag);
 }
 
 internal sealed class AzureSdkBlobClientFactory : IAzureBlobClientFactory
