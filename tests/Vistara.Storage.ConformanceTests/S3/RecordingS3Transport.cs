@@ -16,6 +16,7 @@ internal sealed class RecordingS3Transport : IS3Transport
     public List<S3PresignCommand> PresignCommands { get; } = [];
 
     public S3ReadResult? ReadResult { get; init; }
+    public Func<S3GetCommand, S3ReadResult>? ReadResultFactory { get; init; }
     public S3TransportException? HeadException { get; init; }
     public S3TransportException? CompleteException { get; init; }
 
@@ -41,7 +42,9 @@ internal sealed class RecordingS3Transport : IS3Transport
         cancellationToken.ThrowIfCancellationRequested();
         GetCommands.Add(command);
         return ValueTask.FromResult(
-            ReadResult ?? CreateReadResult("payload", command.Key));
+            ReadResultFactory?.Invoke(command) ??
+            ReadResult ??
+            CreateReadResult("payload", command.Key));
     }
 
     public async ValueTask<S3ObjectDescriptor> PutAsync(

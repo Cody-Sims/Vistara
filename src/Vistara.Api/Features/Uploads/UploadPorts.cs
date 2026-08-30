@@ -262,6 +262,7 @@ public sealed record UploadIssuance
 public enum UploadWriteStatus
 {
     Written,
+    Replayed,
     VersionConflict,
     InvalidState,
     Expired,
@@ -276,6 +277,9 @@ public sealed record UploadWriteResult(
 {
     public static UploadWriteResult Written(UploadSessionSnapshot session) =>
         new(UploadWriteStatus.Written, session);
+
+    public static UploadWriteResult Replayed(UploadSessionSnapshot session) =>
+        new(UploadWriteStatus.Replayed, session);
 
     public static UploadWriteResult Failure(UploadWriteStatus status) =>
         new(status, null);

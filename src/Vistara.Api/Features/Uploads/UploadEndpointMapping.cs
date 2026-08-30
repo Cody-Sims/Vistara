@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -8,6 +9,7 @@ namespace Vistara.Api.Features.Uploads;
 public static class UploadEndpointMapping
 {
     public const string UploadPolicyName = "Vistara.Uploads";
+    public const long MaximumProxyRequestBodyBytes = 50L * 1024 * 1024;
 
     public static IEndpointRouteBuilder MapVistaraUploads(
         this IEndpointRouteBuilder endpoints)
@@ -36,7 +38,9 @@ public static class UploadEndpointMapping
                     ResolveApplication(context),
                     context.RequestServices.GetRequiredService<
                         Vistara.Application.Common.IClock>(),
-                    cancellationToken)));
+                    cancellationToken))
+            .WithMetadata(new RequestSizeLimitAttribute(
+                MaximumProxyRequestBodyBytes)));
         Map(endpoints.MapGet(
             "/api/v1/uploads/{id:guid}",
             (Guid id, HttpContext context, CancellationToken cancellationToken) =>
@@ -65,8 +69,6 @@ public static class UploadEndpointMapping
                     id,
                     ResolveAuthorization(context),
                     ResolveApplication(context),
-                    context.RequestServices.GetRequiredService<
-                        Vistara.Application.Common.IClock>(),
                     cancellationToken)));
         Map(endpoints.MapDelete(
             "/api/v1/uploads/{id:guid}",

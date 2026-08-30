@@ -328,6 +328,43 @@ public sealed class S3BlobStoreTests
     }
 
     [Fact]
+    public async Task Native_source_checksum_must_match_the_verified_promotion_checksum()
+    {
+        RecordingS3Transport transport = new()
+        {
+            ReadResult = new S3ReadResult(
+                new MemoryStream("payload"u8.ToArray(), writable: false),
+                new S3ObjectDescriptor(
+                    "source",
+                    7,
+                    "image/jpeg",
+                    Now,
+                    "\"source\"",
+                    [
+                        new S3ChecksumValue(
+                            BlobChecksumAlgorithm.Sha256,
+                            new string('a', 64)),
+                    ],
+                    new Dictionary<string, string>()),
+                null),
+        };
+        S3BlobStore store = CreateStore(S3ProviderKind.Aws, transport);
+
+        BlobStoreException error = await Assert.ThrowsAsync<BlobStoreException>(
+            async () => await store.CopyAsync(
+                new BlobKey("source"),
+                new BlobKey("destination"),
+                new BlobCopyOptions(
+                    DestinationConditions: BlobRequestConditions.CreateOnly,
+                    ReplacementMetadata: new BlobMetadata(
+                        [new("vistara-sha256", new string('b', 64))])),
+                CancellationToken.None));
+
+        Assert.Equal(BlobStoreErrorCode.IntegrityMismatch, error.Code);
+        Assert.Empty(transport.PutCommands);
+    }
+
+    [Fact]
     public async Task Destination_create_only_copy_is_unsupported_without_atomic_create()
     {
         RecordingS3Transport transport = new();
@@ -375,6 +412,135 @@ public sealed class S3BlobStoreTests
                 CancellationToken.None));
 
         Assert.Equal(BlobStoreErrorCode.Unsupported, error.Code);
+        Assert.Empty(transport.PutCommands);
+    }
+
+    [Theory]
+    [InlineData(S3ProviderKind.Aws)]
+    [InlineData(S3ProviderKind.Minio)]
+    public async Task Multipart_source_without_native_checksum_is_verified_before_promotion(
+        S3ProviderKind provider)
+    {
+        const string content = "multipart payload";
+        string checksum = Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(
+                Encoding.UTF8.GetBytes(content)));
+        RecordingS3Transport transport = new()
+        {
+            ReadResultFactory = command => new S3ReadResult(
+                new MemoryStream(Encoding.UTF8.GetBytes(content), writable: false),
+                new S3ObjectDescriptor(
+                    command.Key,
+                    content.Length,
+                    "image/jpeg",
+                    Now,
+                    "\"multipart-source\"",
+                    [],
+                    new Dictionary<string, string>()),
+                null),
+        };
+        S3BlobStore store = CreateStore(provider, transport);
+
+        BlobCopyResult result = await store.CopyAsync(
+            new BlobKey("source"),
+            new BlobKey("destination"),
+            new BlobCopyOptions(
+                SourceConditions: new BlobRequestConditions(
+                    ifEntityTagMatch: new BlobEntityTag("\"multipart-source\"")),
+                DestinationConditions: BlobRequestConditions.CreateOnly,
+                ReplacementMetadata: new BlobMetadata(
+                    [new("vistara-sha256", checksum)])),
+            CancellationToken.None);
+
+        Assert.Equal(2, transport.GetCommands.Count);
+        Assert.All(
+            transport.GetCommands,
+            command => Assert.Equal(
+                "\"multipart-source\"",
+                command.Conditions.IfMatch));
+        S3PutCommand put = Assert.Single(transport.PutCommands);
+        Assert.True(put.Conditions.RequireMissing);
+        Assert.Equal(checksum, put.Metadata["vistara-sha256"]);
+        Assert.Equal(
+            BlobChecksumAlgorithm.Sha256,
+            Assert.Single(put.Checksums).Algorithm);
+        Assert.Equal("destination", result.Head.Identity.Key.Value);
+    }
+
+    [Fact]
+    public async Task Independently_verified_promotion_requires_a_native_destination_checksum()
+    {
+        const string content = "multipart payload";
+        string checksum = Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(
+                Encoding.UTF8.GetBytes(content)));
+        RecordingS3Transport transport = new()
+        {
+            ReadResultFactory = command => new S3ReadResult(
+                new MemoryStream(Encoding.UTF8.GetBytes(content), writable: false),
+                new S3ObjectDescriptor(
+                    command.Key,
+                    content.Length,
+                    "image/jpeg",
+                    Now,
+                    "\"multipart-source\"",
+                    [],
+                    new Dictionary<string, string>()),
+                null),
+        };
+        S3BlobStore store = CreateStore(S3ProviderKind.CloudflareR2, transport);
+
+        BlobStoreException error = await Assert.ThrowsAsync<BlobStoreException>(
+            async () => await store.CopyAsync(
+                new BlobKey("source"),
+                new BlobKey("destination"),
+                new BlobCopyOptions(
+                    SourceConditions: new BlobRequestConditions(
+                        ifEntityTagMatch: new BlobEntityTag("\"multipart-source\"")),
+                    DestinationConditions: BlobRequestConditions.CreateOnly,
+                    ReplacementMetadata: new BlobMetadata(
+                        [new("vistara-sha256", checksum)])),
+                CancellationToken.None));
+
+        Assert.Equal(BlobStoreErrorCode.Unsupported, error.Code);
+        Assert.Single(transport.GetCommands);
+        Assert.Empty(transport.PutCommands);
+    }
+
+    [Fact]
+    public async Task Independently_verified_promotion_rejects_a_checksum_mismatch_before_put()
+    {
+        const string content = "multipart payload";
+        RecordingS3Transport transport = new()
+        {
+            ReadResultFactory = command => new S3ReadResult(
+                new MemoryStream(Encoding.UTF8.GetBytes(content), writable: false),
+                new S3ObjectDescriptor(
+                    command.Key,
+                    content.Length,
+                    "image/jpeg",
+                    Now,
+                    "\"multipart-source\"",
+                    [],
+                    new Dictionary<string, string>()),
+                null),
+        };
+        S3BlobStore store = CreateStore(S3ProviderKind.Aws, transport);
+
+        BlobStoreException error = await Assert.ThrowsAsync<BlobStoreException>(
+            async () => await store.CopyAsync(
+                new BlobKey("source"),
+                new BlobKey("destination"),
+                new BlobCopyOptions(
+                    SourceConditions: new BlobRequestConditions(
+                        ifEntityTagMatch: new BlobEntityTag("\"multipart-source\"")),
+                    DestinationConditions: BlobRequestConditions.CreateOnly,
+                    ReplacementMetadata: new BlobMetadata(
+                        [new("vistara-sha256", new string('0', 64))])),
+                CancellationToken.None));
+
+        Assert.Equal(BlobStoreErrorCode.IntegrityMismatch, error.Code);
+        Assert.Single(transport.GetCommands);
         Assert.Empty(transport.PutCommands);
     }
 

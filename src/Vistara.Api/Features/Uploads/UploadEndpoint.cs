@@ -259,13 +259,15 @@ public static class UploadEndpoint
             return;
         }
 
-        if (!await EnsureMutableAsync(context, session, clock, cancellationToken) ||
-            !await EnsureVersionAsync(context, session, cancellationToken))
+        long? expectedVersion = await ReadExpectedVersionAsync(
+            context,
+            cancellationToken);
+        if (expectedVersion is null)
         {
             return;
         }
 
-        if (session.Strategy != "proxy" || session.State != "uploadIssued")
+        if (session.Strategy != "proxy")
         {
             await WriteProblemAsync(
                 context,
@@ -306,17 +308,41 @@ public static class UploadEndpoint
             return;
         }
 
+        var bounded = new ValidatedUploadReadStream(
+            context.Request.Body,
+            session.ExpectedSizeBytes,
+            session.Sha256);
         try
         {
-            var bounded = new ExactLengthReadStream(
-                context.Request.Body,
-                session.ExpectedSizeBytes);
+            if (expectedVersion.Value == session.Version)
+            {
+                if (!await EnsureMutableAsync(
+                        context,
+                        session,
+                        clock,
+                        cancellationToken))
+                {
+                    return;
+                }
+
+                if (session.State != "uploadIssued")
+                {
+                    await WriteProblemAsync(
+                        context,
+                        StatusCodes.Status409Conflict,
+                        "upload_invalid_state",
+                        "The upload cannot accept proxy content in its current state",
+                        cancellationToken);
+                    return;
+                }
+            }
+
             UploadWriteResult result = await application.WriteProxyAsync(
                 session,
                 bounded,
-                session.Version,
+                expectedVersion.Value,
                 cancellationToken);
-            await bounded.EnsureCompleteAsync(cancellationToken);
+            await bounded.DrainAndValidateAsync(cancellationToken);
             if (!await HandleWriteFailureAsync(
                     context,
                     result,
@@ -328,6 +354,11 @@ public static class UploadEndpoint
             EnsureOwnedSession(access, result.Session!);
             EnsureSessionContinuity(session, result.Session!);
             SetStatusHeaders(context, result.Session!);
+            if (result.Status == UploadWriteStatus.Replayed)
+            {
+                context.Response.Headers["Idempotency-Replayed"] = "true";
+            }
+
             context.Response.StatusCode = StatusCodes.Status204NoContent;
             context.Response.Headers.CacheControl = "no-store";
         }
@@ -349,9 +380,22 @@ public static class UploadEndpoint
                 "The proxy upload is shorter than the declared size",
                 cancellationToken);
         }
+        catch (UploadBodyIntegrityException)
+        {
+            await WriteProblemAsync(
+                context,
+                StatusCodes.Status422UnprocessableEntity,
+                "upload_integrity_failed",
+                "The proxy upload did not match its declaration",
+                cancellationToken);
+        }
         catch (Exception exception) when (IsDependencyFailure(exception))
         {
             await WriteUnavailableAsync(context, cancellationToken);
+        }
+        finally
+        {
+            bounded.DisposeVerifier();
         }
     }
 
@@ -459,7 +503,6 @@ public static class UploadEndpoint
         Guid uploadId,
         IUploadAuthorizationPort authorization,
         IUploadApplicationPort application,
-        IClock clock,
         CancellationToken cancellationToken)
     {
         (UploadAccess? access, UploadSessionSnapshot? session) =
@@ -474,8 +517,10 @@ public static class UploadEndpoint
             return;
         }
 
-        if (!await EnsureMutableAsync(context, session, clock, cancellationToken) ||
-            !await EnsureVersionAsync(context, session, cancellationToken))
+        long? expectedVersion = await ReadExpectedVersionAsync(
+            context,
+            cancellationToken);
+        if (expectedVersion is null)
         {
             return;
         }
@@ -522,7 +567,7 @@ public static class UploadEndpoint
                 session,
                 parts,
                 idempotencyKey,
-                session.Version,
+                expectedVersion.Value,
                 cancellationToken);
             if (!await HandleCommitFailureAsync(
                     context,
@@ -743,23 +788,15 @@ public static class UploadEndpoint
         UploadSessionSnapshot session,
         CancellationToken cancellationToken)
     {
-        StringValues values = context.Request.Headers.IfMatch;
-        if (values.Count == 0)
+        long? expectedVersion = await ReadExpectedVersionAsync(
+            context,
+            cancellationToken);
+        if (expectedVersion is null)
         {
-            await WriteProblemAsync(
-                context,
-                StatusCodes.Status428PreconditionRequired,
-                "if_match_required",
-                "An If-Match header is required",
-                cancellationToken);
             return false;
         }
 
-        if (values.Count != 1 ||
-            !string.Equals(
-                values[0],
-                $"\"v{session.Version.ToString(CultureInfo.InvariantCulture)}\"",
-                StringComparison.Ordinal))
+        if (expectedVersion.Value != session.Version)
         {
             await WriteProblemAsync(
                 context,
@@ -771,6 +808,51 @@ public static class UploadEndpoint
         }
 
         return true;
+    }
+
+    private static async ValueTask<long?> ReadExpectedVersionAsync(
+        HttpContext context,
+        CancellationToken cancellationToken)
+    {
+        StringValues values = context.Request.Headers.IfMatch;
+        if (values.Count == 0)
+        {
+            await WriteProblemAsync(
+                context,
+                StatusCodes.Status428PreconditionRequired,
+                "if_match_required",
+                "An If-Match header is required",
+                cancellationToken);
+            return null;
+        }
+
+        string? value = values.Count == 1 ? values[0] : null;
+        if (value is null ||
+            value.Length < 4 ||
+            value[0] != '"' ||
+            value[1] != 'v' ||
+            value[^1] != '"' ||
+            !long.TryParse(
+                value.AsSpan(2, value.Length - 3),
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out long version) ||
+            version <= 0 ||
+            !string.Equals(
+                value,
+                $"\"v{version.ToString(CultureInfo.InvariantCulture)}\"",
+                StringComparison.Ordinal))
+        {
+            await WriteProblemAsync(
+                context,
+                StatusCodes.Status412PreconditionFailed,
+                "upload_version_conflict",
+                "The upload version does not match",
+                cancellationToken);
+            return null;
+        }
+
+        return version;
     }
 
     private static bool TryValidateCreateRequest(
@@ -811,15 +893,25 @@ public static class UploadEndpoint
 
     private static string SelectStrategy(UploadProviderPolicy policy, long sizeBytes)
     {
-        if (!policy.Capabilities.SupportsDirectUpload)
+        bool supportsSha256 =
+            policy.Capabilities.NativeChecksumAlgorithms.Contains(
+                Vistara.Application.Common.Storage.BlobChecksumAlgorithm.Sha256);
+        bool supportsDirect =
+            policy.Capabilities.SupportsDirectUpload &&
+            policy.Capabilities.SupportsConditionalCreate &&
+            supportsSha256;
+        bool supportsMultipart =
+            policy.Capabilities.SupportsMultipartUpload &&
+            policy.Capabilities.SupportsConditionalCreate &&
+            policy.Capabilities.SupportsConditionalMultipartCompletion &&
+            supportsSha256;
+        if (supportsMultipart &&
+            sizeBytes >= policy.MultipartThresholdBytes)
         {
-            return "proxy";
+            return "multipart";
         }
 
-        return policy.Capabilities.SupportsMultipartUpload &&
-            sizeBytes >= policy.MultipartThresholdBytes
-                ? "multipart"
-                : "direct";
+        return supportsDirect ? "direct" : "proxy";
     }
 
     private static string CreateStagingKey(Guid tenantId, Guid uploadId)
@@ -963,19 +1055,45 @@ public static class UploadEndpoint
     private static bool IsSafeSignedHeader(string name, string value)
     {
         if (string.IsNullOrWhiteSpace(name) ||
+            name.Length > 512 ||
+            value.Length > 8_192 ||
             name.Any(character =>
                 character > 127 ||
                 !(char.IsAsciiLetterOrDigit(character) || character is '-' or '_')) ||
-            value.Any(character => char.IsControl(character) && character != '\t'))
+            value.Any(char.IsControl))
         {
             return false;
         }
 
         string normalized = name.Trim().ToLowerInvariant();
+        if (normalized == "if-none-match")
+        {
+            return string.Equals(value, "*", StringComparison.Ordinal);
+        }
+
+        if (normalized.StartsWith("x-amz-meta-", StringComparison.Ordinal) ||
+            normalized.StartsWith("x-ms-meta-", StringComparison.Ordinal))
+        {
+            int prefixLength = normalized.StartsWith(
+                "x-amz-meta-",
+                StringComparison.Ordinal)
+                ? "x-amz-meta-".Length
+                : "x-ms-meta-".Length;
+            string suffix = normalized[prefixLength..];
+            return suffix.Length is > 0 and <= 300 &&
+                suffix.All(character =>
+                    char.IsAsciiLetterLower(character) ||
+                    char.IsAsciiDigit(character) ||
+                    character is '-' or '_' or '.');
+        }
+
         return normalized is
             "content-type" or
             "content-length" or
             "content-md5" or
+            "x-amz-checksum-crc32" or
+            "x-amz-checksum-crc32c" or
+            "x-amz-checksum-crc64nvme" or
             "x-amz-checksum-sha256" or
             "x-amz-content-sha256" or
             "x-ms-blob-type" or
@@ -1087,7 +1205,8 @@ public static class UploadEndpoint
     {
         (int Status, string Code, string Title)? problem = result.Status switch
         {
-            UploadWriteStatus.Written when result.Session is not null => null,
+            UploadWriteStatus.Written or UploadWriteStatus.Replayed
+                when result.Session is not null => null,
             UploadWriteStatus.VersionConflict =>
                 (
                     StatusCodes.Status412PreconditionFailed,
@@ -1413,8 +1532,18 @@ public static class UploadEndpoint
             return null;
         }
 
-        if (context.Request.ContentLength is > MaximumJsonRequestBytes ||
-            context.Request.ContentType is null ||
+        if (context.Request.ContentLength is > MaximumJsonRequestBytes)
+        {
+            await WriteProblemAsync(
+                context,
+                StatusCodes.Status413PayloadTooLarge,
+                "upload_request_too_large",
+                "The upload request is too large",
+                cancellationToken);
+            return null;
+        }
+
+        if (context.Request.ContentType is null ||
             !context.Request.ContentType.StartsWith(
                 "application/json",
                 StringComparison.OrdinalIgnoreCase))
@@ -1430,8 +1559,11 @@ public static class UploadEndpoint
 
         try
         {
-            T? request = await JsonSerializer.DeserializeAsync<T>(
+            using var bounded = new MaximumLengthReadStream(
                 context.Request.Body,
+                MaximumJsonRequestBytes);
+            T? request = await JsonSerializer.DeserializeAsync<T>(
+                bounded,
                 JsonOptions,
                 cancellationToken);
             if (request is null)
@@ -1440,6 +1572,16 @@ public static class UploadEndpoint
             }
 
             return request;
+        }
+        catch (UploadJsonBodyTooLargeException)
+        {
+            await WriteProblemAsync(
+                context,
+                StatusCodes.Status413PayloadTooLarge,
+                "upload_request_too_large",
+                "The upload request is too large",
+                cancellationToken);
+            return null;
         }
         catch (JsonException)
         {
@@ -1554,10 +1696,20 @@ internal sealed class UploadBodyTooLargeException : IOException;
 
 internal sealed class UploadBodyTooShortException : IOException;
 
-internal sealed class ExactLengthReadStream(Stream inner, long expectedLength) : Stream
+internal sealed class UploadBodyIntegrityException : IOException;
+
+internal sealed class UploadJsonBodyTooLargeException : IOException;
+
+internal sealed class ValidatedUploadReadStream(
+    Stream inner,
+    long expectedLength,
+    string expectedSha256) : Stream
 {
+    private readonly IncrementalHash _sha256 =
+        IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
     private long _read;
     private bool _checkedOverflow;
+    private bool _validated;
 
     public override bool CanRead => inner.CanRead;
 
@@ -1582,8 +1734,18 @@ internal sealed class ExactLengthReadStream(Stream inner, long expectedLength) :
     {
         if (_read < expectedLength)
         {
+            if (buffer.IsEmpty)
+            {
+                return 0;
+            }
+
             int permitted = (int)Math.Min(buffer.Length, expectedLength - _read);
             int read = await inner.ReadAsync(buffer[..permitted], cancellationToken);
+            if (read > 0)
+            {
+                _sha256.AppendData(buffer.Span[..read]);
+            }
+
             _read += read;
             return read;
         }
@@ -1604,14 +1766,113 @@ internal sealed class ExactLengthReadStream(Stream inner, long expectedLength) :
         return 0;
     }
 
-    public async ValueTask EnsureCompleteAsync(CancellationToken cancellationToken)
+    public async ValueTask DrainAndValidateAsync(
+        CancellationToken cancellationToken)
     {
-        if (_read < expectedLength)
+        byte[] buffer = new byte[8 * 1024];
+        while (_read < expectedLength)
         {
-            throw new UploadBodyTooShortException();
+            int read = await ReadAsync(buffer, cancellationToken);
+            if (read == 0)
+            {
+                throw new UploadBodyTooShortException();
+            }
         }
 
-        _ = await ReadAsync(Memory<byte>.Empty, cancellationToken);
+        if (!_checkedOverflow)
+        {
+            byte[] probe = new byte[1];
+            _ = await ReadAsync(probe, cancellationToken);
+        }
+
+        if (!_validated)
+        {
+            _validated = true;
+            byte[] expected = Convert.FromHexString(expectedSha256);
+            byte[] actual = _sha256.GetHashAndReset();
+            if (!CryptographicOperations.FixedTimeEquals(actual, expected))
+            {
+                throw new UploadBodyIntegrityException();
+            }
+        }
+    }
+
+    public override void Flush() => throw new NotSupportedException();
+
+    public override long Seek(long offset, SeekOrigin origin) =>
+        throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) =>
+        throw new NotSupportedException();
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+    }
+
+    internal void DisposeVerifier() => _sha256.Dispose();
+}
+
+internal sealed class MaximumLengthReadStream(Stream inner, long maximumLength)
+    : Stream
+{
+    private long _read;
+
+    public override bool CanRead => inner.CanRead;
+
+    public override bool CanSeek => false;
+
+    public override bool CanWrite => false;
+
+    public override long Length => throw new NotSupportedException();
+
+    public override long Position
+    {
+        get => _read;
+        set => throw new NotSupportedException();
+    }
+
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        int permitted = PermittedCount(count);
+        int read = inner.Read(buffer, offset, permitted);
+        Record(read);
+        return read;
+    }
+
+    public override async ValueTask<int> ReadAsync(
+        Memory<byte> buffer,
+        CancellationToken cancellationToken = default)
+    {
+        int permitted = PermittedCount(buffer.Length);
+        int read = await inner.ReadAsync(
+            buffer[..permitted],
+            cancellationToken);
+        Record(read);
+        return read;
+    }
+
+    private int PermittedCount(int requested)
+    {
+        if (requested == 0)
+        {
+            return 0;
+        }
+
+        long remainingWithProbe = checked(maximumLength - _read + 1);
+        return checked((int)Math.Min(requested, remainingWithProbe));
+    }
+
+    private void Record(int read)
+    {
+        _read = checked(_read + read);
+        if (_read > maximumLength)
+        {
+            throw new UploadJsonBodyTooLargeException();
+        }
     }
 
     public override void Flush() => throw new NotSupportedException();

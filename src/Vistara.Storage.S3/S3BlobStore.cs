@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using Amazon.Runtime;
 using Vistara.Application.Common.Storage;
 
@@ -8,6 +9,7 @@ namespace Vistara.Storage.S3;
 
 public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
 {
+    private const string VerifiedSha256MetadataKey = "vistara-sha256";
     private readonly S3ValidatedOptions _options;
     private readonly IS3Transport _transport;
     private readonly TimeProvider _timeProvider;
@@ -247,10 +249,10 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
 
         S3Conditions sourceConditions =
             TranslateReadConditions(options.EffectiveSourceConditions);
-        S3ReadResult read;
+        S3ReadResult verificationRead;
         try
         {
-            read = await _transport.GetAsync(
+            verificationRead = await _transport.GetAsync(
                 new S3GetCommand(source.Value, null, sourceConditions),
                 cancellationToken);
         }
@@ -259,7 +261,97 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
             throw Map(error);
         }
 
-        await using Stream content = read.Content;
+        BlobHead sourceHead;
+        BlobMetadata metadata;
+        ReadOnlyCollection<S3WireChecksum> checksums;
+        await using (Stream verificationContent = verificationRead.Content)
+        {
+            sourceHead = ValidateCopySource(verificationRead, source);
+            metadata =
+                options.ReplacementMetadata ?? sourceHead.Properties.Metadata;
+            checksums =
+                TranslateChecksums(sourceHead.Properties.Checksums.Where(
+                    checksum => Capabilities.NativeChecksumAlgorithms.Contains(
+                        checksum.Algorithm)));
+            if (checksums.Count > 0)
+            {
+                EnsureNativeChecksumMatchesVerification(
+                    sourceHead,
+                    options.ReplacementMetadata);
+                return await PutCopiedContentAsync(
+                    destination,
+                    verificationContent,
+                    sourceHead,
+                    metadata,
+                    checksums,
+                    cancellationToken);
+            }
+
+            BlobChecksum verifiedSha256 =
+                GetVerifiedPromotionChecksum(options.ReplacementMetadata) ??
+                throw Unsupported(
+                    "The S3 source lacks a native or independently verified checksum required for create-only publication.");
+            if (!Capabilities.NativeChecksumAlgorithms.Contains(
+                    BlobChecksumAlgorithm.Sha256))
+            {
+                throw Unsupported(
+                    "The S3 profile cannot enforce the independently verified checksum during create-only publication.");
+            }
+
+            await VerifySha256Async(
+                verificationContent,
+                sourceHead.Properties.ContentLength,
+                verifiedSha256,
+                cancellationToken);
+        }
+
+        S3ReadResult publicationRead;
+        try
+        {
+            publicationRead = await _transport.GetAsync(
+                new S3GetCommand(
+                    source.Value,
+                    null,
+                    new S3Conditions(
+                        sourceHead.Properties.EntityTag.Value,
+                        RequireMissing: false)),
+                cancellationToken);
+        }
+        catch (S3TransportException error)
+        {
+            throw Map(error);
+        }
+
+        await using Stream publicationContent = publicationRead.Content;
+        BlobHead publicationHead = ValidateCopySource(publicationRead, source);
+        if (publicationHead.Identity.Version != sourceHead.Identity.Version ||
+            publicationHead.Properties.ContentLength !=
+            sourceHead.Properties.ContentLength ||
+            publicationHead.Properties.ContentType !=
+            sourceHead.Properties.ContentType)
+        {
+            throw new BlobStoreException(
+                BlobStoreErrorCode.IntegrityMismatch,
+                "The S3 copy source changed after independent verification.");
+        }
+
+        BlobChecksum verifiedChecksum =
+            GetVerifiedPromotionChecksum(options.ReplacementMetadata)!;
+        ReadOnlyCollection<S3WireChecksum> destinationChecksums =
+            TranslateChecksums([verifiedChecksum]);
+        return await PutCopiedContentAsync(
+            destination,
+            publicationContent,
+            sourceHead,
+            metadata,
+            destinationChecksums,
+            cancellationToken);
+    }
+
+    private BlobHead ValidateCopySource(
+        S3ReadResult read,
+        BlobKey source)
+    {
         BlobHead sourceHead = ToHead(read.Descriptor, source);
         if (read.ContentRange is not null ||
             sourceHead.Properties.ContentLength > _options.Profile.MaxSinglePutBytes)
@@ -268,18 +360,17 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
                 "The S3 profile cannot stream this source through one atomic create-only request.");
         }
 
-        BlobMetadata metadata =
-            options.ReplacementMetadata ?? sourceHead.Properties.Metadata;
-        ReadOnlyCollection<S3WireChecksum> checksums =
-            TranslateChecksums(sourceHead.Properties.Checksums.Where(
-                checksum => Capabilities.NativeChecksumAlgorithms.Contains(
-                    checksum.Algorithm)));
-        if (checksums.Count == 0)
-        {
-            throw Unsupported(
-                "The S3 source lacks a native checksum required for streamed create-only publication.");
-        }
+        return sourceHead;
+    }
 
+    private async ValueTask<BlobCopyResult> PutCopiedContentAsync(
+        BlobKey destination,
+        Stream content,
+        BlobHead sourceHead,
+        BlobMetadata metadata,
+        IReadOnlyList<S3WireChecksum> checksums,
+        CancellationToken cancellationToken)
+    {
         try
         {
             S3ObjectDescriptor descriptor = await _transport.PutAsync(
@@ -299,6 +390,100 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
         catch (S3TransportException error)
         {
             throw Map(error);
+        }
+    }
+
+    private static BlobChecksum? GetVerifiedPromotionChecksum(
+        BlobMetadata? replacementMetadata)
+    {
+        if (replacementMetadata is null ||
+            !replacementMetadata.TryGetValue(
+                VerifiedSha256MetadataKey,
+                out string? value))
+        {
+            return null;
+        }
+
+        try
+        {
+            return new BlobChecksum(BlobChecksumAlgorithm.Sha256, value!);
+        }
+        catch (ArgumentException error)
+        {
+            throw new BlobStoreException(
+                BlobStoreErrorCode.InvalidRequest,
+                "The independently verified promotion checksum is invalid.",
+                error);
+        }
+    }
+
+    private static void EnsureNativeChecksumMatchesVerification(
+        BlobHead sourceHead,
+        BlobMetadata? replacementMetadata)
+    {
+        BlobChecksum? verified = GetVerifiedPromotionChecksum(replacementMetadata);
+        BlobChecksum? native = sourceHead.Properties.Checksums.SingleOrDefault(
+            checksum => checksum.Algorithm == BlobChecksumAlgorithm.Sha256);
+        if (verified is null ||
+            native is null ||
+            FixedTimeEquals(native.Value, verified.Value))
+        {
+            return;
+        }
+
+        throw new BlobStoreException(
+            BlobStoreErrorCode.IntegrityMismatch,
+            "The S3 native checksum did not match the independently verified checksum.");
+    }
+
+    private static bool FixedTimeEquals(string left, string right) =>
+        left.Length == right.Length &&
+        CryptographicOperations.FixedTimeEquals(
+            System.Text.Encoding.ASCII.GetBytes(left),
+            System.Text.Encoding.ASCII.GetBytes(right));
+
+    private static async ValueTask VerifySha256Async(
+        Stream content,
+        long expectedLength,
+        BlobChecksum expectedChecksum,
+        CancellationToken cancellationToken)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(
+            HashAlgorithmName.SHA256);
+        byte[] buffer = new byte[64 * 1024];
+        long remaining = expectedLength;
+        while (remaining > 0)
+        {
+            int read = await content.ReadAsync(
+                buffer.AsMemory(
+                    0,
+                    checked((int)Math.Min(buffer.Length, remaining))),
+                cancellationToken);
+            if (read == 0)
+            {
+                throw new BlobStoreException(
+                    BlobStoreErrorCode.IntegrityMismatch,
+                    "The S3 copy source ended before its declared length.");
+            }
+
+            hash.AppendData(buffer, 0, read);
+            remaining -= read;
+        }
+
+        if (await content.ReadAsync(buffer.AsMemory(0, 1), cancellationToken) != 0)
+        {
+            throw new BlobStoreException(
+                BlobStoreErrorCode.IntegrityMismatch,
+                "The S3 copy source exceeded its declared length.");
+        }
+
+        byte[] expected = Convert.FromHexString(expectedChecksum.Value);
+        byte[] actual = hash.GetHashAndReset();
+        if (!CryptographicOperations.FixedTimeEquals(expected, actual))
+        {
+            throw new BlobStoreException(
+                BlobStoreErrorCode.IntegrityMismatch,
+                "The S3 copy source did not match its independently verified checksum.");
         }
     }
 

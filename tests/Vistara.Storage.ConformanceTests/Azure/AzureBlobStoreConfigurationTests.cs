@@ -6,6 +6,9 @@ namespace Vistara.Storage.ConformanceTests.Azure;
 
 public sealed class AzureBlobStoreConfigurationTests
 {
+    private const string EmulatorConnectionString =
+        "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;" +
+        "AccountKey=offline;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;";
     private static readonly Uri ServiceUri =
         new("https://account123.blob.core.windows.net");
 
@@ -95,12 +98,73 @@ public sealed class AzureBlobStoreConfigurationTests
                 "devstoreaccount1",
                 "media",
                 endpoint,
-                emulatorMode: true);
+                emulatorMode: true)
+            {
+                CredentialMode = AzureBlobCredentialMode.ConnectionString,
+                ConnectionString = EmulatorConnectionString,
+                SasMode = AzureBlobSasMode.SharedKey,
+                AllowSharedKeySas = true,
+            };
         RecordingFactory factory = new();
         _ = new AzureBlobStore(options, factory);
 
         Assert.Equal(endpoint, factory.ServiceUri);
         Assert.True(factory.EmulatorMode);
+    }
+
+    [Theory]
+    [InlineData("http://azurite.internal:10000/devstoreaccount1")]
+    [InlineData("http://192.0.2.1:10000/devstoreaccount1")]
+    [InlineData("https://storage.example/devstoreaccount1")]
+    public void Azure_emulator_endpoints_must_be_loopback(string endpoint)
+    {
+        RecordingFactory factory = new();
+        AzureBlobStoreOptions options =
+            new(
+                "devstoreaccount1",
+                "media",
+                new Uri(endpoint),
+                emulatorMode: true)
+            {
+                CredentialMode = AzureBlobCredentialMode.ConnectionString,
+                ConnectionString = EmulatorConnectionString,
+                SasMode = AzureBlobSasMode.SharedKey,
+                AllowSharedKeySas = true,
+            };
+
+        Assert.Throws<ArgumentException>(() => new AzureBlobStore(options, factory));
+        Assert.Equal(0, factory.CreateCalls);
+    }
+
+    [Fact]
+    public void Azure_emulator_requires_connection_string_authentication()
+    {
+        Uri endpoint = new("http://127.0.0.1:10000/devstoreaccount1");
+        RecordingFactory defaultFactory = new();
+        RecordingFactory injectedFactory = new();
+
+        Assert.Throws<ArgumentException>(
+            () => new AzureBlobStore(
+                new AzureBlobStoreOptions(
+                    "devstoreaccount1",
+                    "media",
+                    endpoint,
+                    emulatorMode: true),
+                defaultFactory));
+        Assert.Throws<ArgumentException>(
+            () => new AzureBlobStore(
+                new AzureBlobStoreOptions(
+                    "devstoreaccount1",
+                    "media",
+                    endpoint,
+                    emulatorMode: true)
+                {
+                    TokenCredential = new TestTokenCredential(),
+                },
+                injectedFactory));
+
+        Assert.Equal(0, defaultFactory.CreateCalls);
+        Assert.Equal(0, injectedFactory.CreateCalls);
     }
 
     [Fact]
@@ -154,20 +218,33 @@ public sealed class AzureBlobStoreConfigurationTests
     }
 
     [Fact]
-    public void Azure_accepts_an_exact_explicitly_allowlisted_token_endpoint()
+    public void Azure_allowlisted_token_endpoints_require_an_explicit_credential()
     {
         Uri endpoint = new("https://blob.internal.example:8443");
-        RecordingFactory factory = new();
+        RecordingFactory defaultFactory = new();
         AzureBlobStoreOptions options =
             new("account123", "media", endpoint)
             {
                 AllowedEndpointOrigins = [endpoint],
             };
 
-        _ = new AzureBlobStore(options, factory);
+        Assert.Throws<ArgumentException>(
+            () => new AzureBlobStore(options, defaultFactory));
+        Assert.Equal(0, defaultFactory.CreateCalls);
 
-        Assert.Equal(endpoint, factory.ServiceUri);
-        Assert.Equal(1, factory.CreateCalls);
+        RecordingFactory explicitFactory = new();
+        TokenCredential credential = new TestTokenCredential();
+        _ = new AzureBlobStore(
+            new AzureBlobStoreOptions("account123", "media", endpoint)
+            {
+                AllowedEndpointOrigins = [endpoint],
+                TokenCredential = credential,
+            },
+            explicitFactory);
+
+        Assert.Equal(endpoint, explicitFactory.ServiceUri);
+        Assert.Same(credential, explicitFactory.TokenCredential);
+        Assert.Equal(1, explicitFactory.CreateCalls);
     }
 
     [Fact]

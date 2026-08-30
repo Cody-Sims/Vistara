@@ -956,6 +956,12 @@ public sealed class AzureBlobStore : IBlobStore
     private static void ValidateMetadata(BlobMetadata metadata)
     {
         ArgumentNullException.ThrowIfNull(metadata);
+        if (metadata.AsReadOnly().Values.Any(value =>
+                value.Any(char.IsControl)))
+        {
+            throw InvalidRequest(
+                "Azure Blob metadata values cannot contain control characters.");
+        }
     }
 
     private static void ValidateChecksums(IReadOnlyList<BlobChecksum> checksums)

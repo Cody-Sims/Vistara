@@ -193,7 +193,8 @@ public sealed class AzureBlobStoreTests
     [Fact]
     public async Task Azure_rejects_overlong_grants_and_header_injection()
     {
-        AzureBlobStore store = CreateStore(new RecordingAzureClient());
+        RecordingAzureClient client = new();
+        AzureBlobStore store = CreateStore(client);
         BlobKey key = new("contract/grant");
 
         BlobStoreException lifetimeError =
@@ -210,9 +211,28 @@ public sealed class AzureBlobStoreTests
                         TimeSpan.FromMinutes(1),
                         downloadFileName: "photo.jpg\r\nx-evil: yes"),
                     CancellationToken.None));
+        BlobStoreException metadataError =
+            await Assert.ThrowsAsync<BlobStoreException>(
+                async () => await store.CreateDirectUploadAsync(
+                    new DirectUploadRequest(
+                        key,
+                        8,
+                        new BlobMediaType("image/jpeg"),
+                        null,
+                        BlobRequestConditions.CreateOnly,
+                        TimeSpan.FromMinutes(1),
+                        new BlobMetadata(
+                            [new("unsafe", "value\r\nAuthorization: secret")])),
+                    CancellationToken.None));
 
         Assert.Equal(BlobStoreErrorCode.InvalidRequest, lifetimeError.Code);
         Assert.Equal(BlobStoreErrorCode.InvalidRequest, fileNameError.Code);
+        Assert.Equal(BlobStoreErrorCode.InvalidRequest, metadataError.Code);
+        Assert.Empty(client.SasRequests);
+        Assert.DoesNotContain(
+            "secret",
+            metadataError.Message,
+            StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -233,7 +253,13 @@ public sealed class AzureBlobStoreTests
                 new Uri("http://127.0.0.1:10000/devstoreaccount1"),
                 emulatorMode: true)
             {
-                TokenCredential = new TestTokenCredential(),
+                CredentialMode = AzureBlobCredentialMode.ConnectionString,
+                ConnectionString =
+                    "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;" +
+                    "AccountKey=offline;BlobEndpoint=" +
+                    "http://127.0.0.1:10000/devstoreaccount1;",
+                SasMode = AzureBlobSasMode.SharedKey,
+                AllowSharedKeySas = true,
                 TimeProvider = new FixedTimeProvider(Now),
             };
         AzureBlobStore store = new(options, new FixedFactory(client));

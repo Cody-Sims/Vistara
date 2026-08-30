@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Metadata;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Vistara.Api.Features.Uploads;
@@ -11,6 +12,7 @@ using Vistara.Application.Common;
 using Vistara.Application.Common.Storage;
 using Vistara.Contracts.Idempotency;
 using Vistara.Contracts.Uploads;
+using Vistara.Storage.S3;
 using Xunit;
 
 namespace Vistara.Api.ContractTests.Uploads;
@@ -63,22 +65,43 @@ public sealed class UploadEndpointContractTests
                 Assert.Single(endpoint.Metadata.GetOrderedMetadata<IAuthorizeData>());
             Assert.Equal(UploadEndpointMapping.UploadPolicyName, authorization.Policy);
         });
+        RouteEndpoint content = Assert.Single(
+            endpoints,
+            endpoint => endpoint.RoutePattern.RawText ==
+                "/api/v1/uploads/{id:guid}/content");
+        IRequestSizeLimitMetadata requestLimit =
+            Assert.IsAssignableFrom<IRequestSizeLimitMetadata>(
+                content.Metadata.GetMetadata<IRequestSizeLimitMetadata>());
+        Assert.Equal(
+            UploadEndpointMapping.MaximumProxyRequestBodyBytes,
+            requestLimit.MaxRequestBodySize);
     }
 
     [Theory]
-    [InlineData(false, false, 25_000_000, "proxy")]
-    [InlineData(true, false, 25_000_000, "direct")]
-    [InlineData(true, true, 4_000_000, "direct")]
-    [InlineData(true, true, 25_000_000, "multipart")]
+    [InlineData(false, false, true, false, true, 25_000_000, "proxy")]
+    [InlineData(true, false, true, false, true, 25_000_000, "direct")]
+    [InlineData(true, true, true, true, true, 4_000_000, "direct")]
+    [InlineData(true, true, true, true, true, 25_000_000, "multipart")]
+    [InlineData(true, true, false, false, false, 25_000_000, "proxy")]
+    [InlineData(true, true, true, false, true, 25_000_000, "direct")]
+    [InlineData(true, true, true, true, false, 25_000_000, "proxy")]
     public async Task Create_selects_strategy_from_provider_capabilities(
         bool direct,
         bool multipart,
+        bool conditionalCreate,
+        bool conditionalMultipart,
+        bool sha256,
         long sizeBytes,
         string expectedStrategy)
     {
         var application = new FakeUploadApplicationPort
         {
-            Policy = Policy(direct, multipart),
+            Policy = Policy(
+                direct,
+                multipart,
+                conditionalCreate,
+                conditionalMultipart,
+                sha256),
         };
 
         TestResponse response = await SendAsync(
@@ -95,6 +118,36 @@ public sealed class UploadEndpointContractTests
             $"staging/01/{TenantId:D}/{UploadId:D}",
             application.LastReserve?.StagingKey);
         Assert.DoesNotContain("staging/", response.Body, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(S3ProviderKind.Aws, "multipart")]
+    [InlineData(S3ProviderKind.CloudflareR2, "proxy")]
+    [InlineData(S3ProviderKind.BackblazeB2, "proxy")]
+    [InlineData(S3ProviderKind.Minio, "direct")]
+    public async Task S3_profiles_fall_back_from_unsupported_upload_operations(
+        S3ProviderKind provider,
+        string expectedStrategy)
+    {
+        S3ProviderProfile profile = S3ProviderProfiles.Get(provider);
+        var application = new FakeUploadApplicationPort
+        {
+            Policy = new UploadProviderPolicy(
+                profile.Capabilities,
+                maximumUploadBytes: 50_000_000,
+                multipartThresholdBytes: 10_000_000,
+                planLifetime: TimeSpan.FromMinutes(5)),
+        };
+
+        TestResponse response = await SendAsync(
+            application: application,
+            method: "POST",
+            route: "/api/v1/uploads",
+            body: CreateBody(25_000_000),
+            idempotencyKey: $"profile-{provider}");
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        Assert.Equal(expectedStrategy, response.JsonString("strategy"));
     }
 
     [Fact]
@@ -287,6 +340,109 @@ public sealed class UploadEndpointContractTests
     }
 
     [Fact]
+    public async Task Signed_plan_preserves_exact_provider_condition_and_metadata_headers()
+    {
+        var headers = new Dictionary<string, string>
+        {
+            ["If-None-Match"] = "*",
+            ["x-amz-meta-vistara-upload-id"] = UploadId.ToString("D"),
+            ["x-ms-meta-vistara_m_74656e616e74"] = TenantId.ToString("D"),
+        };
+        var application = new FakeUploadApplicationPort
+        {
+            Issuance = UploadIssuance.Direct(
+                Snapshot(),
+                new UploadSignedRequest(
+                    "PUT",
+                    new Uri("https://storage.invalid/opaque-target"),
+                    headers,
+                    Now.AddMinutes(5))),
+        };
+
+        TestResponse response = await SendAsync(
+            application: application,
+            method: "POST",
+            route: "/api/v1/uploads",
+            body: CreateBody(1_000),
+            idempotencyKey: "provider-headers");
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        JsonElement returned = response.Json().RootElement
+            .GetProperty("plan")
+            .GetProperty("request")
+            .GetProperty("headers");
+        Assert.Equal(headers.Count, returned.EnumerateObject().Count());
+        Assert.All(
+            headers,
+            header => Assert.Equal(
+                header.Value,
+                returned.GetProperty(header.Key).GetString()));
+    }
+
+    [Theory]
+    [InlineData("Authorization", "Bearer secret")]
+    [InlineData("If-None-Match", "\"attacker-etag\"")]
+    [InlineData("x-amz-meta-", "value")]
+    [InlineData("x-ms-meta-safe", "value\r\nAuthorization: secret")]
+    public async Task Signed_plan_rejects_generic_or_malformed_headers(
+        string name,
+        string value)
+    {
+        var application = new FakeUploadApplicationPort
+        {
+            Issuance = UploadIssuance.Direct(
+                Snapshot(),
+                new UploadSignedRequest(
+                    "PUT",
+                    new Uri("https://storage.invalid/opaque-target"),
+                    new Dictionary<string, string>
+                    {
+                        [name] = value,
+                    },
+                    Now.AddMinutes(5))),
+        };
+
+        TestResponse response = await SendAsync(
+            application: application,
+            method: "POST",
+            route: "/api/v1/uploads",
+            body: CreateBody(1_000),
+            idempotencyKey: "unsafe-provider-header");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("upload_service_unavailable", response.ProblemCode());
+        Assert.DoesNotContain("secret", response.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Chunked_json_bodies_are_bounded_before_application_work()
+    {
+        var application = new FakeUploadApplicationPort();
+        string body =
+            $$"""
+            {
+              "fileName": "photo.jpg",
+              "sizeBytes": 1000,
+              "contentType": "image/jpeg",
+              "sha256": "{{Checksum}}",
+              "padding": "{{new string('a', 40_000)}}"
+            }
+            """;
+
+        TestResponse response = await SendAsync(
+            application: application,
+            method: "POST",
+            route: "/api/v1/uploads",
+            body: body,
+            omitBodyContentLength: true,
+            idempotencyKey: "chunked-json");
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        Assert.Equal("upload_request_too_large", response.ProblemCode());
+        Assert.Equal(0, application.ReserveCalls);
+    }
+
+    [Fact]
     public async Task Status_is_tenant_concealed_versioned_no_store_and_safe()
     {
         var application = new FakeUploadApplicationPort();
@@ -321,7 +477,10 @@ public sealed class UploadEndpointContractTests
         var source = new BoundedProbeStream(bytes, maximumRequestedRead: 64);
         var application = new FakeUploadApplicationPort
         {
-            SnapshotValue = Snapshot(strategy: "proxy", expectedSizeBytes: bytes.Length),
+            SnapshotValue = Snapshot(
+                strategy: "proxy",
+                expectedSizeBytes: bytes.Length,
+                sha256: Sha256(bytes)),
         };
 
         TestResponse response = await SendAsync(
@@ -338,6 +497,82 @@ public sealed class UploadEndpointContractTests
         Assert.Equal(bytes.Length, application.ProxyBytes);
         Assert.False(source.SynchronousReadUsed);
         Assert.True(source.MaximumObservedRead <= 64);
+    }
+
+    [Fact]
+    public async Task Proxy_replay_is_evaluated_before_stale_if_match_and_validates_the_body()
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes("replayed proxy body");
+        var source = new MemoryStream(bytes);
+        UploadSessionSnapshot replayed = Snapshot(
+            strategy: "proxy",
+            version: 3,
+            expectedSizeBytes: bytes.LongLength,
+            sha256: Sha256(bytes));
+        var application = new FakeUploadApplicationPort
+        {
+            SnapshotValue = replayed,
+            ProxyResult = UploadWriteResult.Replayed(replayed),
+            DisposeProxyStream = true,
+        };
+
+        TestResponse response = await SendAsync(
+            application: application,
+            method: "PUT",
+            route: "/api/v1/uploads/{id:guid}/content",
+            requestStream: source,
+            contentLength: null,
+            contentType: "image/jpeg",
+            ifMatch: "\"v2\"");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal("true", response.Headers["Idempotency-Replayed"].ToString());
+        Assert.Equal("\"v3\"", response.Headers.ETag.ToString());
+        Assert.Equal(1, application.ProxyWriteCalls);
+        Assert.Equal(2, application.LastProxyExpectedVersion);
+        Assert.Equal(bytes.LongLength, source.Position);
+
+        source = new MemoryStream(Encoding.UTF8.GetBytes("replayed proxy bodx"));
+        TestResponse mismatch = await SendAsync(
+            application: application,
+            method: "PUT",
+            route: "/api/v1/uploads/{id:guid}/content",
+            requestStream: source,
+            contentLength: null,
+            contentType: "image/jpeg",
+            ifMatch: "\"v2\"");
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, mismatch.StatusCode);
+        Assert.Equal("upload_integrity_failed", mismatch.ProblemCode());
+        Assert.Equal(2, application.ProxyWriteCalls);
+        Assert.Equal(source.Length, source.Position);
+    }
+
+    [Fact]
+    public async Task Issuance_version_is_not_treated_as_a_proxy_replay_receipt()
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes("first proxy body");
+        var application = new FakeUploadApplicationPort
+        {
+            SnapshotValue = Snapshot(
+                strategy: "proxy",
+                version: 2,
+                expectedSizeBytes: bytes.LongLength,
+                sha256: Sha256(bytes)),
+        };
+
+        TestResponse response = await SendAsync(
+            application: application,
+            method: "PUT",
+            route: "/api/v1/uploads/{id:guid}/content",
+            requestStream: new MemoryStream(bytes),
+            contentLength: null,
+            contentType: "image/jpeg",
+            ifMatch: "\"v1\"");
+
+        Assert.Equal(HttpStatusCode.PreconditionFailed, response.StatusCode);
+        Assert.Equal("upload_version_conflict", response.ProblemCode());
+        Assert.Equal(1, application.ProxyWriteCalls);
     }
 
     [Fact]
@@ -520,14 +755,38 @@ public sealed class UploadEndpointContractTests
             route: "/api/v1/uploads/{id:guid}/commit",
             body: body,
             idempotencyKey: "commit-1",
-            ifMatch: "\"v3\"");
+            ifMatch: "\"v2\"");
 
         Assert.Equal(HttpStatusCode.Accepted, queued.StatusCode);
         Assert.Equal("\"v3\"", queued.Headers.ETag.ToString());
         Assert.Equal(HttpStatusCode.Accepted, replay.StatusCode);
         Assert.Equal("true", replay.Headers["Idempotency-Replayed"].ToString());
+        Assert.Equal(2, application.LastCommitExpectedVersion);
         Assert.DoesNotContain("dimensions", body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("contentType", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Commit_idempotency_conflict_precedes_stale_if_match()
+    {
+        var application = new FakeUploadApplicationPort
+        {
+            SnapshotValue = Snapshot(version: 3),
+            CommitResult = UploadCommitResult.Failure(
+                UploadCommitStatus.IdempotencyConflict),
+        };
+
+        TestResponse response = await SendAsync(
+            application: application,
+            method: "POST",
+            route: "/api/v1/uploads/{id:guid}/commit",
+            body: """{"parts":[]}""",
+            idempotencyKey: "changed-commit",
+            ifMatch: "\"v2\"");
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("idempotency_key_conflict", response.ProblemCode());
+        Assert.Equal(2, application.LastCommitExpectedVersion);
     }
 
     [Fact]
@@ -591,6 +850,11 @@ public sealed class UploadEndpointContractTests
             application: application,
             method: "DELETE",
             route: "/api/v1/uploads/{id:guid}");
+        TestResponse nonCanonical = await SendAsync(
+            application: application,
+            method: "DELETE",
+            route: "/api/v1/uploads/{id:guid}",
+            ifMatch: "\"v02\"");
         TestResponse aborted = await SendAsync(
             application: application,
             method: "DELETE",
@@ -607,19 +871,28 @@ public sealed class UploadEndpointContractTests
             ifMatch: "\"v3\"");
 
         Assert.Equal((HttpStatusCode)428, missing.StatusCode);
+        Assert.Equal(HttpStatusCode.PreconditionFailed, nonCanonical.StatusCode);
         Assert.Equal(HttpStatusCode.NoContent, aborted.StatusCode);
         Assert.Equal(HttpStatusCode.NoContent, replay.StatusCode);
         Assert.Equal("true", replay.Headers["Idempotency-Replayed"].ToString());
     }
 
-    private static UploadProviderPolicy Policy(bool direct = true, bool multipart = false) =>
+    private static UploadProviderPolicy Policy(
+        bool direct = true,
+        bool multipart = false,
+        bool conditionalCreate = true,
+        bool conditionalMultipart = true,
+        bool sha256 = true) =>
         new(
             new BlobStoreCapabilities
             {
                 SupportsDirectUpload = direct,
                 SupportsMultipartUpload = multipart,
-                SupportsConditionalCreate = true,
-                NativeChecksumAlgorithms = [BlobChecksumAlgorithm.Sha256],
+                SupportsConditionalCreate = conditionalCreate,
+                SupportsConditionalMultipartCompletion = conditionalMultipart,
+                NativeChecksumAlgorithms = sha256
+                    ? [BlobChecksumAlgorithm.Sha256]
+                    : [BlobChecksumAlgorithm.Crc64Nvme],
                 Limits = new BlobStoreLimits(
                     100_000_000,
                     1_024,
@@ -635,7 +908,8 @@ public sealed class UploadEndpointContractTests
         string strategy = "direct",
         string state = "uploadIssued",
         long version = 2,
-        long expectedSizeBytes = 1_000) =>
+        long expectedSizeBytes = 1_000,
+        string sha256 = Checksum) =>
         new(
             TenantId,
             ActorId,
@@ -644,7 +918,7 @@ public sealed class UploadEndpointContractTests
             state,
             expectedSizeBytes,
             "image/jpeg",
-            Checksum,
+            sha256,
             "../../display.jpg",
             $"staging/01/{TenantId:D}/{UploadId:D}",
             Now.AddHours(1),
@@ -658,6 +932,9 @@ public sealed class UploadEndpointContractTests
         contentType = "image/jpeg",
         sha256 = Checksum,
     });
+
+    private static string Sha256(byte[] bytes) =>
+        Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
 
     private static WebApplication BuildApp(
         IUploadAuthorizationPort authorization,
@@ -690,6 +967,7 @@ public sealed class UploadEndpointContractTests
         string? contentType = null,
         string? idempotencyKey = null,
         string? ifMatch = null,
+        bool omitBodyContentLength = false,
         CancellationToken cancellationToken = default)
     {
         await using WebApplication app = BuildApp(
@@ -717,7 +995,8 @@ public sealed class UploadEndpointContractTests
         {
             byte[] bytes = Encoding.UTF8.GetBytes(body);
             context.Request.Body = new MemoryStream(bytes);
-            context.Request.ContentLength = bytes.Length;
+            context.Request.ContentLength =
+                omitBodyContentLength ? null : bytes.Length;
             context.Request.ContentType = "application/json";
         }
         else if (requestStream is not null)
@@ -877,10 +1156,15 @@ internal sealed class FakeUploadApplicationPort : IUploadApplicationPort
     public int IssueCalls { get; private set; }
     public int GetCalls { get; private set; }
     public int CommitCalls { get; private set; }
+    public int ProxyWriteCalls { get; private set; }
+    public long? LastCommitExpectedVersion { get; private set; }
+    public long? LastProxyExpectedVersion { get; private set; }
     public long ProxyBytes { get; private set; }
     public bool CancellationObserved { get; private set; }
     public ReserveUploadRequest? LastReserve { get; private set; }
     public IReadOnlyList<int>? ReturnedPartNumbers { get; init; }
+    public UploadWriteResult? ProxyResult { get; init; }
+    public bool DisposeProxyStream { get; init; }
 
     public ValueTask<UploadProviderPolicy> GetProviderPolicyAsync(
         Guid tenantId,
@@ -926,14 +1210,18 @@ internal sealed class FakeUploadApplicationPort : IUploadApplicationPort
 
         if (session.Strategy == "multipart")
         {
+            BlobStoreLimits limits = Policy.Capabilities.Limits;
             return ValueTask.FromResult(UploadIssuance.Multipart(
                 session,
                 [
-                    PartPlan(1),
+                    PartPlan(
+                        1,
+                        limits.MinMultipartPartBytes,
+                        limits.MaxMultipartPartBytes),
                 ],
-                10_000,
-                5_000_000,
-                50_000_000));
+                limits.MaxMultipartParts,
+                limits.MinMultipartPartBytes,
+                limits.MaxMultipartPartBytes));
         }
 
         return ValueTask.FromResult(UploadIssuance.Direct(
@@ -956,6 +1244,23 @@ internal sealed class FakeUploadApplicationPort : IUploadApplicationPort
         long expectedVersion,
         CancellationToken cancellationToken)
     {
+        ProxyWriteCalls++;
+        LastProxyExpectedVersion = expectedVersion;
+        if (ProxyResult is not null)
+        {
+            if (DisposeProxyStream)
+            {
+                content.Dispose();
+            }
+
+            return ProxyResult;
+        }
+
+        if (expectedVersion != session.Version)
+        {
+            return UploadWriteResult.Failure(UploadWriteStatus.VersionConflict);
+        }
+
         byte[] buffer = new byte[64];
         while (true)
         {
@@ -985,7 +1290,12 @@ internal sealed class FakeUploadApplicationPort : IUploadApplicationPort
         long expectedVersion,
         CancellationToken cancellationToken) =>
         ValueTask.FromResult(UploadPartPlanResult.Created(
-            (ReturnedPartNumbers ?? partNumbers).Select(PartPlan).ToArray()));
+            (ReturnedPartNumbers ?? partNumbers)
+                .Select(partNumber => PartPlan(
+                    partNumber,
+                    Policy.Capabilities.Limits.MinMultipartPartBytes,
+                    Policy.Capabilities.Limits.MaxMultipartPartBytes))
+                .ToArray()));
 
     public ValueTask<UploadCommitResult> CommitAsync(
         UploadSessionSnapshot session,
@@ -995,6 +1305,7 @@ internal sealed class FakeUploadApplicationPort : IUploadApplicationPort
         CancellationToken cancellationToken)
     {
         CommitCalls++;
+        LastCommitExpectedVersion = expectedVersion;
         return ValueTask.FromResult(CommitResult);
     }
 
@@ -1004,7 +1315,10 @@ internal sealed class FakeUploadApplicationPort : IUploadApplicationPort
         CancellationToken cancellationToken) =>
         ValueTask.FromResult(AbortResult);
 
-    private static UploadSignedPartRequest PartPlan(int partNumber) =>
+    private static UploadSignedPartRequest PartPlan(
+        int partNumber,
+        long minBytes,
+        long maxBytes) =>
         new(
             partNumber,
             new UploadSignedRequest(
@@ -1012,6 +1326,6 @@ internal sealed class FakeUploadApplicationPort : IUploadApplicationPort
                 new Uri($"https://storage.invalid/opaque-part-{partNumber}"),
                 new Dictionary<string, string>(),
                 UploadEndpointContractTests.NowForFakes.AddMinutes(5)),
-            1,
-            50_000_000);
+            minBytes,
+            maxBytes);
 }

@@ -1,3 +1,4 @@
+using System.Net;
 using Azure.Core;
 
 namespace Vistara.Storage.Azure;
@@ -154,7 +155,14 @@ public sealed class AzureBlobStoreOptions
             TransferBlockBytes,
             64 * 1024 * 1024);
         ArgumentNullException.ThrowIfNull(TimeProvider);
-        ValidateEndpointTrust();
+        bool trustedAzureEndpoint = ValidateEndpointTrust();
+        if (EmulatorMode &&
+            CredentialMode != AzureBlobCredentialMode.ConnectionString)
+        {
+            throw new ArgumentException(
+                "Azure Blob emulator mode requires explicit connection-string authentication.",
+                nameof(CredentialMode));
+        }
 
         if (CredentialMode == AzureBlobCredentialMode.TokenCredential)
         {
@@ -170,6 +178,13 @@ public sealed class AzureBlobStoreOptions
                 throw new ArgumentException(
                     "Shared-key SAS requires explicit connection-string credential mode.",
                     nameof(SasMode));
+            }
+
+            if (!trustedAzureEndpoint && TokenCredential is null)
+            {
+                throw new ArgumentException(
+                    "An explicit token credential is required for an allowlisted non-Azure endpoint.",
+                    nameof(TokenCredential));
             }
 
             return;
@@ -197,7 +212,7 @@ public sealed class AzureBlobStoreOptions
         }
     }
 
-    private void ValidateEndpointTrust()
+    private bool ValidateEndpointTrust()
     {
         if (AllowedEndpointOrigins is null)
         {
@@ -222,6 +237,18 @@ public sealed class AzureBlobStoreOptions
                     ServiceUri.Host,
                     $"{AccountName}{suffix}",
                     StringComparison.OrdinalIgnoreCase));
+        if (EmulatorMode)
+        {
+            if (!IsLoopbackHost(ServiceUri))
+            {
+                throw new ArgumentException(
+                    "Azure Blob emulator endpoints must use a loopback host.",
+                    nameof(ServiceUri));
+            }
+
+            return false;
+        }
+
         if (!EmulatorMode &&
             !trustedAzureEndpoint &&
             !allowedOrigins.Contains(serviceOrigin.AbsoluteUri))
@@ -230,6 +257,22 @@ public sealed class AzureBlobStoreOptions
                 "The Azure Blob endpoint must use a trusted Azure cloud or private-link origin, or be explicitly allowlisted.",
                 nameof(ServiceUri));
         }
+
+        return trustedAzureEndpoint;
+    }
+
+    private static bool IsLoopbackHost(Uri value)
+    {
+        if (string.Equals(
+                value.DnsSafeHost,
+                "localhost",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return IPAddress.TryParse(value.DnsSafeHost, out IPAddress? address) &&
+            IPAddress.IsLoopback(address);
     }
 
     private static Uri NormalizeOrigin(
