@@ -1,0 +1,340 @@
+name: Provider live storage tests
+
+on:
+  schedule:
+    - cron: "17 6 * * 0"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Validate configuration only, or run against live providers.
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - live
+      provider:
+        description: Provider to run in live mode.
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - aws
+          - azure
+          - r2
+          - b2
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-live-storage-tests
+  cancel-in-progress: false
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  validate:
+    name: Validate ${{ matrix.provider }} configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: aws
+            bucket: vistara-dry-run
+            region: us-east-1
+            endpoint: ""
+            azure-account: ""
+            azure-container: ""
+            capabilities: >-
+              {"Name":"aws-s3","Capabilities":{"SupportsDirectUpload":true,"SupportsMultipartUpload":true,"SupportsRangeReads":true,"SupportsConditionalRead":true,"SupportsConditionalCreate":true,"SupportsConditionalReplace":true,"SupportsConditionalCopy":false,"SupportsConditionalDelete":true,"SupportsConditionalMultipartCompletion":true,"SupportsServerSideCopy":true,"SupportsObjectVersioning":false,"SupportsSignedRead":true,"ReadAfterWriteConsistency":"Strong","ListAfterWriteConsistency":"Strong","NativeChecksumAlgorithms":["Sha256"],"Limits":{"MaxObjectBytes":53687091200000,"MaxKeyBytes":1024,"MaxMultipartParts":10000,"MinMultipartPartBytes":5242880,"MaxMultipartPartBytes":5368709120}},"MaxSinglePutBytes":5368709120,"RequiresUniformMultipartParts":false,"SupportsConditionalCopySource":true,"MultipartFullObjectChecksumAlgorithms":[]}
+          - provider: azure
+            bucket: ""
+            region: ""
+            endpoint: ""
+            azure-account: vistaradryrun
+            azure-container: vistara-dry-run
+            capabilities: >-
+              {"Name":"azure","Capabilities":{"SupportsDirectUpload":true,"SupportsMultipartUpload":true,"SupportsRangeReads":true,"SupportsConditionalRead":true,"SupportsConditionalCreate":true,"SupportsConditionalReplace":true,"SupportsConditionalCopy":true,"SupportsConditionalDelete":true,"SupportsConditionalMultipartCompletion":true,"SupportsServerSideCopy":true,"SupportsObjectVersioning":false,"SupportsSignedRead":true,"ReadAfterWriteConsistency":"Strong","ListAfterWriteConsistency":"Strong","NativeChecksumAlgorithms":["Md5","Sha256"],"Limits":{"MaxObjectBytes":209715200000,"MaxKeyBytes":1024,"MaxMultipartParts":50000,"MinMultipartPartBytes":1,"MaxMultipartPartBytes":4000000000}}}
+          - provider: r2
+            bucket: vistara-dry-run
+            region: auto
+            endpoint: https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com
+            azure-account: ""
+            azure-container: ""
+            capabilities: >-
+              {"Name":"cloudflare-r2","Capabilities":{"SupportsDirectUpload":true,"SupportsMultipartUpload":true,"SupportsRangeReads":true,"SupportsConditionalRead":true,"SupportsConditionalCreate":true,"SupportsConditionalReplace":true,"SupportsConditionalCopy":false,"SupportsConditionalDelete":false,"SupportsConditionalMultipartCompletion":false,"SupportsServerSideCopy":true,"SupportsObjectVersioning":false,"SupportsSignedRead":true,"ReadAfterWriteConsistency":"Strong","ListAfterWriteConsistency":"Strong","NativeChecksumAlgorithms":["Crc64Nvme"],"Limits":{"MaxObjectBytes":5497558138880,"MaxKeyBytes":1024,"MaxMultipartParts":10000,"MinMultipartPartBytes":5242880,"MaxMultipartPartBytes":5368709120}},"MaxSinglePutBytes":5368709120,"RequiresUniformMultipartParts":true,"SupportsConditionalCopySource":true,"MultipartFullObjectChecksumAlgorithms":["Crc64Nvme"]}
+          - provider: b2
+            bucket: vistara-dry-run
+            region: us-west-004
+            endpoint: https://s3.us-west-004.backblazeb2.com
+            azure-account: ""
+            azure-container: ""
+            capabilities: >-
+              {"Name":"backblaze-b2","Capabilities":{"SupportsDirectUpload":true,"SupportsMultipartUpload":true,"SupportsRangeReads":true,"SupportsConditionalRead":true,"SupportsConditionalCreate":false,"SupportsConditionalReplace":false,"SupportsConditionalCopy":false,"SupportsConditionalDelete":false,"SupportsConditionalMultipartCompletion":false,"SupportsServerSideCopy":true,"SupportsObjectVersioning":false,"SupportsSignedRead":true,"ReadAfterWriteConsistency":"Strong","ListAfterWriteConsistency":"Eventual","NativeChecksumAlgorithms":["Md5"],"Limits":{"MaxObjectBytes":10000000000000,"MaxKeyBytes":1024,"MaxMultipartParts":10000,"MinMultipartPartBytes":5242880,"MaxMultipartPartBytes":5368709120}},"MaxSinglePutBytes":5368709120,"RequiresUniformMultipartParts":false,"SupportsConditionalCopySource":false,"MultipartFullObjectChecksumAlgorithms":[]}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate without provider access
+        uses: ./.github/actions/provider-live-tests
+        with:
+          provider: ${{ matrix.provider }}
+          mode: dry-run
+          capabilities: ${{ matrix.capabilities }}
+          prefix: vistara-live/dry-run/${{ matrix.provider }}/0123456789abcdef
+          bucket: ${{ matrix.bucket }}
+          region: ${{ matrix.region }}
+          endpoint: ${{ matrix.endpoint }}
+          azure-account: ${{ matrix.azure-account }}
+          azure-container: ${{ matrix.azure-container }}
+
+  aws:
+    name: AWS S3 live conformance
+    needs: validate
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'live' &&
+      (inputs.provider == 'all' || inputs.provider == 'aws'))
+    environment: provider-live-aws
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Restore conformance project
+        run: dotnet restore tests/Vistara.Storage.ConformanceTests --verbosity minimal
+
+      - name: Create isolated prefix
+        id: scope
+        shell: bash
+        run: echo "prefix=vistara-live/aws/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(openssl rand -hex 8)" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to AWS with OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: vistara-live-${{ github.run_id }}
+          role-duration-seconds: 1800
+          mask-aws-account-id: true
+          inline-session-policy: >-
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:ListBucket","s3:ListBucketMultipartUploads"],"Resource":"arn:aws:s3:::${{ secrets.AWS_S3_BUCKET }}","Condition":{"StringLike":{"s3:prefix":["${{ steps.scope.outputs.prefix }}/*"]}}},{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:AbortMultipartUpload","s3:ListMultipartUploadParts"],"Resource":"arn:aws:s3:::${{ secrets.AWS_S3_BUCKET }}/${{ steps.scope.outputs.prefix }}/*"}]}
+
+      - name: Run AWS S3 conformance
+        uses: ./.github/actions/provider-live-tests
+        with:
+          provider: aws
+          mode: live
+          capabilities: >-
+            {"Name":"aws-s3","Capabilities":{"SupportsDirectUpload":true,"SupportsMultipartUpload":true,"SupportsRangeReads":true,"SupportsConditionalRead":true,"SupportsConditionalCreate":true,"SupportsConditionalReplace":true,"SupportsConditionalCopy":false,"SupportsConditionalDelete":true,"SupportsConditionalMultipartCompletion":true,"SupportsServerSideCopy":true,"SupportsObjectVersioning":false,"SupportsSignedRead":true,"ReadAfterWriteConsistency":"Strong","ListAfterWriteConsistency":"Strong","NativeChecksumAlgorithms":["Sha256"],"Limits":{"MaxObjectBytes":53687091200000,"MaxKeyBytes":1024,"MaxMultipartParts":10000,"MinMultipartPartBytes":5242880,"MaxMultipartPartBytes":5368709120}},"MaxSinglePutBytes":5368709120,"RequiresUniformMultipartParts":false,"SupportsConditionalCopySource":true,"MultipartFullObjectChecksumAlgorithms":[]}
+          prefix: ${{ steps.scope.outputs.prefix }}
+          bucket: ${{ secrets.AWS_S3_BUCKET }}
+          region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload failed AWS results
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: provider-live-aws-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/provider-live/aws/*.trx
+          if-no-files-found: ignore
+          retention-days: 7
+
+  azure:
+    name: Azure Blob live conformance
+    needs: validate
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'live' &&
+      (inputs.provider == 'all' || inputs.provider == 'azure'))
+    environment: provider-live-azure
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Restore conformance project
+        run: dotnet restore tests/Vistara.Storage.ConformanceTests --verbosity minimal
+
+      - name: Create isolated prefix
+        id: scope
+        shell: bash
+        run: echo "prefix=vistara-live/azure/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(openssl rand -hex 8)" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Azure with workload identity
+        uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run Azure Blob conformance
+        uses: ./.github/actions/provider-live-tests
+        with:
+          provider: azure
+          mode: live
+          capabilities: >-
+            {"Name":"azure","Capabilities":{"SupportsDirectUpload":true,"SupportsMultipartUpload":true,"SupportsRangeReads":true,"SupportsConditionalRead":true,"SupportsConditionalCreate":true,"SupportsConditionalReplace":true,"SupportsConditionalCopy":true,"SupportsConditionalDelete":true,"SupportsConditionalMultipartCompletion":true,"SupportsServerSideCopy":true,"SupportsObjectVersioning":false,"SupportsSignedRead":true,"ReadAfterWriteConsistency":"Strong","ListAfterWriteConsistency":"Strong","NativeChecksumAlgorithms":["Md5","Sha256"],"Limits":{"MaxObjectBytes":209715200000,"MaxKeyBytes":1024,"MaxMultipartParts":50000,"MinMultipartPartBytes":1,"MaxMultipartPartBytes":4000000000}}}
+          prefix: ${{ steps.scope.outputs.prefix }}
+          azure-account: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          azure-container: ${{ secrets.AZURE_STORAGE_CONTAINER }}
+
+      - name: Upload failed Azure results
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: provider-live-azure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/provider-live/azure/*.trx
+          if-no-files-found: ignore
+          retention-days: 7
+
+  r2:
+    name: Cloudflare R2 live conformance
+    needs: validate
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'live' &&
+      (inputs.provider == 'all' || inputs.provider == 'r2'))
+    environment: provider-live-r2
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Restore conformance project
+        run: dotnet restore tests/Vistara.Storage.ConformanceTests --verbosity minimal
+
+      - name: Create isolated prefix
+        id: scope
+        shell: bash
+        run: echo "prefix=vistara-live/r2/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(openssl rand -hex 8)" >> "$GITHUB_OUTPUT"
+
+      - name: Run Cloudflare R2 conformance
+        uses: ./.github/actions/provider-live-tests
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        with:
+          provider: r2
+          mode: live
+          capabilities: >-
+            {"Name":"cloudflare-r2","Capabilities":{"SupportsDirectUpload":true,"SupportsMultipartUpload":true,"SupportsRangeReads":true,"SupportsConditionalRead":true,"SupportsConditionalCreate":true,"SupportsConditionalReplace":true,"SupportsConditionalCopy":false,"SupportsConditionalDelete":false,"SupportsConditionalMultipartCompletion":false,"SupportsServerSideCopy":true,"SupportsObjectVersioning":false,"SupportsSignedRead":true,"ReadAfterWriteConsistency":"Strong","ListAfterWriteConsistency":"Strong","NativeChecksumAlgorithms":["Crc64Nvme"],"Limits":{"MaxObjectBytes":5497558138880,"MaxKeyBytes":1024,"MaxMultipartParts":10000,"MinMultipartPartBytes":5242880,"MaxMultipartPartBytes":5368709120}},"MaxSinglePutBytes":5368709120,"RequiresUniformMultipartParts":true,"SupportsConditionalCopySource":true,"MultipartFullObjectChecksumAlgorithms":["Crc64Nvme"]}
+          prefix: ${{ steps.scope.outputs.prefix }}
+          bucket: ${{ secrets.R2_BUCKET }}
+          region: auto
+          endpoint: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+
+      - name: Upload failed R2 results
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: provider-live-r2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/provider-live/r2/*.trx
+          if-no-files-found: ignore
+          retention-days: 7
+
+  b2:
+    name: Backblaze B2 live conformance
+    needs: validate
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'live' &&
+      (inputs.provider == 'all' || inputs.provider == 'b2'))
+    environment: provider-live-b2
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Restore conformance project
+        run: dotnet restore tests/Vistara.Storage.ConformanceTests --verbosity minimal
+
+      - name: Create isolated prefix
+        id: scope
+        shell: bash
+        run: echo "prefix=vistara-live/b2/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(openssl rand -hex 8)" >> "$GITHUB_OUTPUT"
+
+      - name: Run Backblaze B2 conformance
+        uses: ./.github/actions/provider-live-tests
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+        with:
+          provider: b2
+          mode: live
+          capabilities: >-
+            {"Name":"backblaze-b2","Capabilities":{"SupportsDirectUpload":true,"SupportsMultipartUpload":true,"SupportsRangeReads":true,"SupportsConditionalRead":true,"SupportsConditionalCreate":false,"SupportsConditionalReplace":false,"SupportsConditionalCopy":false,"SupportsConditionalDelete":false,"SupportsConditionalMultipartCompletion":false,"SupportsServerSideCopy":true,"SupportsObjectVersioning":false,"SupportsSignedRead":true,"ReadAfterWriteConsistency":"Strong","ListAfterWriteConsistency":"Eventual","NativeChecksumAlgorithms":["Md5"],"Limits":{"MaxObjectBytes":10000000000000,"MaxKeyBytes":1024,"MaxMultipartParts":10000,"MinMultipartPartBytes":5242880,"MaxMultipartPartBytes":5368709120}},"MaxSinglePutBytes":5368709120,"RequiresUniformMultipartParts":false,"SupportsConditionalCopySource":false,"MultipartFullObjectChecksumAlgorithms":[]}
+          prefix: ${{ steps.scope.outputs.prefix }}
+          bucket: ${{ secrets.B2_BUCKET }}
+          region: ${{ secrets.B2_REGION }}
+          endpoint: ${{ secrets.B2_ENDPOINT }}
+
+      - name: Upload failed B2 results
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: provider-live-b2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/provider-live/b2/*.trx
+          if-no-files-found: ignore
+          retention-days: 7

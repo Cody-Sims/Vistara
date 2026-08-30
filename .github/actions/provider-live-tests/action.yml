@@ -1,0 +1,91 @@
+name: Provider live storage conformance
+description: Validate or run the common storage conformance profile for one live provider.
+
+inputs:
+  provider:
+    description: Provider key (aws, azure, r2, or b2).
+    required: true
+  mode:
+    description: Validation-only dry-run or credentialed live execution.
+    required: true
+  capabilities:
+    description: Explicit provider capability profile JSON.
+    required: true
+  prefix:
+    description: Isolated object-key prefix for this provider run.
+    required: true
+  bucket:
+    description: S3-compatible bucket name.
+    required: false
+    default: ""
+  region:
+    description: S3-compatible signing region.
+    required: false
+    default: ""
+  endpoint:
+    description: S3-compatible HTTPS service origin.
+    required: false
+    default: ""
+  azure-account:
+    description: Azure Storage account name.
+    required: false
+    default: ""
+  azure-container:
+    description: Azure Blob container name.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Validate provider configuration
+      shell: bash
+      env:
+        PROVIDER: ${{ inputs.provider }}
+        MODE: ${{ inputs.mode }}
+        CAPABILITIES: ${{ inputs.capabilities }}
+        PREFIX: ${{ inputs.prefix }}
+        BUCKET: ${{ inputs.bucket }}
+        REGION: ${{ inputs.region }}
+        ENDPOINT: ${{ inputs.endpoint }}
+        AZURE_ACCOUNT: ${{ inputs.azure-account }}
+        AZURE_CONTAINER: ${{ inputs.azure-container }}
+      run: "${{ github.action_path }}/scripts/validate-config.sh"
+
+    - name: Record validation-only result
+      if: inputs.mode == 'dry-run'
+      shell: bash
+      env:
+        PROVIDER: ${{ inputs.provider }}
+      run: echo "Validated ${PROVIDER} without credentials or provider requests." >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Run common storage conformance profile
+      if: inputs.mode == 'live'
+      shell: bash
+      env:
+        PROVIDER: ${{ inputs.provider }}
+        CAPABILITIES: ${{ inputs.capabilities }}
+        PREFIX: ${{ inputs.prefix }}
+        BUCKET: ${{ inputs.bucket }}
+        REGION: ${{ inputs.region }}
+        ENDPOINT: ${{ inputs.endpoint }}
+        AZURE_ACCOUNT: ${{ inputs.azure-account }}
+        AZURE_CONTAINER: ${{ inputs.azure-container }}
+      run: "${{ github.action_path }}/scripts/run-conformance.sh"
+
+    - name: Clean isolated provider prefix
+      if: always() && inputs.mode == 'live'
+      shell: bash
+      env:
+        PROVIDER: ${{ inputs.provider }}
+        MODE: ${{ inputs.mode }}
+        CAPABILITIES: ${{ inputs.capabilities }}
+        PREFIX: ${{ inputs.prefix }}
+        BUCKET: ${{ inputs.bucket }}
+        REGION: ${{ inputs.region }}
+        ENDPOINT: ${{ inputs.endpoint }}
+        AZURE_ACCOUNT: ${{ inputs.azure-account }}
+        AZURE_CONTAINER: ${{ inputs.azure-container }}
+      run: |
+        "${{ github.action_path }}/scripts/validate-config.sh"
+        python3 "${{ github.action_path }}/scripts/cleanup-prefix.py"
