@@ -18,6 +18,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Vistara.Api.ContractTests/Vistara.Api.ContractTests.csproj" />
     <Project Path="tests/Vistara.ArchitectureTests/Vistara.ArchitectureTests.csproj" />
+    <Project Path="tests/Vistara.E2E.HostTests/Vistara.E2E.HostTests.csproj" />
     <Project Path="tests/Vistara.Imaging.Tests/Vistara.Imaging.Tests.csproj" />
     <Project Path="tests/Vistara.IntegrationTests/Vistara.IntegrationTests.csproj" />
     <Project Path="tests/Vistara.MigrationProviderTests/Postgres/Vistara.MigrationProviderTests.Postgres.csproj" />

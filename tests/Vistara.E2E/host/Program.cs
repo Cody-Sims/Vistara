@@ -5,8 +5,6 @@ using Amazon.Runtime;
 using Azure.Core;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Infrastructure;
-using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.FileProviders;
 using Vistara.Api.Composition.Gallery;
 using Vistara.Api.Composition.Platform;
@@ -20,7 +18,6 @@ using Vistara.Domain.Tenancy;
 using Vistara.Persistence;
 using Vistara.Persistence.Ingest;
 using Vistara.Persistence.Model;
-using Vistara.Persistence.Sharing;
 using Vistara.Persistence.Uploads;
 using Vistara.Storage.Local;
 using Vistara.Worker.Composition.Platform;
@@ -112,16 +109,6 @@ static async Task SeedAsync(IReadOnlyDictionary<string, string> arguments)
                      new FixedTenantScope(schemaTenant)))
     {
         await schema.Database.EnsureCreatedAsync();
-    }
-
-    var sharingOptions = new DbContextOptionsBuilder<SharingDbContext>()
-        .UseSqlite(connectionString)
-        .Options;
-    await using (var sharing = new SharingDbContext(sharingOptions))
-    {
-        IRelationalDatabaseCreator creator =
-            sharing.Database.GetService<IRelationalDatabaseCreator>();
-        await creator.CreateTablesAsync();
     }
 
     var localStore = new LocalBlobStore(new LocalBlobStoreOptions(mediaRoot));
