@@ -40,10 +40,10 @@ public sealed class MigrationHistoryTests
 
         AssertRollbackDropsEveryTable(
             sqlite,
-            MigrationTestSupport.SqliteSharingPersistenceMigration);
+            MigrationTestSupport.SqliteLocalCredentialsMigration);
         AssertRollbackDropsEveryTable(
             postgres,
-            MigrationTestSupport.PostgresSharingPersistenceMigration);
+            MigrationTestSupport.PostgresLocalCredentialsMigration);
     }
 
     [Fact]

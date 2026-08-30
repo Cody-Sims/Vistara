@@ -38,6 +38,15 @@ public sealed class LocalIdentityRow
     public DateTimeOffset LinkedAtUtc { get; set; }
 }
 
+public sealed class LocalCredentialRow
+{
+    public Guid LocalIdentityId { get; set; }
+    public Guid UserId { get; set; }
+    public string PasswordHash { get; set; } = string.Empty;
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+    public long Version { get; set; }
+}
+
 public sealed class ExternalIdentityRow
 {
     public Guid Id { get; set; }

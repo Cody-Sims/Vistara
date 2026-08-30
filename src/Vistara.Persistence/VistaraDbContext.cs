@@ -37,6 +37,7 @@ public sealed class VistaraDbContext(
     public DbSet<TenantRow> Tenants => Set<TenantRow>();
     public DbSet<UserRow> Users => Set<UserRow>();
     public DbSet<LocalIdentityRow> LocalIdentities => Set<LocalIdentityRow>();
+    public DbSet<LocalCredentialRow> LocalCredentials => Set<LocalCredentialRow>();
     public DbSet<ExternalIdentityRow> ExternalIdentities => Set<ExternalIdentityRow>();
     public DbSet<TenantMembershipRow> TenantMemberships => Set<TenantMembershipRow>();
     public DbSet<AuthSessionRow> AuthSessions => Set<AuthSessionRow>();
@@ -160,6 +161,26 @@ public sealed class VistaraDbContext(
             entity.HasKey(row => row.Id);
             entity.HasIndex(row => row.NormalizedLogin).IsUnique();
             entity.Property(row => row.NormalizedLogin).HasMaxLength(320);
+            entity.HasOne<UserRow>()
+                .WithMany()
+                .HasForeignKey(row => row.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<LocalCredentialRow>(entity =>
+        {
+            entity.ToTable("local_credentials", table =>
+                table.HasCheckConstraint(
+                    "ck_local_credentials_version",
+                    "\"version\" >= 1"));
+            entity.HasKey(row => row.LocalIdentityId);
+            entity.HasIndex(row => row.UserId);
+            entity.Property(row => row.PasswordHash).HasMaxLength(512);
+            entity.Property(row => row.Version).IsConcurrencyToken();
+            entity.HasOne<LocalIdentityRow>()
+                .WithOne()
+                .HasForeignKey<LocalCredentialRow>(row => row.LocalIdentityId)
+                .OnDelete(DeleteBehavior.Cascade);
             entity.HasOne<UserRow>()
                 .WithMany()
                 .HasForeignKey(row => row.UserId)

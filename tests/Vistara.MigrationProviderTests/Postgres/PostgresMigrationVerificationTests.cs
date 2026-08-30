@@ -21,6 +21,8 @@ public sealed class PostgresMigrationVerificationTests
         "20260829183622_ReconcileLegacyUploadJobQuota";
     private const string WorkerTenantCatalogMigration =
         "20260830044748_AddWorkerTenantCatalog";
+    private const string LocalCredentialsMigration =
+        "20260830233131_AddLocalCredentials";
     private const string SharingPersistenceMigration =
         "20260830101824_AddSharingPersistence";
     private const int ReplacedCheckConstraints = 3;
@@ -35,6 +37,7 @@ public sealed class PostgresMigrationVerificationTests
         LegacyUploadQuotaMigration,
         WorkerTenantCatalogMigration,
         SharingPersistenceMigration,
+        LocalCredentialsMigration,
     ];
 
     [Fact]

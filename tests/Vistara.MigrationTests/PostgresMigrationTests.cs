@@ -43,6 +43,10 @@ public sealed partial class PostgresMigrationTests
             MigrationTestSupport.PostgresSharingPersistenceMigration,
             script,
             StringComparison.Ordinal);
+        Assert.Contains(
+            MigrationTestSupport.PostgresLocalCredentialsMigration,
+            script,
+            StringComparison.Ordinal);
         Assert.Contains("__EFMigrationsHistory", script, StringComparison.Ordinal);
         Assert.Contains("DO $EF$", script, StringComparison.Ordinal);
         Assert.Contains("uuid", script, StringComparison.Ordinal);

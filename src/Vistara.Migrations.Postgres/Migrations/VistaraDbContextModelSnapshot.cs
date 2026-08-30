@@ -1652,6 +1652,41 @@ namespace Vistara.Migrations.Postgres.Migrations
                     b.ToTable("idempotency_requests", (string)null);
                 });
 
+            modelBuilder.Entity("Vistara.Persistence.Model.LocalCredentialRow", b =>
+                {
+                    b.Property<Guid>("LocalIdentityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("local_identity_id");
+
+                    b.Property<string>("PasswordHash")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)")
+                        .HasColumnName("password_hash");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint")
+                        .HasColumnName("version");
+
+                    b.HasKey("LocalIdentityId");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("local_credentials", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_local_credentials_version", "\"version\" >= 1");
+                        });
+                });
+
             modelBuilder.Entity("Vistara.Persistence.Model.LocalIdentityRow", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3585,6 +3620,21 @@ namespace Vistara.Migrations.Postgres.Migrations
                         .HasForeignKey("Vistara.Persistence.Model.IdempotencyRequestRow", "TenantId", "UploadSessionId")
                         .HasPrincipalKey("Vistara.Persistence.Model.UploadSessionRow", "TenantId", "Id")
                         .OnDelete(DeleteBehavior.Cascade);
+                });
+
+            modelBuilder.Entity("Vistara.Persistence.Model.LocalCredentialRow", b =>
+                {
+                    b.HasOne("Vistara.Persistence.Model.LocalIdentityRow", null)
+                        .WithOne()
+                        .HasForeignKey("Vistara.Persistence.Model.LocalCredentialRow", "LocalIdentityId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Vistara.Persistence.Model.UserRow", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Vistara.Persistence.Model.LocalIdentityRow", b =>
