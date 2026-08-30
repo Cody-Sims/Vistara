@@ -1,0 +1,52 @@
+name: Deployment gates
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deployment-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  migration-lock:
+    name: Migration lock and idempotency
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build migration bundle image
+        run: >-
+          docker build
+          --file deploy/containers/migration.Dockerfile
+          --tag vistara-migrations:ci
+          .
+
+      - name: Run concurrent migration bundles
+        env:
+          MIGRATION_IMAGE: vistara-migrations:ci
+        run: >-
+          ./deploy/containers/tests/migration-lock.sh
+          --log-directory artifacts/migration-lock
+
+      - name: Upload migration bundle logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: migration-lock-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/migration-lock/*.log
+          if-no-files-found: ignore
+          retention-days: 7
