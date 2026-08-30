@@ -22,8 +22,18 @@ if [[ "$1" == "compose" ]]; then
   if [[ "$*" == *" up"* ]]; then
     exit "\${FAKE_UP_EXIT:-0}"
   fi
-  if [[ "$*" == *" ps --quiet"* ]]; then
-    printf '%s\\n' "container-\${!#}"
+  if [[ "$*" == *" ps "* ]]; then
+    # A real "docker compose ps --quiet" omits exited one-shot containers, so
+    # the fake only reports a container when the gate passes --all.
+    if [[ "\${!#}" == "--quiet" ]]; then
+      if [[ -n "\${FAKE_EXISTING_CONTAINERS:-}" ]]; then
+        printf '%s\\n' "\${FAKE_EXISTING_CONTAINERS}"
+      fi
+      exit 0
+    fi
+    if [[ "$*" == *" --all "* ]]; then
+      printf '%s\\n' "container-\${!#}"
+    fi
     exit 0
   fi
   exit 0
@@ -77,8 +87,6 @@ function withGate(body) {
             'deploy/compose.starter.yml',
             '--env-file',
             envFile,
-            '--project',
-            'vistara-gate-test',
             '--service',
             'api',
             '--service',
@@ -168,5 +176,58 @@ test('requires an existing environment file', () => {
     const result = run({}, ['--env-file', 'deploy/.env.absent']);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /was not found/);
+  });
+});
+
+test('inspects exited one-shot containers by listing all project containers', () => {
+  withGate(({ run, logPath }) => {
+    const result = run();
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+
+    const invocations = readFileSync(logPath, 'utf8');
+    assert.match(invocations, /compose .* ps --all --quiet migrate/);
+    assert.match(invocations, /compose .* ps --all --quiet api/);
+  });
+});
+
+test('generates a unique project when none is supplied', () => {
+  withGate(({ run, logPath }) => {
+    const result = run();
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+
+    const invocations = readFileSync(logPath, 'utf8');
+    const generated = invocations.match(/--project-name (vistara-gate-[0-9]+-[0-9]+)/);
+    assert.ok(generated, 'the gate must name its own project');
+    assert.match(
+      invocations,
+      new RegExp(`--project-name ${generated[1]} down --volumes`),
+    );
+    assert.match(result.stdout, new RegExp(`project ${generated[1]}`));
+  });
+});
+
+test('refuses a supplied project that already has containers', () => {
+  withGate(({ run, logPath }) => {
+    const result = run({ FAKE_EXISTING_CONTAINERS: 'deadbeefcafe' }, [
+      '--project',
+      'vistara-postgres',
+    ]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /vistara-postgres already has containers/);
+
+    const invocations = readFileSync(logPath, 'utf8');
+    assert.doesNotMatch(invocations, /down --volumes/);
+    assert.doesNotMatch(invocations, /compose .* up /);
+  });
+});
+
+test('accepts a supplied project that has no containers', () => {
+  withGate(({ run, logPath }) => {
+    const result = run({}, ['--project', 'vistara-starter-gate']);
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(
+      readFileSync(logPath, 'utf8'),
+      /--project-name vistara-starter-gate down --volumes/,
+    );
   });
 });

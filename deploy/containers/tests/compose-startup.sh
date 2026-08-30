@@ -29,6 +29,10 @@ Usage:
 --service names a container that must report a healthy healthcheck.
 --completed names a one-shot container that must exit zero.
 --probe names an HTTP endpoint that must answer successfully.
+
+The gate tears its own stack down with volumes. It therefore generates a unique
+project name when --project is omitted, and refuses any project that already
+has containers so that operator data is never removed.
 EOF
 }
 
@@ -52,10 +56,26 @@ done
 [ -f "$env_file" ] || fail "Environment file $env_file was not found."
 [ "${#services[@]}" -gt 0 ] || fail "At least one --service is required."
 
-compose=("$docker_cli" compose --env-file "$env_file" --file "$compose_file")
-if [ -n "$project" ]; then
-  compose+=(--project-name "$project")
+if [ -z "$project" ]; then
+  project="vistara-gate-$$-$(date +%s)"
 fi
+case "$project" in
+  [a-z0-9]*) ;;
+  *) fail "Compose project names must start with a lowercase letter or digit." ;;
+esac
+
+compose=(
+  "$docker_cli" compose
+  --env-file "$env_file"
+  --file "$compose_file"
+  --project-name "$project"
+)
+
+# Reusing a populated project would let the teardown below delete containers and
+# volumes this gate never created.
+existing="$("${compose[@]}" ps --all --quiet 2>/dev/null | tr -d '[:space:]')"
+[ -z "$existing" ] ||
+  fail "Compose project $project already has containers; refusing to reuse it."
 
 cleanup() {
   "${compose[@]}" down --volumes --remove-orphans --timeout 30 >/dev/null 2>&1 || true
@@ -74,7 +94,7 @@ fi
 container_id() {
   local service="$1"
   local id
-  id="$("${compose[@]}" ps --quiet "$service" | head -n 1 | tr -d '[:space:]')"
+  id="$("${compose[@]}" ps --all --quiet "$service" | head -n 1 | tr -d '[:space:]')"
   [ -n "$id" ] || fail "Service $service has no container in $compose_file."
   printf '%s' "$id"
 }
@@ -98,4 +118,4 @@ for probe in ${probes[@]+"${probes[@]}"}; do
     fail "Health probe $probe did not answer successfully."
 done
 
-echo "Compose startup gate passed for $compose_file."
+echo "Compose startup gate passed for $compose_file (project $project)."
