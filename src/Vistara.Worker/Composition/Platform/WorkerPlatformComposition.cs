@@ -13,6 +13,7 @@ using Vistara.Persistence.Lifecycle;
 using Vistara.Persistence.Outbox;
 using Vistara.Worker.Features.Derivatives;
 using Vistara.Worker.Features.Lifecycle;
+using Vistara.Worker.Features.Reconciliation.Derivatives;
 using Vistara.Worker.Features.Reconciliation.Lifecycle;
 using Vistara.Worker.Features.Reconciliation.Storage;
 using Vistara.Worker.Features.Reconciliation.Uploads;
@@ -210,9 +211,12 @@ public static class WorkerPlatformServiceCollectionExtensions
                 IHostedService,
                 UploadReconciliationSchedulerHostedService>());
         services.AddVistaraBlobIntegrityReconciliation();
+        services.AddVistaraDerivativeRecoveryReconciliation();
         services.AddVistaraPurgeRecoveryReconciliation();
         services.AddVistaraReconciliationSchedule(
             ReconciliationSchedules.BlobIntegrity);
+        services.AddVistaraReconciliationSchedule(
+            ReconciliationSchedules.DerivativeRecovery);
         services.AddVistaraReconciliationSchedule(
             ReconciliationSchedules.PurgeRecovery);
         services.AddVistaraReconciliationScheduler();

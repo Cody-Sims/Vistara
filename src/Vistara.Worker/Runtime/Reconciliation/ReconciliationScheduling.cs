@@ -64,6 +64,15 @@ public static class ReconciliationSchedules
         DryRun = true,
     };
 
+    public static ReconciliationSchedule DerivativeRecovery { get; } = new()
+    {
+        JobType = "derivative.reconcile",
+        DedupePrefix = "derivative-reconcile",
+        InitialDelay = TimeSpan.FromMinutes(7),
+        Interval = TimeSpan.FromHours(1),
+        DryRun = false,
+    };
+
     public static ReconciliationSchedule PurgeRecovery { get; } = new()
     {
         JobType = "lifecycle.purge.reconcile",

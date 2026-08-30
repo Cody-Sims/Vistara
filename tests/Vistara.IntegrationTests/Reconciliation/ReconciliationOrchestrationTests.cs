@@ -285,11 +285,20 @@ public sealed class ReconciliationOrchestrationTests
                 .Select(descriptor =>
                     (ReconciliationSchedule)descriptor.ImplementationInstance!),
         ];
-        Assert.Equal(2, schedules.Length);
+        Assert.Equal(3, schedules.Length);
         Assert.All(schedules, schedule => Assert.True(schedule.Interval > TimeSpan.Zero));
+        Assert.Equal(
+            schedules.Length,
+            schedules
+                .Select(schedule => schedule.DedupePrefix)
+                .Distinct(StringComparer.Ordinal)
+                .Count());
         Assert.Contains(
             schedules,
             schedule => schedule.JobType == "storage.reconcile" && schedule.DryRun);
+        Assert.Contains(
+            schedules,
+            schedule => schedule.JobType == "derivative.reconcile");
     }
 
     private static ServiceProvider BuildSchedulerProvider(
