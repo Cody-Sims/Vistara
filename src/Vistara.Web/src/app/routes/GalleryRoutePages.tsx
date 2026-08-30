@@ -8,6 +8,13 @@ import {
   useParams,
   useSearchParams,
 } from 'react-router-dom';
+import {
+  AdminAuditPage,
+  AdminJobsPage,
+  AdminPoliciesPage,
+  AdminStoragePage,
+  AdminUsersPage,
+} from '../../features/admin';
 import { AlbumDetailView, AlbumsView } from '../../features/albums';
 import { FavoritesView } from '../../features/favorites';
 import { LibraryPage } from '../../features/library';
@@ -22,7 +29,7 @@ import {
   UploadQueueView,
 } from '../../features/uploads';
 import { ViewerPage } from '../../features/viewer';
-import { galleryClient } from '../apiClients';
+import { galleryClient, platformClient } from '../apiClients';
 import styles from './galleryRoutes.module.css';
 
 const client = galleryClient;
@@ -135,6 +142,26 @@ export function LibraryRoute() {
   }, [location.pathname, location.search]);
 
   return <LibraryPage dataSource={client} />;
+}
+
+export function AdminUsersRoute() {
+  return <AdminUsersPage client={platformClient} />;
+}
+
+export function AdminStorageRoute() {
+  return <AdminStoragePage client={platformClient} />;
+}
+
+export function AdminJobsRoute() {
+  return <AdminJobsPage client={platformClient} />;
+}
+
+export function AdminPoliciesRoute() {
+  return <AdminPoliciesPage client={platformClient} />;
+}
+
+export function AdminAuditRoute() {
+  return <AdminAuditPage client={platformClient} />;
 }
 
 export function SearchRoute() {

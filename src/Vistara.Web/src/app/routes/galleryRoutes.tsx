@@ -1,6 +1,10 @@
 import type { ReactNode } from 'react';
 import { Navigate, type RouteObject } from 'react-router-dom';
-import { LoginPage, RequireSession } from '../../features/session';
+import {
+  LoginPage,
+  RequireAdministration,
+  RequireSession,
+} from '../../features/session';
 import { SettingsPage } from '../../features/settings';
 import { platformClient } from '../apiClients';
 import { ApplicationFrame } from '../ApplicationFrame';
@@ -10,6 +14,11 @@ import {
 } from '../ShellPages';
 import {
   AccessibleNotFoundRoute,
+  AdminAuditRoute,
+  AdminJobsRoute,
+  AdminPoliciesRoute,
+  AdminStorageRoute,
+  AdminUsersRoute,
   AlbumRoute,
   AlbumsRoute,
   FavoritesRoute,
@@ -35,6 +44,12 @@ export function galleryRoutes(
       <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
     ) : (
       element
+    );
+  const administrative = (title: string, element: ReactNode) =>
+    preview ? (
+      <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
+    ) : (
+      <RequireAdministration>{element}</RequireAdministration>
     );
   const guarded = (title: string, element: ReactNode) =>
     preview ? (
@@ -113,6 +128,30 @@ export function galleryRoutes(
         {
           path: 'settings',
           element: guarded('Settings', <SettingsPage />),
+        },
+        {
+          path: 'admin',
+          element: <Navigate replace to="/admin/users" />,
+        },
+        {
+          path: 'admin/users',
+          element: administrative('People', <AdminUsersRoute />),
+        },
+        {
+          path: 'admin/storage',
+          element: administrative('Storage', <AdminStorageRoute />),
+        },
+        {
+          path: 'admin/jobs',
+          element: administrative('Jobs', <AdminJobsRoute />),
+        },
+        {
+          path: 'admin/policies',
+          element: administrative('Policies', <AdminPoliciesRoute />),
+        },
+        {
+          path: 'admin/audit',
+          element: administrative('Audit log', <AdminAuditRoute />),
         },
         ...additionalRoutes,
         {
