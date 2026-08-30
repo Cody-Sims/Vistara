@@ -44,9 +44,8 @@ internal sealed class FakeDerivativeStatePort(DerivativeWorkItem work)
         {
             if (request.RequestId != Work.RequestId ||
                 request.TenantId != Work.Generation.Source.TenantId ||
-                request.Payload.AssetId != Work.Generation.Source.AssetId ||
-                request.Payload.RevisionId != Work.Generation.Source.RevisionId ||
-                request.Payload.Preset != Work.Generation.Preset.Id.Name ||
+                request.Payload.Generation.GenerationIdentity !=
+                    Work.Generation.Identity.Value ||
                 request.PipelineFingerprint != Work.Generation.PipelineFingerprint)
             {
                 return ValueTask.FromResult(DerivativeAcquireResult.NotFound());
@@ -128,6 +127,14 @@ internal sealed class FakeDerivativeStatePort(DerivativeWorkItem work)
         }
 
         DerivativePublicationAttemptOutcome attempt = await publish(cancellationToken);
+        lock (_gate)
+        {
+            if (!Owns(fence))
+            {
+                return DerivativePublicationOutcome.Stale;
+            }
+        }
+
         if (attempt == DerivativePublicationAttemptOutcome.OutcomeUnknown)
         {
             _ = await RecordPublishOutcomeUnknownAsync(fence, cancellationToken);

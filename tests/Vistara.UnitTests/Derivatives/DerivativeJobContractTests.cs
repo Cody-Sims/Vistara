@@ -13,38 +13,39 @@ public sealed class DerivativeJobContractTests
         new(JsonSerializerDefaults.Web);
 
     [Fact]
-    public void Asset_ingest_payload_is_the_versioned_derivative_job_contract()
+    public void Exact_generation_descriptor_round_trips_with_canonical_dedupe()
     {
-        Guid assetId = Guid.CreateVersion7();
-        Guid revisionId = Guid.CreateVersion7();
-        string json = JsonSerializer.Serialize(
-            new
-            {
-                assetId,
-                revisionId,
-                preset = "thumb",
-            },
-            JsonOptions);
+        DerivativeGenerationRequest generation = Resolve(
+            presetRevision: 3,
+            recipeSchemaVersion: 4,
+            quality: 87);
+        DerivativeJobPayloadV1 expected =
+            DerivativeJobContract.CreatePayload(generation);
+        string json = DerivativeJobContract.Serialize(expected);
 
         bool parsed = DerivativeJobContract.TryParse(
-            new JobType("asset.derivative.generate"),
-            payloadVersion: 1,
+            DerivativeJobContract.Type,
+            DerivativeJobContract.PayloadVersion,
             json,
             out DerivativeJobPayloadV1? payload);
 
         Assert.True(parsed);
-        Assert.NotNull(payload);
-        Assert.Equal(assetId, payload.AssetId);
-        Assert.Equal(revisionId, payload.RevisionId);
-        Assert.Equal("thumb", payload.Preset);
+        Assert.Equal(expected, payload);
+        Assert.Equal(2, DerivativeJobContract.PayloadVersion);
+        Assert.Equal(3, payload?.Generation.PresetRevision);
+        Assert.Equal(4, payload?.Generation.RecipeSchemaVersion);
+        Assert.Equal(1_600, payload?.Generation.Width);
+        Assert.Equal("webp", payload?.Generation.Format);
+        Assert.Equal(87, payload?.Generation.Quality);
+        Assert.Equal("pipeline-1", payload?.Generation.PipelineFingerprint);
         Assert.Equal(
-            $"asset-revision:{revisionId:D}:preset:thumb:1",
-            DerivativeJobContract.CreateDedupeKey(payload).Value);
+            generation.DedupeIdentity.Key,
+            DerivativeJobContract.CreateDedupeKey(payload!));
     }
 
     [Theory]
     [InlineData("derivative.generate", 1)]
-    [InlineData("asset.derivative.generate", 2)]
+    [InlineData("asset.derivative.generate", 3)]
     public void Unsupported_job_alias_or_payload_version_is_rejected(
         string type,
         int payloadVersion)
@@ -60,6 +61,25 @@ public sealed class DerivativeJobContractTests
         Assert.False(DerivativeJobContract.TryParse(
             new JobType(type),
             payloadVersion,
+            json,
+            out _));
+    }
+
+    [Fact]
+    public void Legacy_preset_only_payload_is_rejected()
+    {
+        string json = JsonSerializer.Serialize(
+            new
+            {
+                assetId = Guid.CreateVersion7(),
+                revisionId = Guid.CreateVersion7(),
+                preset = "thumb",
+            },
+            JsonOptions);
+
+        Assert.False(DerivativeJobContract.TryParse(
+            DerivativeJobContract.Type,
+            payloadVersion: 1,
             json,
             out _));
     }
@@ -89,5 +109,82 @@ public sealed class DerivativeJobContractTests
         Assert.Equal(expectedDimension, result.GenerationRequest?.Recipe.Dimensions.Width);
         Assert.Equal(expectedDimension, result.GenerationRequest?.Recipe.Dimensions.Height);
         Assert.Equal(DerivativeFormat.WebP, result.GenerationRequest?.Recipe.Format);
+    }
+
+    [Fact]
+    public void Recipe_and_preset_revisions_change_the_canonical_job_identity()
+    {
+        DerivativeJobPayloadV1 baseline =
+            DerivativeJobContract.CreatePayload(
+                Resolve(presetRevision: 3, recipeSchemaVersion: 4, quality: 82));
+        DerivativeJobPayloadV1 recipeRevision =
+            DerivativeJobContract.CreatePayload(
+                Resolve(presetRevision: 3, recipeSchemaVersion: 5, quality: 82));
+        DerivativeJobPayloadV1 presetRevision =
+            DerivativeJobContract.CreatePayload(
+                Resolve(presetRevision: 4, recipeSchemaVersion: 4, quality: 82));
+
+        Assert.NotEqual(
+            DerivativeJobContract.CreateDedupeKey(baseline),
+            DerivativeJobContract.CreateDedupeKey(recipeRevision));
+        Assert.NotEqual(
+            DerivativeJobContract.CreateDedupeKey(baseline),
+            DerivativeJobContract.CreateDedupeKey(presetRevision));
+    }
+
+    [Theory]
+    [InlineData("\"quality\":87", "\"quality\":86")]
+    [InlineData("\"width\":1600", "\"width\":1024")]
+    [InlineData("\"pipelineFingerprint\":\"pipeline-1\"", "\"pipelineFingerprint\":\"pipeline-2\"")]
+    public void Tampered_generation_fields_are_rejected(
+        string original,
+        string replacement)
+    {
+        string json = DerivativeJobContract.Serialize(
+            DerivativeJobContract.CreatePayload(
+                Resolve(
+                    presetRevision: 3,
+                    recipeSchemaVersion: 4,
+                    quality: 87)));
+
+        Assert.False(DerivativeJobContract.TryParse(
+            DerivativeJobContract.Type,
+            DerivativeJobContract.PayloadVersion,
+            json.Replace(original, replacement, StringComparison.Ordinal),
+            out _));
+    }
+
+    private static DerivativeGenerationRequest Resolve(
+        int presetRevision,
+        int recipeSchemaVersion,
+        int quality)
+    {
+        var source = new DerivativeSourceIdentity(
+            Guid.CreateVersion7(),
+            Guid.CreateVersion7(),
+            Guid.CreateVersion7(),
+            revisionNumber: 1,
+            new ImageSha256(Convert.ToHexStringLower(SHA256.HashData("source"u8))));
+        var recipe = new DerivativeRecipe(
+            recipeSchemaVersion,
+            new DerivativeDimensions(1_600, 1_600),
+            DerivativeFit.Contain,
+            DerivativeFormat.WebP,
+            quality,
+            DerivativeBackground.Transparent,
+            allowUpscale: false,
+            DerivativeMetadataBehavior.StripSensitive);
+        var registry = new DerivativePresetRegistry(
+            [
+                new DerivativePreset(
+                    new DerivativePresetId("viewer", presetRevision),
+                    [recipe]),
+            ]);
+        return Assert.IsType<DerivativeGenerationRequest>(
+            registry.ResolveDefault(
+                source,
+                new DerivativePresetId("viewer", presetRevision),
+                new ImagePipelineFingerprint("pipeline-1"))
+            .GenerationRequest);
     }
 }

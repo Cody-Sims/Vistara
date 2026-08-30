@@ -2,6 +2,8 @@ using Vistara.Application.Assets.Ingest;
 using Vistara.Application.Common;
 using Vistara.Application.Common.Auditing;
 using Vistara.Application.Common.Events;
+using Vistara.Application.Common.Imaging;
+using Vistara.Application.Derivatives;
 using Vistara.Domain.Assets;
 using Vistara.Domain.Jobs;
 
@@ -20,7 +22,9 @@ public sealed class AssetIngestServiceTests
         AssetIngestService service = new(
             unitOfWork,
             new SequenceUuid7Generator(Now),
-            new FixedClock(Now));
+            new FixedClock(Now),
+            DerivativePresetRegistry.Standard,
+            new DescriptorImageProcessor());
         AssetIngestCommand command = CreateCommand();
         transaction.Reservations[command.ReservationId] =
             AssetIngestReservation.Reserved(
@@ -314,6 +318,54 @@ public sealed class AssetIngestServiceTests
     }
 
     [Fact]
+    public async Task Pre_generated_jobs_use_the_exact_canonical_generation_identity()
+    {
+        FakeAssetIngestTransaction transaction = new();
+        AssetIngestService service = CreateService(transaction);
+        AssetIngestCommand command = CreateCommand();
+        transaction.Reservations[command.ReservationId] = Reserved(command);
+
+        AssetIngestResult result = await service.IngestAsync(
+            command,
+            CancellationToken.None);
+
+        AssetIngestReceipt receipt = Assert.IsType<AssetIngestReceipt>(result.Receipt);
+        DurableJob job = Assert.Single(transaction.Jobs, candidate =>
+            DerivativeJobContract.TryParse(
+                candidate.Type,
+                candidate.PayloadVersion,
+                candidate.Payload,
+                out DerivativeJobPayloadV1? parsed) &&
+            parsed?.Generation.PresetName == "thumb");
+        Assert.True(DerivativeJobContract.TryParse(
+            job.Type,
+            job.PayloadVersion,
+            job.Payload,
+            out DerivativeJobPayloadV1? payload));
+        DerivativeGenerationRequest generation = Assert.IsType<DerivativeGenerationRequest>(
+            DerivativePresetRegistry.Standard.ResolveDefault(
+                new DerivativeSourceIdentity(
+                    command.TenantId,
+                    receipt.AssetId,
+                    receipt.RevisionId,
+                    revisionNumber: 1,
+                    new ImageSha256(command.Promotion.Sha256.Value)),
+                new DerivativePresetId("thumb", 1),
+                new ImagePipelineFingerprint("asset-ingest-pipeline"))
+            .GenerationRequest);
+
+        Assert.Equal(generation.DedupeIdentity.Key, job.DedupeKey);
+        Assert.Equal(
+            DerivativeGenerationDescriptorV1.Create(generation),
+            payload?.Generation);
+        Assert.Contains(
+            "\"pipelineFingerprint\":\"asset-ingest-pipeline\"",
+            job.Payload,
+            StringComparison.Ordinal);
+        Assert.Contains("\"quality\":82", job.Payload, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Asset_revisions_expose_no_public_mutation_surface()
     {
         Assert.All(
@@ -327,7 +379,9 @@ public sealed class AssetIngestServiceTests
         new(
             unitOfWork ?? new FakeAssetIngestUnitOfWork(transaction),
             new SequenceUuid7Generator(Now),
-            new FixedClock(Now));
+            new FixedClock(Now),
+            DerivativePresetRegistry.Standard,
+            new DescriptorImageProcessor());
 
     private static AssetIngestReservation Reserved(AssetIngestCommand command) =>
         AssetIngestReservation.Reserved(
@@ -382,6 +436,29 @@ public sealed class AssetIngestServiceTests
     private sealed class FixedClock(DateTimeOffset utcNow) : IClock
     {
         public DateTimeOffset UtcNow { get; } = utcNow;
+    }
+
+    private sealed class DescriptorImageProcessor : IImageProcessor
+    {
+        public ImageProcessorCapabilities Capabilities =>
+            throw new NotSupportedException();
+
+        public ImagePipelineFingerprint PipelineFingerprint { get; } =
+            new("asset-ingest-pipeline");
+
+        public ValueTask<ImageInspection> InspectAsync(
+            IReplayableImageSource source,
+            ImageDecodeLimits limits,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<ImageTransformResult> TransformAsync(
+            IReplayableImageSource source,
+            Stream destination,
+            CanonicalTransformRecipe recipe,
+            ImageDecodeLimits limits,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 
     private sealed class SequenceUuid7Generator(DateTimeOffset timestamp) : IUuid7Generator

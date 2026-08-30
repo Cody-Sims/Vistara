@@ -282,7 +282,8 @@ public interface IDerivativeStatePort
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Invokes publication only while ownership transfer is excluded by the durable store.
+    /// Persists a fenced publication intent, invokes storage outside the
+    /// persistence transaction, then compares and records the outcome.
     /// </summary>
     ValueTask<DerivativePublicationOutcome> PublishIfOwnedAsync(
         DerivativeFence fence,

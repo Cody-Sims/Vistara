@@ -42,3 +42,9 @@ internal sealed class DerivativeRequestRow : ITenantOwnedRow
     public DateTimeOffset UpdatedAtUtc { get; set; }
     public long Version { get; set; }
 }
+
+internal static class DerivativeRequestPersistenceIdentity
+{
+    internal static string PreGeneratedIdempotencyKey(Guid jobId) =>
+        $"internal/pregenerated/{jobId:N}";
+}

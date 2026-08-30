@@ -235,12 +235,12 @@ public sealed class DerivativeService
         fence.JobLease.AcquiredAtUtc == request.JobLease.AcquiredAtUtc &&
         work.RequestId == request.RequestId &&
         generation.Source.TenantId == request.TenantId &&
-        generation.Source.AssetId == request.Payload.AssetId &&
-        generation.Source.RevisionId == request.Payload.RevisionId &&
-        generation.Preset.Id ==
-            new DerivativePresetId(
-                request.Payload.Preset,
-                DerivativeJobContract.PresetRevision) &&
+        generation.Identity.Value ==
+            request.Payload.Generation.GenerationIdentity &&
+        generation.Recipe.Fingerprint ==
+            request.Payload.Generation.RecipeSha256 &&
+        generation.CacheKey.Value ==
+            request.Payload.Generation.CacheKey &&
         generation.PipelineFingerprint == _imageProcessor.PipelineFingerprint;
 
     private async ValueTask<SourceValidation> ValidateSourceAsync(
@@ -483,6 +483,12 @@ public sealed class DerivativeService
             generation.Output,
             head.Properties.ContentLength,
             sha256);
+        if (staged is not null)
+        {
+            await DeleteStagingAsync(staged, cancellationToken);
+        }
+
+        await CheckpointAsync(DerivativeCheckpoint.StagingDeleted, cancellationToken);
         DerivativeStateWriteResult committed = await _state.MarkReadyAsync(
             new DerivativeReadyOutput(
                 fence,
@@ -496,12 +502,6 @@ public sealed class DerivativeService
         }
 
         await CheckpointAsync(DerivativeCheckpoint.ReadyCommitted, cancellationToken);
-        if (staged is not null)
-        {
-            await DeleteStagingAsync(staged, cancellationToken);
-        }
-
-        await CheckpointAsync(DerivativeCheckpoint.StagingDeleted, cancellationToken);
         DerivativeStateWriteResult cleanup = await _state.CompleteCleanupAsync(
             fence,
             cancellationToken);

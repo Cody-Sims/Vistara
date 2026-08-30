@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using Vistara.Api.Features.Derivatives;
 using Vistara.Application.Common;
@@ -88,45 +87,15 @@ internal sealed class PlatformDerivativePersistenceAdapter(
 
         DateTimeOffset now = clock.UtcNow;
         Guid requestId = idGenerator.NewId();
-        string pipelineId = Hash(imageProcessor.PipelineFingerprint.Value);
-        var jobPayload = new DerivativeJobPayloadV1(
-            source.AssetId,
-            source.RevisionId,
-            resolved.Preset.Id.Name);
-        string payload = DerivativeJobContract.Serialize(jobPayload);
-        string jobDedupeKey =
-            DerivativeJobContract.CreateDedupeKey(jobPayload).Value;
+        DerivativeJobPayloadV1 jobPayload =
+            DerivativeJobContract.CreatePayload(generation);
         PersistedDerivativeSubmissionResult stored = await requests.SubmitAsync(
             new PersistedDerivativeSubmission(
                 requestId,
-                source.TenantId,
-                source.AssetId,
-                source.RevisionId,
                 requestId,
-                payload,
-                jobDedupeKey,
                 idempotencyKey.Value,
                 request.RequestHash,
-                request.Preset,
-                request.Revision,
-                request.Parameters.Width,
-                request.Parameters.Height,
-                request.Parameters.Fit,
-                request.Parameters.Format,
-                request.Parameters.Quality,
-                request.Parameters.FocalPoint?.X,
-                request.Parameters.FocalPoint?.Y,
-                request.Parameters.Crop?.X,
-                request.Parameters.Crop?.Y,
-                request.Parameters.Crop?.Width,
-                request.Parameters.Crop?.Height,
-                pipelineId,
-                imageProcessor.PipelineFingerprint.Value,
-                source.SourceSha256,
-                resolved.Recipe.Fingerprint,
-                generation.Identity.Value,
-                generation.CacheKey.Value,
-                generation.Output.FileExtension,
+                jobPayload,
                 source.IsPublic,
                 now),
             cancellationToken);
@@ -155,7 +124,8 @@ internal sealed class PlatformDerivativePersistenceAdapter(
         bool replayed =
             stored.Status == PersistedDerivativeSubmissionStatus.Replayed;
         bool reused =
-            stored.Status == PersistedDerivativeSubmissionStatus.Reused;
+            stored.Status is PersistedDerivativeSubmissionStatus.Reused or
+                PersistedDerivativeSubmissionStatus.Attached;
         return snapshot.State == DerivativeWorkState.Ready
             ? DerivativeSubmissionResult.Ready(
                 snapshot,
@@ -241,18 +211,6 @@ internal sealed class PlatformDerivativePersistenceAdapter(
             request.FailureCode);
     }
 
-    private static string Hash(string value) =>
-        Convert.ToHexStringLower(
-            SHA256.HashData(Encoding.UTF8.GetBytes(value)));
-
-    private static string ToName(DerivativeFormat format) => format switch
-    {
-        DerivativeFormat.Jpeg => "jpeg",
-        DerivativeFormat.Png => "png",
-        DerivativeFormat.WebP => "webp",
-        _ => throw new ArgumentOutOfRangeException(nameof(format)),
-    };
-
 }
 
 internal sealed class PlatformDerivativePresetCatalog
@@ -261,26 +219,20 @@ internal sealed class PlatformDerivativePresetCatalog
 
     public PlatformDerivativePresetCatalog()
     {
-        DerivativePreset[] presets =
-        [
-            CreatePreset("thumb", DerivativeFit.Cover, [256, 512], false),
-            CreatePreset("grid", DerivativeFit.Cover, [512, 1_024], false),
-            CreatePreset(
-                "viewer",
-                DerivativeFit.Contain,
-                [1_024, 1_600, 2_400],
-                false),
-            CreatePreset(
-                "download-web",
-                DerivativeFit.Contain,
-                [1_024, 1_600, 2_400],
-                true),
-        ];
-        _presets = presets.ToDictionary(
-            preset => preset.Id.Name,
-            StringComparer.Ordinal);
+        DerivativePreset[] presets = [.. DerivativePresetRegistry.Standard.Presets];
+        _presets = presets
+            .GroupBy(preset => preset.Id.Name, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => group
+                    .OrderByDescending(preset => preset.Id.Revision)
+                    .First(),
+                StringComparer.Ordinal);
         Definitions = presets
-            .Select(ToDefinition)
+            .GroupBy(preset => preset.Id.Name, StringComparer.Ordinal)
+            .Select(group => ToDefinition(
+                group.Key,
+                group.OrderBy(preset => preset.Id.Revision).ToArray()))
             .OrderBy(definition => definition.Name, StringComparer.Ordinal)
             .ToArray();
     }
@@ -417,33 +369,31 @@ internal sealed class PlatformDerivativePresetCatalog
     }
 
     private static DerivativePresetDefinition ToDefinition(
-        DerivativePreset preset)
+        string name,
+        IReadOnlyList<DerivativePreset> revisions)
     {
-        DerivativeRecipe[] outputs = [DefaultRecipe(preset)];
-        var bounds = new DerivativeParameterBounds(
-            outputs.Min(output => output.Dimensions.Width),
-            outputs.Max(output => output.Dimensions.Width),
-            outputs.Min(output => output.Dimensions.Height),
-            outputs.Max(output => output.Dimensions.Height),
-            outputs.Min(output => output.Quality),
-            outputs.Max(output => output.Quality),
-            outputs.Select(output => ToName(output.Fit))
-                .Distinct(StringComparer.Ordinal)
-                .Order(StringComparer.Ordinal)
-                .ToArray(),
-            outputs.Select(output => ToName(output.Format))
-                .Distinct(StringComparer.Ordinal)
-                .Order(StringComparer.Ordinal)
-                .ToArray());
+        int activeRevision = revisions.Max(preset => preset.Id.Revision);
         return new DerivativePresetDefinition(
-            preset.Id.Name,
-            preset.Id.Revision,
-            [
-                new DerivativePresetRevisionDefinition(
-                    preset.Id.Revision,
-                    true,
-                    bounds),
-            ]);
+            name,
+            activeRevision,
+            revisions
+                .Select(preset =>
+                {
+                    DerivativeRecipe output = DefaultRecipe(preset);
+                    return new DerivativePresetRevisionDefinition(
+                        preset.Id.Revision,
+                        preset.Id.Revision == activeRevision,
+                        new DerivativeParameterBounds(
+                            output.Dimensions.Width,
+                            output.Dimensions.Width,
+                            output.Dimensions.Height,
+                            output.Dimensions.Height,
+                            output.Quality,
+                            output.Quality,
+                            [ToName(output.Fit)],
+                            [ToName(output.Format)]));
+                })
+                .ToArray());
     }
 
     private static DerivativeRecipe DefaultRecipe(DerivativePreset preset)
@@ -457,44 +407,6 @@ internal sealed class PlatformDerivativePresetCatalog
             output.Dimensions == dimensions &&
             output.Format == DerivativeFormat.WebP);
     }
-
-    private static DerivativePreset CreatePreset(
-        string name,
-        DerivativeFit fit,
-        IEnumerable<int> sizes,
-        bool includePng)
-    {
-        var outputs = new List<DerivativeRecipe>();
-        foreach (int size in sizes)
-        {
-            outputs.Add(CreateRecipe(size, fit, DerivativeFormat.WebP));
-            outputs.Add(CreateRecipe(size, fit, DerivativeFormat.Jpeg));
-            if (includePng)
-            {
-                outputs.Add(CreateRecipe(size, fit, DerivativeFormat.Png));
-            }
-        }
-
-        return new DerivativePreset(
-            new DerivativePresetId(name, 1),
-            outputs);
-    }
-
-    private static DerivativeRecipe CreateRecipe(
-        int size,
-        DerivativeFit fit,
-        DerivativeFormat format) =>
-        new(
-            1,
-            new DerivativeDimensions(size, size),
-            fit,
-            format,
-            format == DerivativeFormat.Png ? 100 : 82,
-            format == DerivativeFormat.Jpeg
-                ? DerivativeBackground.White
-                : DerivativeBackground.Transparent,
-            false,
-            DerivativeMetadataBehavior.StripSensitive);
 
     private static string HashCanonical(
         string preset,

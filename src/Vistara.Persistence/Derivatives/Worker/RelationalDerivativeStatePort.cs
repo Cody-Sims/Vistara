@@ -1,5 +1,4 @@
 using System.Data;
-using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -14,34 +13,36 @@ using Vistara.Persistence.Model;
 namespace Vistara.Persistence.Derivatives.Worker;
 
 /// <summary>
-/// Persists derivative checkpoints inside the versioned job payload so the
-/// worker state and its lease fence are locked atomically in one row.
+/// Keeps fenced worker state on the derivative row so the immutable job payload
+/// cannot race the job heartbeat. Processing rows temporarily use the
+/// representation fields for the staged candidate and CacheKey for its version.
 /// </summary>
 public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
 {
-    private static readonly JsonSerializerOptions JsonOptions =
-        new(JsonSerializerDefaults.Web);
+    private const string PublicationIntent = "derivative.publication.intent";
+    private const string PublicationPublished = "derivative.publication.published";
+    private const string PublicationOutcomeUnknown =
+        "derivative.publication.outcome_unknown";
+    private const string Ownership = "derivative.ownership";
 
-    private readonly JobDbContext _jobs;
-    private readonly VistaraDbContext _database;
+    private readonly DbContextOptions<VistaraDbContext> _databaseOptions;
     private readonly IMutableTenantScope _tenantScope;
-    private readonly DerivativePresetRegistry _presets;
     private readonly IClock _clock;
     private readonly bool _isSqlite;
 
     public RelationalDerivativeStatePort(
-        JobDbContext jobs,
-        VistaraDbContext database,
+        DbContextOptions<VistaraDbContext> databaseOptions,
         IMutableTenantScope tenantScope,
-        DerivativePresetRegistry presets,
         IClock clock)
     {
-        _jobs = jobs ?? throw new ArgumentNullException(nameof(jobs));
-        _database = database ?? throw new ArgumentNullException(nameof(database));
-        _tenantScope = tenantScope ?? throw new ArgumentNullException(nameof(tenantScope));
-        _presets = presets ?? throw new ArgumentNullException(nameof(presets));
+        _databaseOptions = databaseOptions ??
+            throw new ArgumentNullException(nameof(databaseOptions));
+        _tenantScope = tenantScope ??
+            throw new ArgumentNullException(nameof(tenantScope));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
-        string? provider = jobs.Database.ProviderName;
+        using var database =
+            new VistaraDbContext(_databaseOptions, _tenantScope);
+        string? provider = database.Database.ProviderName;
         _isSqlite = provider == "Microsoft.EntityFrameworkCore.Sqlite";
         if (!_isSqlite && provider != "Npgsql.EntityFrameworkCore.PostgreSQL")
         {
@@ -50,86 +51,110 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
         }
     }
 
-    public ValueTask<DerivativeAcquireResult> AcquireAsync(
+    public async ValueTask<DerivativeAcquireResult> AcquireAsync(
         DerivativeAcquireRequest request,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return WithLockedJobAsync(
-            request.TenantId,
-            request.JobLease.JobId,
-            async (row, token) =>
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            try
             {
-                PayloadEnvelope? payload = Parse(row?.Payload);
-                if (row is null ||
-                    payload is null ||
-                    !MatchesRequest(row, payload, request))
-                {
-                    return DerivativeAcquireResult.NotFound();
-                }
-
-                WorkerState? state = payload.WorkerState;
-                if (state is null)
-                {
-                    WorkState? work = await LoadWorkAsync(request, token);
-                    if (work is null)
-                    {
-                        return DerivativeAcquireResult.NotFound();
-                    }
-
-                    state = new WorkerState
-                    {
-                        Status = StateStatus.Processing,
-                        Work = work,
-                    };
-                    payload.WorkerState = state;
-                }
-                else if (!MatchesWork(state.Work, request))
-                {
-                    return DerivativeAcquireResult.NotFound();
-                }
-
-                if (state.Status == StateStatus.Completed ||
-                    (state.Status == StateStatus.Failed &&
-                     state.Failure is { Retryable: false }))
-                {
-                    return DerivativeAcquireResult.Completed();
-                }
-
-                DateTimeOffset now = request.NowUtc;
-                if (state.Fence is not null &&
-                    OwnsCurrentJob(row, state.Fence, now) &&
-                    now < state.Fence.ExpiresAtUtc)
-                {
-                    return DerivativeAcquireResult.Busy();
-                }
-
-                JobLease currentLease = CurrentLease(row);
-                state.FenceVersion++;
-                state.Fence = FenceState.From(
-                    currentLease,
-                    state.FenceVersion,
-                    now.Add(request.OwnershipDuration));
-                if (state.Status != StateStatus.Ready)
-                {
-                    state.Status = StateStatus.Processing;
-                    state.Failure = null;
-                }
-
-                row.Payload = Serialize(payload);
-                await _jobs.SaveChangesAsync(token);
-                DerivativeFence fence = state.Fence.ToFence(
+                return await WithLockedJobAsync(
                     request.TenantId,
-                    request.RequestId);
-                DerivativeWorkItem workItem = state.Work.ToWork(
-                    request.RequestId,
-                    _presets);
-                DerivativeStagedOutput? staged = state.Staged?.ToStaged();
-                return state.Status == StateStatus.Ready
-                    ? DerivativeAcquireResult.Ready(fence, workItem, staged)
-                    : DerivativeAcquireResult.Acquired(fence, workItem, staged);
-            },
-            cancellationToken);
+                    request.JobLease.JobId,
+                    async (database, job, token) =>
+                    {
+                        if (!MatchesJob(job, request))
+                        {
+                            return DerivativeAcquireResult.NotFound();
+                        }
+
+                        LoadedWork? loaded = await LoadWorkAsync(
+                            database,
+                            request,
+                            token);
+                        if (loaded is null)
+                        {
+                            return DerivativeAcquireResult.NotFound();
+                        }
+
+                        DerivativeGenerationDescriptorV1 descriptor =
+                            request.Payload.Generation;
+                        DerivativeRequestRow? state = await database
+                            .Set<DerivativeRequestRow>()
+                            .SingleOrDefaultAsync(
+                                row =>
+                                    row.JobId == request.RequestId ||
+                                    row.GenerationIdentity ==
+                                        descriptor.GenerationIdentity,
+                                token);
+                        if (state is null)
+                        {
+                            state = CreateState(
+                                job!,
+                                descriptor,
+                                loaded.IsPublic);
+                            database.Add(state);
+                        }
+                        else if (!MatchesState(state, job!, descriptor))
+                        {
+                            return DerivativeAcquireResult.NotFound();
+                        }
+
+                        if (state.State == "Failed" &&
+                            IsPermanentFailure(state.FailureCode))
+                        {
+                            return DerivativeAcquireResult.Completed();
+                        }
+
+                        if (state.State == "Processing" &&
+                            HasLiveOwnership(
+                                state.FailureCode,
+                                job!,
+                                request.NowUtc))
+                        {
+                            return DerivativeAcquireResult.Busy();
+                        }
+
+                        long fenceVersion = checked(state.Version + 1);
+                        state.Version = fenceVersion;
+                        state.UpdatedAtUtc = request.NowUtc;
+                        DerivativeStagedOutput? staged = ReadStaged(state);
+                        bool ready = state.State == "Ready";
+                        if (!ready)
+                        {
+                            state.State = "Processing";
+                        }
+
+                        DerivativeFence fence = new(
+                            request.TenantId,
+                            request.RequestId,
+                            fenceVersion,
+                            request.NowUtc.Add(request.OwnershipDuration),
+                            CurrentLease(job!));
+                        state.FailureCode = OwnershipMarker(
+                            Ownership,
+                            fence);
+                        await database.SaveChangesAsync(token);
+                        return ready
+                            ? DerivativeAcquireResult.Ready(
+                                fence,
+                                loaded.Work,
+                                staged)
+                            : DerivativeAcquireResult.Acquired(
+                                fence,
+                                loaded.Work,
+                                staged);
+                    },
+                    cancellationToken);
+            }
+            catch (DbUpdateException) when (attempt == 0)
+            {
+            }
+        }
+
+        return DerivativeAcquireResult.NotFound();
     }
 
     public ValueTask<DerivativeStateWriteResult> RecordStagedAsync(
@@ -140,10 +165,17 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
         ArgumentNullException.ThrowIfNull(staged);
         return MutateOwnedAsync(
             fence,
-            (state, _) =>
+            (_, state, _) =>
             {
-                state.Staged ??= StagedState.From(staged);
-                return ValueTask.CompletedTask;
+                DerivativeStagedOutput? existing = ReadStaged(state);
+                if (existing is not null && existing != staged)
+                {
+                    return ValueTask.FromResult(false);
+                }
+
+                WriteStaged(state, staged);
+                state.UpdatedAtUtc = _clock.UtcNow;
+                return ValueTask.FromResult(true);
             },
             cancellationToken);
     }
@@ -153,14 +185,17 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
         CancellationToken cancellationToken) =>
         MutateOwnedAsync(
             fence,
-            (state, _) =>
+            (_, state, _) =>
             {
-                state.PublishOutcomeUnknown = true;
-                return ValueTask.CompletedTask;
+                state.FailureCode = OwnershipMarker(
+                    PublicationOutcomeUnknown,
+                    fence);
+                state.UpdatedAtUtc = _clock.UtcNow;
+                return ValueTask.FromResult(true);
             },
             cancellationToken);
 
-    public ValueTask<DerivativePublicationOutcome> PublishIfOwnedAsync(
+    public async ValueTask<DerivativePublicationOutcome> PublishIfOwnedAsync(
         DerivativeFence fence,
         DerivativeStagedOutput staged,
         DerivativePublicationOperation publish,
@@ -168,51 +203,71 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
     {
         ArgumentNullException.ThrowIfNull(staged);
         ArgumentNullException.ThrowIfNull(publish);
-        return WithLockedJobAsync(
-            fence.TenantId,
-            fence.JobLease.JobId,
-            async (row, token) =>
+        DerivativeStateWriteResult authorized = await MutateOwnedAsync(
+            fence,
+            (_, state, _) =>
             {
-                PayloadEnvelope? payload = Parse(row?.Payload);
-                WorkerState? state = payload?.WorkerState;
-                if (row is null ||
-                    payload is null ||
-                    state is null ||
-                    !Owns(row, state, fence))
+                if (ReadStaged(state) != staged)
                 {
-                    return DerivativePublicationOutcome.Stale;
+                    return ValueTask.FromResult(false);
                 }
 
-                StagedState candidate = StagedState.From(staged);
-                if (state.Staged is not null && state.Staged != candidate)
+                state.FailureCode = OwnershipMarker(
+                    PublicationIntent,
+                    fence);
+                state.UpdatedAtUtc = _clock.UtcNow;
+                return ValueTask.FromResult(true);
+            },
+            cancellationToken);
+        if (authorized == DerivativeStateWriteResult.Stale)
+        {
+            return DerivativePublicationOutcome.Stale;
+        }
+
+        DerivativePublicationAttemptOutcome attempt =
+            await publish(cancellationToken);
+        DerivativeStateWriteResult recorded = await MutateOwnedAsync(
+            fence,
+            (_, state, _) =>
+            {
+                if (ReadStaged(state) != staged ||
+                    state.FailureCode !=
+                        OwnershipMarker(PublicationIntent, fence))
                 {
-                    return DerivativePublicationOutcome.Stale;
+                    return ValueTask.FromResult(false);
                 }
 
-                state.Staged = candidate;
-                row.Payload = Serialize(payload);
-                await _jobs.SaveChangesAsync(token);
-                DerivativePublicationAttemptOutcome attempt = await publish(token);
-                if (attempt == DerivativePublicationAttemptOutcome.OutcomeUnknown)
-                {
-                    state.PublishOutcomeUnknown = true;
-                    row.Payload = Serialize(payload);
-                    await _jobs.SaveChangesAsync(token);
-                }
-
-                return attempt switch
+                state.FailureCode = attempt switch
                 {
                     DerivativePublicationAttemptOutcome.Published =>
-                        DerivativePublicationOutcome.Published,
+                        OwnershipMarker(PublicationPublished, fence),
                     DerivativePublicationAttemptOutcome.OutcomeUnknown =>
-                        DerivativePublicationOutcome.OutcomeUnknown,
+                        OwnershipMarker(PublicationOutcomeUnknown, fence),
                     DerivativePublicationAttemptOutcome.Retry =>
-                        DerivativePublicationOutcome.Retry,
+                        OwnershipMarker(Ownership, fence),
                     _ => throw new InvalidOperationException(
                         "The derivative publication outcome is invalid."),
                 };
+                state.UpdatedAtUtc = _clock.UtcNow;
+                return ValueTask.FromResult(true);
             },
             cancellationToken);
+        if (recorded == DerivativeStateWriteResult.Stale)
+        {
+            return DerivativePublicationOutcome.Stale;
+        }
+
+        return attempt switch
+        {
+            DerivativePublicationAttemptOutcome.Published =>
+                DerivativePublicationOutcome.Published,
+            DerivativePublicationAttemptOutcome.OutcomeUnknown =>
+                DerivativePublicationOutcome.OutcomeUnknown,
+            DerivativePublicationAttemptOutcome.Retry =>
+                DerivativePublicationOutcome.Retry,
+            _ => throw new InvalidOperationException(
+                "The derivative publication outcome is invalid."),
+        };
     }
 
     public ValueTask<DerivativeStateWriteResult> MarkReadyAsync(
@@ -222,20 +277,36 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
         ArgumentNullException.ThrowIfNull(ready);
         return MutateOwnedAsync(
             ready.Fence,
-            (state, _) =>
+            (job, state, _) =>
             {
-                if (!string.Equals(
-                        state.Work.GenerationIdentity,
+                if (!TryReadPayload(job, out DerivativeJobPayloadV1? payload) ||
+                    payload is null ||
+                    !string.Equals(
+                        payload.Generation.GenerationIdentity,
                         ready.Result.Identity.Value,
+                        StringComparison.Ordinal) ||
+                    !string.Equals(
+                        payload.Generation.CacheKey,
+                        ready.Result.CacheKey.Value,
                         StringComparison.Ordinal))
                 {
                     throw new InvalidOperationException(
-                        "The ready derivative identity does not match durable work.");
+                        "The ready derivative does not match its generation descriptor.");
                 }
 
-                state.Status = StateStatus.Ready;
-                state.ReadyAtUtc = ready.ReadyAtUtc;
-                return ValueTask.CompletedTask;
+                state.State = "Ready";
+                state.FailureCode = null;
+                state.CacheKey = payload.Generation.CacheKey;
+                state.RepresentationStorageKey =
+                    ready.Head.Identity.Key.Value;
+                state.RepresentationContentLength =
+                    ready.Head.Properties.ContentLength;
+                state.RepresentationContentType =
+                    ready.Head.Properties.ContentType.Value;
+                state.RepresentationSha256 =
+                    ready.Result.RepresentationSha256.Value;
+                state.UpdatedAtUtc = ready.ReadyAtUtc;
+                return ValueTask.FromResult(true);
             },
             cancellationToken);
     }
@@ -247,18 +318,23 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
         ArgumentNullException.ThrowIfNull(failure);
         return MutateOwnedAsync(
             failure.Fence,
-            (state, _) =>
+            (job, state, _) =>
             {
-                state.Status = StateStatus.Failed;
-                state.Failure = new FailureState
+                if (!TryReadPayload(job, out DerivativeJobPayloadV1? payload) ||
+                    payload is null)
                 {
-                    Code = failure.Code,
-                    Retryable = failure.Retryable,
-                    FailedAtUtc = failure.FailedAtUtc,
-                };
-                state.Staged = null;
-                state.Fence = null;
-                return ValueTask.CompletedTask;
+                    return ValueTask.FromResult(false);
+                }
+
+                state.State = "Failed";
+                state.FailureCode = failure.Code.ToString();
+                state.CacheKey = payload.Generation.CacheKey;
+                state.RepresentationStorageKey = null;
+                state.RepresentationContentLength = null;
+                state.RepresentationContentType = null;
+                state.RepresentationSha256 = null;
+                state.UpdatedAtUtc = failure.FailedAtUtc;
+                return ValueTask.FromResult(true);
             },
             cancellationToken);
     }
@@ -268,123 +344,127 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
         CancellationToken cancellationToken) =>
         MutateOwnedAsync(
             fence,
-            (state, _) =>
+            (_, state, _) =>
             {
-                state.Status = StateStatus.Completed;
-                state.Staged = null;
-                state.Fence = null;
-                return ValueTask.CompletedTask;
+                if (state.State != "Ready")
+                {
+                    return ValueTask.FromResult(false);
+                }
+
+                state.FailureCode = null;
+                state.UpdatedAtUtc = _clock.UtcNow;
+                return ValueTask.FromResult(true);
             },
             cancellationToken);
 
     private ValueTask<DerivativeStateWriteResult> MutateOwnedAsync(
         DerivativeFence fence,
-        Func<WorkerState, CancellationToken, ValueTask> mutate,
+        Func<JobRow, DerivativeRequestRow, CancellationToken, ValueTask<bool>> mutate,
         CancellationToken cancellationToken) =>
         WithLockedJobAsync(
             fence.TenantId,
             fence.JobLease.JobId,
-            async (row, token) =>
+            async (database, job, token) =>
             {
-                PayloadEnvelope? payload = Parse(row?.Payload);
-                WorkerState? state = payload?.WorkerState;
-                if (row is null ||
-                    payload is null ||
-                    state is null ||
-                    !Owns(row, state, fence))
+                if (job is null || !Owns(job, fence))
                 {
                     return DerivativeStateWriteResult.Stale;
                 }
 
-                await mutate(state, token);
-                row.Payload = Serialize(payload);
-                await _jobs.SaveChangesAsync(token);
+                DerivativeRequestRow? state = await database
+                    .Set<DerivativeRequestRow>()
+                    .SingleOrDefaultAsync(
+                        row => row.JobId == fence.JobLease.JobId.Value,
+                        token);
+                if (state is null ||
+                    !HasOwnership(state.FailureCode, fence) ||
+                    !await mutate(job, state, token))
+                {
+                    return DerivativeStateWriteResult.Stale;
+                }
+
+                state.Version = checked(state.Version + 1);
+                await database.SaveChangesAsync(token);
                 return DerivativeStateWriteResult.Applied;
             },
             cancellationToken);
 
-    private bool Owns(JobRow row, WorkerState state, DerivativeFence fence) =>
-        state.Fence is not null &&
-        state.Fence.Version == fence.Version &&
-        state.Fence.JobId == fence.JobLease.JobId.Value &&
-        string.Equals(
-            state.Fence.JobOwner,
-            fence.JobLease.Owner.Value,
-            StringComparison.Ordinal) &&
-        state.Fence.JobAcquiredAtUtc == fence.JobLease.AcquiredAtUtc &&
-        OwnsCurrentJob(row, state.Fence, _clock.UtcNow) &&
-        _clock.UtcNow < state.Fence.ExpiresAtUtc;
+    private bool Owns(JobRow job, DerivativeFence fence)
+    {
+        DateTimeOffset now = _clock.UtcNow;
+        return fence.TenantId == job.TenantId &&
+            fence.RequestId == job.Id &&
+            fence.JobLease.JobId.Value == job.Id &&
+            job.State == nameof(JobState.Leased) &&
+            string.Equals(
+                job.LeaseOwner,
+                fence.JobLease.Owner.Value,
+                StringComparison.Ordinal) &&
+            job.LeaseAcquiredAtUtc == fence.JobLease.AcquiredAtUtc &&
+            job.LeaseExpiresAtUtc > now &&
+            fence.ExpiresAtUtc > now;
+    }
 
-    private static bool OwnsCurrentJob(
-        JobRow row,
-        FenceState fence,
-        DateTimeOffset now) =>
-        row.State == nameof(JobState.Leased) &&
-        row.Id == fence.JobId &&
-        string.Equals(row.LeaseOwner, fence.JobOwner, StringComparison.Ordinal) &&
-        row.LeaseAcquiredAtUtc == fence.JobAcquiredAtUtc &&
-        row.LeaseExpiresAtUtc > now;
-
-    private static bool MatchesRequest(
-        JobRow row,
-        PayloadEnvelope payload,
+    private static bool MatchesJob(
+        JobRow? job,
         DerivativeAcquireRequest request) =>
-        row.Id == request.RequestId &&
-        row.TenantId == request.TenantId &&
-        row.Type == DerivativeJobContract.TypeName &&
-        row.PayloadVersion == DerivativeJobContract.PayloadVersion &&
-        row.State == nameof(JobState.Leased) &&
-        row.LeaseOwner == request.JobLease.Owner.Value &&
-        row.LeaseAcquiredAtUtc == request.JobLease.AcquiredAtUtc &&
-        row.LeaseExpiresAtUtc > request.NowUtc &&
-        payload.AssetId == request.Payload.AssetId &&
-        payload.RevisionId == request.Payload.RevisionId &&
-        string.Equals(payload.Preset, request.Payload.Preset, StringComparison.Ordinal) &&
-        row.DedupeKey ==
+        job is not null &&
+        job.Id == request.RequestId &&
+        job.TenantId == request.TenantId &&
+        job.State == nameof(JobState.Leased) &&
+        string.Equals(
+            job.LeaseOwner,
+            request.JobLease.Owner.Value,
+            StringComparison.Ordinal) &&
+        job.LeaseAcquiredAtUtc == request.JobLease.AcquiredAtUtc &&
+        job.LeaseExpiresAtUtc > request.NowUtc &&
+        TryReadPayload(job, out DerivativeJobPayloadV1? payload) &&
+        payload == request.Payload &&
+        job.DedupeKey ==
             DerivativeJobContract.CreateDedupeKey(request.Payload).Value;
 
-    private static bool MatchesWork(
-        WorkState work,
-        DerivativeAcquireRequest request) =>
-        work.TenantId == request.TenantId &&
-        work.AssetId == request.Payload.AssetId &&
-        work.RevisionId == request.Payload.RevisionId &&
-        string.Equals(
-            work.PresetName,
-            request.Payload.Preset,
-            StringComparison.Ordinal) &&
-        string.Equals(
-            work.StorageProvider,
-            request.StorageProvider,
-            StringComparison.Ordinal) &&
-        string.Equals(
-            work.PipelineFingerprint,
-            request.PipelineFingerprint.Value,
-            StringComparison.Ordinal);
+    private static bool TryReadPayload(
+        JobRow job,
+        out DerivativeJobPayloadV1? payload) =>
+        DerivativeJobContract.TryParse(
+            new JobType(job.Type),
+            job.PayloadVersion,
+            job.Payload,
+            out payload);
 
-    private async ValueTask<WorkState?> LoadWorkAsync(
+    private static async ValueTask<LoadedWork?> LoadWorkAsync(
+        VistaraDbContext database,
         DerivativeAcquireRequest request,
         CancellationToken cancellationToken)
     {
-        _tenantScope.Establish(request.TenantId);
-        _database.ChangeTracker.Clear();
-        AssetRow? asset = await _database.Assets
+        DerivativeGenerationDescriptorV1 descriptor =
+            request.Payload.Generation;
+        if (descriptor.TenantId != request.TenantId ||
+            !string.Equals(
+                descriptor.PipelineFingerprint,
+                request.PipelineFingerprint.Value,
+                StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        AssetRow? asset = await database.Assets
             .AsNoTracking()
             .SingleOrDefaultAsync(
                 row =>
-                    row.Id == request.Payload.AssetId &&
-                    row.CurrentRevisionId == request.Payload.RevisionId,
+                    row.Id == descriptor.AssetId &&
+                    row.CurrentRevisionId == descriptor.RevisionId,
                 cancellationToken);
-        AssetRevisionRow? revision = await _database.AssetRevisions
+        AssetRevisionRow? revision = await database.AssetRevisions
             .AsNoTracking()
             .SingleOrDefaultAsync(
                 row =>
-                    row.Id == request.Payload.RevisionId &&
-                    row.AssetId == request.Payload.AssetId,
+                    row.Id == descriptor.RevisionId &&
+                    row.AssetId == descriptor.AssetId,
                 cancellationToken);
         BlobRow? blob = revision is null
             ? null
-            : await _database.Blobs
+            : await database.Blobs
                 .AsNoTracking()
                 .SingleOrDefaultAsync(
                     row => row.Id == revision.BlobId,
@@ -393,6 +473,11 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
             revision is null ||
             blob is null ||
             blob.State != "Active" ||
+            revision.RevisionNumber != descriptor.RevisionNumber ||
+            !string.Equals(
+                blob.Sha256,
+                descriptor.SourceSha256,
+                StringComparison.Ordinal) ||
             !string.Equals(
                 blob.Provider,
                 request.StorageProvider,
@@ -403,98 +488,274 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
             return null;
         }
 
-        DerivativeSourceIdentity source;
+        DerivativeGenerationRequest generation;
         try
         {
-            source = new DerivativeSourceIdentity(
-                request.TenantId,
-                asset.Id,
-                revision.Id,
-                revision.RevisionNumber,
-                new ImageSha256(blob.Sha256));
+            generation = descriptor.ToGenerationRequest();
         }
         catch (ArgumentException)
         {
             return null;
         }
 
-        DerivativeResolutionResult resolved = _presets.ResolveDefault(
-            source,
-            new DerivativePresetId(
-                request.Payload.Preset,
-                DerivativeJobContract.PresetRevision),
-            request.PipelineFingerprint);
-        DerivativeGenerationRequest? generation = resolved.GenerationRequest;
-        if (resolved.Status != DerivativeNegotiationStatus.Selected ||
-            generation is null)
+        return new LoadedWork(
+            new DerivativeWorkItem(
+                request.RequestId,
+                generation,
+                new BlobKey(blob.ObjectKey),
+                new BlobVersion(blob.ProviderVersion),
+                blob.SizeBytes),
+            asset.Visibility == "Public");
+    }
+
+    private static DerivativeRequestRow CreateState(
+        JobRow job,
+        DerivativeGenerationDescriptorV1 descriptor,
+        bool isPublic)
+    {
+        DerivativeGenerationRequest generation =
+            descriptor.ToGenerationRequest();
+        return new DerivativeRequestRow
+        {
+            Id = job.Id,
+            TenantId = descriptor.TenantId,
+            AssetId = descriptor.AssetId,
+            RevisionId = descriptor.RevisionId,
+            JobId = job.Id,
+            IdempotencyKey =
+                DerivativeRequestPersistenceIdentity
+                    .PreGeneratedIdempotencyKey(job.Id),
+            RequestHash = descriptor.GenerationIdentity,
+            PresetName = descriptor.PresetName,
+            PresetRevision = descriptor.PresetRevision,
+            Width = descriptor.Width,
+            Height = descriptor.Height,
+            Fit = descriptor.Fit,
+            Format = descriptor.Format,
+            Quality = descriptor.Quality,
+            PipelineId = descriptor.PipelineIdentity,
+            PipelineFingerprint = descriptor.PipelineFingerprint,
+            SourceSha256 = descriptor.SourceSha256,
+            RecipeSha256 = descriptor.RecipeSha256,
+            GenerationIdentity = descriptor.GenerationIdentity,
+            CacheKey = descriptor.CacheKey,
+            Extension = generation.Output.FileExtension,
+            IsPublic = isPublic,
+            State = "Queued",
+            CreatedAtUtc = job.CreatedAtUtc,
+            UpdatedAtUtc = job.CreatedAtUtc,
+            Version = 1,
+        };
+    }
+
+    private static bool MatchesState(
+        DerivativeRequestRow state,
+        JobRow job,
+        DerivativeGenerationDescriptorV1 descriptor) =>
+        state.TenantId.Value == descriptor.TenantId &&
+        state.AssetId == descriptor.AssetId &&
+        state.RevisionId == descriptor.RevisionId &&
+        state.JobId == job.Id &&
+        state.PresetName == descriptor.PresetName &&
+        state.PresetRevision == descriptor.PresetRevision &&
+        state.Width == descriptor.Width &&
+        state.Height == descriptor.Height &&
+        state.Fit == descriptor.Fit &&
+        state.Format == descriptor.Format &&
+        state.Quality == descriptor.Quality &&
+        state.PipelineId == descriptor.PipelineIdentity &&
+        state.PipelineFingerprint == descriptor.PipelineFingerprint &&
+        state.SourceSha256 == descriptor.SourceSha256 &&
+        state.RecipeSha256 == descriptor.RecipeSha256 &&
+        state.GenerationIdentity == descriptor.GenerationIdentity &&
+        state.Extension ==
+            descriptor.ToGenerationRequest().Output.FileExtension;
+
+    private static DerivativeStagedOutput? ReadStaged(
+        DerivativeRequestRow state)
+    {
+        if (state.State == "Ready" ||
+            state.RepresentationStorageKey is null ||
+            state.RepresentationContentLength is null ||
+            state.RepresentationContentType is null ||
+            state.RepresentationSha256 is null)
         {
             return null;
         }
 
-        return WorkState.From(
-            generation,
-            request.StorageProvider,
-            blob.ObjectKey,
-            blob.ProviderVersion,
-            blob.SizeBytes);
+        try
+        {
+            return new DerivativeStagedOutput(
+                new BlobIdentity(
+                    new BlobKey(state.RepresentationStorageKey),
+                    new BlobVersion(state.CacheKey)),
+                state.RepresentationContentLength.Value,
+                new ImageSha256(state.RepresentationSha256),
+                new BlobMediaType(state.RepresentationContentType));
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
     }
 
-    private static JobLease CurrentLease(JobRow row)
+    private static void WriteStaged(
+        DerivativeRequestRow state,
+        DerivativeStagedOutput staged)
     {
-        if (row.LeaseOwner is null ||
-            !row.LeaseAcquiredAtUtc.HasValue ||
-            !row.LeaseExpiresAtUtc.HasValue)
+        state.CacheKey = staged.Identity.Version.Value;
+        state.RepresentationStorageKey = staged.Identity.Key.Value;
+        state.RepresentationContentLength = staged.Bytes;
+        state.RepresentationContentType = staged.ContentType.Value;
+        state.RepresentationSha256 = staged.Sha256.Value;
+    }
+
+    private static bool IsPermanentFailure(string? value) =>
+        value == DerivativeFailureCode.SourceRevisionChanged.ToString() ||
+        value == DerivativeFailureCode.DestinationIdentityConflict.ToString();
+
+    private static string OwnershipMarker(
+        string status,
+        DerivativeFence fence) =>
+        $"{status}:{fence.Version}:" +
+        $"{fence.JobLease.AcquiredAtUtc.UtcTicks}:" +
+        $"{fence.ExpiresAtUtc.UtcTicks}";
+
+    private static bool HasLiveOwnership(
+        string? marker,
+        JobRow job,
+        DateTimeOffset now)
+    {
+        if (marker is null)
+        {
+            return false;
+        }
+
+        if (!TryReadOwnership(
+                marker,
+                out _,
+                out long acquiredAtTicks,
+                out long expiresAtTicks))
+        {
+            return false;
+        }
+
+        return job.LeaseAcquiredAtUtc?.UtcTicks == acquiredAtTicks &&
+            now.UtcTicks < expiresAtTicks;
+    }
+
+    private static bool HasOwnership(
+        string? marker,
+        DerivativeFence fence)
+    {
+        if (marker is null ||
+            !TryReadOwnership(
+                marker,
+                out long version,
+                out long acquiredAtTicks,
+                out long expiresAtTicks))
+        {
+            return false;
+        }
+
+        return version == fence.Version &&
+            acquiredAtTicks == fence.JobLease.AcquiredAtUtc.UtcTicks &&
+            expiresAtTicks == fence.ExpiresAtUtc.UtcTicks;
+    }
+
+    private static bool TryReadOwnership(
+        string marker,
+        out long version,
+        out long acquiredAtTicks,
+        out long expiresAtTicks)
+    {
+        version = default;
+        acquiredAtTicks = default;
+        expiresAtTicks = default;
+        string[] parts = marker.Split(':');
+        return parts.Length == 4 &&
+            long.TryParse(
+                parts[1],
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out version) &&
+            long.TryParse(
+                parts[2],
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out acquiredAtTicks) &&
+            long.TryParse(
+                parts[3],
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out expiresAtTicks);
+    }
+
+    private static JobLease CurrentLease(JobRow job)
+    {
+        if (job.LeaseOwner is null ||
+            !job.LeaseAcquiredAtUtc.HasValue ||
+            !job.LeaseExpiresAtUtc.HasValue)
         {
             throw new InvalidOperationException(
                 "The derivative job does not have a complete lease.");
         }
 
         return new JobLease(
-            new JobId(row.Id),
-            new JobLeaseOwner(row.LeaseOwner),
-            row.LeaseAcquiredAtUtc.Value,
-            row.LeaseExpiresAtUtc.Value,
-            new JobVersion(row.Version));
+            new JobId(job.Id),
+            new JobLeaseOwner(job.LeaseOwner),
+            job.LeaseAcquiredAtUtc.Value,
+            job.LeaseExpiresAtUtc.Value,
+            new JobVersion(job.Version));
     }
 
     private async ValueTask<T> WithLockedJobAsync<T>(
         Guid tenantId,
         JobId jobId,
-        Func<JobRow?, CancellationToken, ValueTask<T>> action,
+        Func<VistaraDbContext, JobRow?, CancellationToken, ValueTask<T>> action,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        _jobs.ChangeTracker.Clear();
+        _tenantScope.Establish(tenantId);
+        await using var database =
+            new VistaraDbContext(_databaseOptions, _tenantScope);
         if (_isSqlite)
         {
-            await _jobs.Database.OpenConnectionAsync(cancellationToken);
-            var connection = (SqliteConnection)_jobs.Database.GetDbConnection();
+            await database.Database.OpenConnectionAsync(cancellationToken);
+            var connection =
+                (SqliteConnection)database.Database.GetDbConnection();
             await using SqliteTransaction sqliteTransaction =
-                connection.BeginTransaction(IsolationLevel.Serializable, deferred: false);
-            await _jobs.Database.UseTransactionAsync(sqliteTransaction, cancellationToken);
+                connection.BeginTransaction(
+                    IsolationLevel.Serializable,
+                    deferred: false);
+            await database.Database.UseTransactionAsync(
+                sqliteTransaction,
+                cancellationToken);
             try
             {
-                JobRow? row = await _jobs.Jobs.SingleOrDefaultAsync(
-                    candidate =>
-                        candidate.Id == jobId.Value &&
-                        candidate.TenantId == tenantId,
+                JobRow? job = await database.Jobs.SingleOrDefaultAsync(
+                    row =>
+                        row.Id == jobId.Value &&
+                        row.TenantId == tenantId,
                     cancellationToken);
-                T result = await action(row, cancellationToken);
+                T result = await action(database, job, cancellationToken);
                 await sqliteTransaction.CommitAsync(cancellationToken);
                 return result;
             }
             finally
             {
-                await _jobs.Database.UseTransactionAsync(null, CancellationToken.None);
-                await _jobs.Database.CloseConnectionAsync();
+                await database.Database.UseTransactionAsync(
+                    null,
+                    CancellationToken.None);
+                await database.Database.CloseConnectionAsync();
             }
         }
 
         await using IDbContextTransaction postgresTransaction =
-            await _jobs.Database.BeginTransactionAsync(
+            await database.Database.BeginTransactionAsync(
                 IsolationLevel.ReadCommitted,
                 cancellationToken);
-        JobRow? locked = await _jobs.Jobs
+        JobRow? locked = await database.Jobs
             .FromSqlRaw(
                 """
                 SELECT *
@@ -505,251 +766,12 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
                 jobId.Value,
                 tenantId)
             .SingleOrDefaultAsync(cancellationToken);
-        T value = await action(locked, cancellationToken);
+        T value = await action(database, locked, cancellationToken);
         await postgresTransaction.CommitAsync(cancellationToken);
         return value;
     }
 
-    private static PayloadEnvelope? Parse(string? payload)
-    {
-        if (string.IsNullOrWhiteSpace(payload))
-        {
-            return null;
-        }
-
-        try
-        {
-            return JsonSerializer.Deserialize<PayloadEnvelope>(payload, JsonOptions);
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    private static string Serialize(PayloadEnvelope payload) =>
-        JsonSerializer.Serialize(payload, JsonOptions);
-
-    private sealed class PayloadEnvelope
-    {
-        public Guid AssetId { get; set; }
-
-        public Guid RevisionId { get; set; }
-
-        public string Preset { get; set; } = string.Empty;
-
-        public WorkerState? WorkerState { get; set; }
-    }
-
-    private sealed class WorkerState
-    {
-        public StateStatus Status { get; set; }
-
-        public WorkState Work { get; set; } = new();
-
-        public long FenceVersion { get; set; }
-
-        public FenceState? Fence { get; set; }
-
-        public StagedState? Staged { get; set; }
-
-        public bool PublishOutcomeUnknown { get; set; }
-
-        public FailureState? Failure { get; set; }
-
-        public DateTimeOffset? ReadyAtUtc { get; set; }
-    }
-
-    private enum StateStatus
-    {
-        Processing,
-        Ready,
-        Failed,
-        Completed,
-    }
-
-    private sealed record FenceState
-    {
-        public Guid JobId { get; init; }
-
-        public string JobOwner { get; init; } = string.Empty;
-
-        public DateTimeOffset JobAcquiredAtUtc { get; init; }
-
-        public DateTimeOffset JobExpiresAtUtc { get; init; }
-
-        public long JobVersion { get; init; }
-
-        public long Version { get; init; }
-
-        public DateTimeOffset ExpiresAtUtc { get; init; }
-
-        internal static FenceState From(
-            JobLease lease,
-            long version,
-            DateTimeOffset expiresAtUtc) =>
-            new()
-            {
-                JobId = lease.JobId.Value,
-                JobOwner = lease.Owner.Value,
-                JobAcquiredAtUtc = lease.AcquiredAtUtc,
-                JobExpiresAtUtc = lease.ExpiresAtUtc,
-                JobVersion = lease.JobVersion.Value,
-                Version = version,
-                ExpiresAtUtc = expiresAtUtc,
-            };
-
-        internal DerivativeFence ToFence(Guid tenantId, Guid requestId) =>
-            new(
-                tenantId,
-                requestId,
-                Version,
-                ExpiresAtUtc,
-                new JobLease(
-                    new JobId(JobId),
-                    new JobLeaseOwner(JobOwner),
-                    JobAcquiredAtUtc,
-                    JobExpiresAtUtc,
-                    new JobVersion(JobVersion)));
-    }
-
-    private sealed record StagedState
-    {
-        public string Key { get; init; } = string.Empty;
-
-        public string Version { get; init; } = string.Empty;
-
-        public long Bytes { get; init; }
-
-        public string Sha256 { get; init; } = string.Empty;
-
-        public string ContentType { get; init; } = string.Empty;
-
-        internal static StagedState From(DerivativeStagedOutput staged) =>
-            new()
-            {
-                Key = staged.Identity.Key.Value,
-                Version = staged.Identity.Version.Value,
-                Bytes = staged.Bytes,
-                Sha256 = staged.Sha256.Value,
-                ContentType = staged.ContentType.Value,
-            };
-
-        internal DerivativeStagedOutput ToStaged() =>
-            new(
-                new BlobIdentity(new BlobKey(Key), new BlobVersion(Version)),
-                Bytes,
-                new ImageSha256(Sha256),
-                new BlobMediaType(ContentType));
-    }
-
-    private sealed class FailureState
-    {
-        public DerivativeFailureCode Code { get; set; }
-
-        public bool Retryable { get; set; }
-
-        public DateTimeOffset FailedAtUtc { get; set; }
-    }
-
-    private sealed class WorkState
-    {
-        public Guid TenantId { get; set; }
-
-        public Guid AssetId { get; set; }
-
-        public Guid RevisionId { get; set; }
-
-        public long RevisionNumber { get; set; }
-
-        public string SourceSha256 { get; set; } = string.Empty;
-
-        public string StorageProvider { get; set; } = string.Empty;
-
-        public string SourceKey { get; set; } = string.Empty;
-
-        public string SourceVersion { get; set; } = string.Empty;
-
-        public long SourceLength { get; set; }
-
-        public string PresetName { get; set; } = string.Empty;
-
-        public int PresetRevision { get; set; }
-
-        public string PipelineFingerprint { get; set; } = string.Empty;
-
-        public string GenerationIdentity { get; set; } = string.Empty;
-
-        public string RecipeFingerprint { get; set; } = string.Empty;
-
-        public string CacheKey { get; set; } = string.Empty;
-
-        internal static WorkState From(
-            DerivativeGenerationRequest generation,
-            string storageProvider,
-            string sourceKey,
-            string sourceVersion,
-            long sourceLength) =>
-            new()
-            {
-                TenantId = generation.Source.TenantId,
-                AssetId = generation.Source.AssetId,
-                RevisionId = generation.Source.RevisionId,
-                RevisionNumber = generation.Source.RevisionNumber,
-                SourceSha256 = generation.Source.SourceSha256.Value,
-                StorageProvider = storageProvider,
-                SourceKey = sourceKey,
-                SourceVersion = sourceVersion,
-                SourceLength = sourceLength,
-                PresetName = generation.Preset.Id.Name,
-                PresetRevision = generation.Preset.Id.Revision,
-                PipelineFingerprint = generation.PipelineFingerprint.Value,
-                GenerationIdentity = generation.Identity.Value,
-                RecipeFingerprint = generation.Recipe.Fingerprint,
-                CacheKey = generation.CacheKey.Value,
-            };
-
-        internal DerivativeWorkItem ToWork(
-            Guid requestId,
-            DerivativePresetRegistry presets)
-        {
-            var source = new DerivativeSourceIdentity(
-                TenantId,
-                AssetId,
-                RevisionId,
-                RevisionNumber,
-                new ImageSha256(SourceSha256));
-            DerivativeResolutionResult resolution = presets.ResolveDefault(
-                source,
-                new DerivativePresetId(PresetName, PresetRevision),
-                new ImagePipelineFingerprint(PipelineFingerprint));
-            DerivativeGenerationRequest generation =
-                resolution.GenerationRequest ??
-                throw new InvalidOperationException(
-                    "Durable derivative work no longer resolves.");
-            if (!string.Equals(
-                    generation.Identity.Value,
-                    GenerationIdentity,
-                    StringComparison.Ordinal) ||
-                !string.Equals(
-                    generation.Recipe.Fingerprint,
-                    RecipeFingerprint,
-                    StringComparison.Ordinal) ||
-                !string.Equals(
-                    generation.CacheKey.Value,
-                    CacheKey,
-                    StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException(
-                    "Durable derivative work does not match its canonical identity.");
-            }
-
-            return new DerivativeWorkItem(
-                requestId,
-                generation,
-                new BlobKey(SourceKey),
-                new BlobVersion(SourceVersion),
-                SourceLength);
-        }
-    }
+    private sealed record LoadedWork(
+        DerivativeWorkItem Work,
+        bool IsPublic);
 }

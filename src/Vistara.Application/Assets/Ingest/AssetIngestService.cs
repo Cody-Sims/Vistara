@@ -3,6 +3,8 @@ using System.Text.Json;
 using Vistara.Application.Common;
 using Vistara.Application.Common.Auditing;
 using Vistara.Application.Common.Events;
+using Vistara.Application.Common.Imaging;
+using Vistara.Application.Derivatives;
 using Vistara.Domain.Assets;
 using Vistara.Domain.Common;
 using Vistara.Domain.Jobs;
@@ -12,7 +14,9 @@ namespace Vistara.Application.Assets.Ingest;
 public sealed class AssetIngestService(
     IAssetIngestUnitOfWork unitOfWork,
     IUuid7Generator idGenerator,
-    IClock clock)
+    IClock clock,
+    DerivativePresetRegistry derivativePresets,
+    IImageProcessor derivativeImageProcessor)
 {
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
@@ -45,6 +49,12 @@ public sealed class AssetIngestService(
     private readonly IUuid7Generator _idGenerator =
         idGenerator ?? throw new ArgumentNullException(nameof(idGenerator));
     private readonly IClock _clock = clock ?? throw new ArgumentNullException(nameof(clock));
+    private readonly DerivativePresetRegistry _derivativePresets =
+        derivativePresets ??
+        throw new ArgumentNullException(nameof(derivativePresets));
+    private readonly IImageProcessor _derivativeImageProcessor =
+        derivativeImageProcessor ??
+        throw new ArgumentNullException(nameof(derivativeImageProcessor));
 
     public ValueTask<AssetIngestResult> IngestAsync(
         AssetIngestCommand command,
@@ -152,10 +162,17 @@ public sealed class AssetIngestService(
         await transaction.AppendAuditAsync(
             CreateAudit(command, receipt, now),
             cancellationToken);
+        ImagePipelineFingerprint derivativePipeline =
+            _derivativeImageProcessor.PipelineFingerprint;
         foreach (string preset in StandardDerivativePresets)
         {
             await transaction.AddJobAsync(
-                CreateDerivativeJob(command, receipt, preset, now),
+                CreateDerivativeJob(
+                    command,
+                    receipt,
+                    preset,
+                    derivativePipeline,
+                    now),
                 cancellationToken);
         }
 
@@ -237,18 +254,31 @@ public sealed class AssetIngestService(
         AssetIngestCommand command,
         AssetIngestReceipt receipt,
         string preset,
+        ImagePipelineFingerprint pipelineFingerprint,
         DateTimeOffset now)
     {
-        string payload = JsonSerializer.Serialize(
-            new DerivativeJobPayload(receipt.AssetId, receipt.RevisionId, preset),
-            JsonOptions);
+        DerivativeGenerationRequest generation =
+            _derivativePresets.ResolveDefault(
+                new DerivativeSourceIdentity(
+                    command.TenantId,
+                    receipt.AssetId,
+                    receipt.RevisionId,
+                    revisionNumber: 1,
+                    new ImageSha256(command.Promotion.Sha256.Value)),
+                preset,
+                pipelineFingerprint)
+            .GenerationRequest ??
+            throw new InvalidOperationException(
+                $"The pre-generation preset '{preset}' is unavailable.");
+        DerivativeJobPayloadV1 jobPayload =
+            DerivativeJobContract.CreatePayload(generation);
         return DurableJob.Create(
             new JobId(_idGenerator.NewId()),
             new JobTenantId(command.TenantId),
-            new JobType("asset.derivative.generate"),
-            payload,
-            payloadVersion: 1,
-            new JobDedupeKey($"asset-revision:{receipt.RevisionId:D}:preset:{preset}:1"),
+            DerivativeJobContract.Type,
+            DerivativeJobContract.Serialize(jobPayload),
+            DerivativeJobContract.PayloadVersion,
+            DerivativeJobContract.CreateDedupeKey(jobPayload),
             priority: 0,
             maxAttempts: 5,
             availableAtUtc: now,
@@ -291,11 +321,6 @@ public sealed class AssetIngestService(
             throw new InvalidOperationException("The ingest clock must return UTC.");
         }
     }
-
-    private sealed record DerivativeJobPayload(
-        Guid AssetId,
-        Guid RevisionId,
-        string Preset);
 
     private sealed record AssetIngestedPayload(
         Guid AssetId,

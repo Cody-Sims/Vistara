@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Vistara.Application.Common.Imaging;
 using Vistara.Application.Derivatives;
 using Vistara.Application.Jobs;
 using Vistara.Domain.Jobs;
@@ -410,7 +411,8 @@ public sealed class JobQueueTests
             Guid.CreateVersion7(),
             state: "Consumed",
             activatedRevisionId: revisionId);
-        var payload = new DerivativeJobPayloadV1(
+        DerivativeJobPayloadV1 payload = CreateDerivativePayload(
+            tenantId,
             Guid.CreateVersion7(),
             revisionId,
             "thumb");
@@ -469,7 +471,8 @@ public sealed class JobQueueTests
             Guid.CreateVersion7(),
             state: "Consumed",
             activatedRevisionId: revisionId);
-        var payload = new DerivativeJobPayloadV1(
+        DerivativeJobPayloadV1 payload = CreateDerivativePayload(
+            tenantId,
             Guid.CreateVersion7(),
             revisionId,
             "thumb");
@@ -565,7 +568,8 @@ public sealed class JobQueueTests
             Guid.CreateVersion7(),
             state: "Consumed",
             activatedRevisionId: Guid.CreateVersion7());
-        var payload = new DerivativeJobPayloadV1(
+        DerivativeJobPayloadV1 payload = CreateDerivativePayload(
+            tenantId,
             Guid.CreateVersion7(),
             Guid.CreateVersion7(),
             "thumb");
@@ -603,7 +607,8 @@ public sealed class JobQueueTests
             Guid.CreateVersion7(),
             state: "Consumed",
             activatedRevisionId: revisionId);
-        var payload = new DerivativeJobPayloadV1(
+        DerivativeJobPayloadV1 payload = CreateDerivativePayload(
+            tenantId,
             Guid.CreateVersion7(),
             revisionId,
             "custom");
@@ -641,7 +646,8 @@ public sealed class JobQueueTests
             Guid.CreateVersion7(),
             state: "Consumed",
             activatedRevisionId: revisionId);
-        var payload = new DerivativeJobPayloadV1(
+        DerivativeJobPayloadV1 payload = CreateDerivativePayload(
+            tenantId,
             Guid.CreateVersion7(),
             revisionId,
             "thumb");
@@ -684,7 +690,8 @@ public sealed class JobQueueTests
             tenantId,
             rejectedUpload,
             state: "Released");
-        var derivativePayload = new DerivativeJobPayloadV1(
+        DerivativeJobPayloadV1 derivativePayload = CreateDerivativePayload(
+            tenantId,
             Guid.CreateVersion7(),
             activeRevision,
             "thumb");
@@ -740,7 +747,8 @@ public sealed class JobQueueTests
             secondUpload,
             state: "Consumed",
             activatedRevisionId: secondRevision);
-        var derivativePayload = new DerivativeJobPayloadV1(
+        DerivativeJobPayloadV1 derivativePayload = CreateDerivativePayload(
+            tenantId,
             Guid.CreateVersion7(),
             secondRevision,
             "grid");
@@ -789,7 +797,8 @@ public sealed class JobQueueTests
             Guid.CreateVersion7(),
             state: "Consumed",
             activatedRevisionId: revisionId);
-        var payload = new DerivativeJobPayloadV1(
+        DerivativeJobPayloadV1 payload = CreateDerivativePayload(
+            tenantId,
             Guid.CreateVersion7(),
             revisionId,
             "thumb");
@@ -836,7 +845,8 @@ public sealed class JobQueueTests
             Guid.CreateVersion7(),
             state: "Consumed",
             activatedRevisionId: Guid.CreateVersion7());
-        var payload = new DerivativeJobPayloadV1(
+        DerivativeJobPayloadV1 payload = CreateDerivativePayload(
+            tenantId,
             Guid.CreateVersion7(),
             firstRevision,
             "thumb");
@@ -929,7 +939,8 @@ public sealed class JobQueueTests
             Guid.CreateVersion7(),
             state: "Consumed",
             activatedRevisionId: revisionId);
-        var payload = new DerivativeJobPayloadV1(
+        DerivativeJobPayloadV1 payload = CreateDerivativePayload(
+            tenantId,
             Guid.CreateVersion7(),
             revisionId,
             "thumb");
@@ -1007,7 +1018,8 @@ public sealed class JobQueueTests
         Guid assetId = Guid.CreateVersion7();
         foreach (string preset in StandardDerivativePresets)
         {
-            var payload = new DerivativeJobPayloadV1(
+            DerivativeJobPayloadV1 payload = CreateDerivativePayload(
+                tenantId,
                 assetId,
                 revisionId,
                 preset);
@@ -1048,18 +1060,62 @@ public sealed class JobQueueTests
         int maximumCount = 1) =>
         new(new JobLeaseOwner(owner), now, TimeSpan.FromMinutes(1), maximumCount);
 
+    private static DerivativeJobPayloadV1 CreateDerivativePayload(
+        JobTenantId tenantId,
+        Guid assetId,
+        Guid revisionId,
+        string preset)
+    {
+        var source = new DerivativeSourceIdentity(
+            tenantId.Value,
+            assetId,
+            revisionId,
+            revisionNumber: 1,
+            new ImageSha256(new string('a', 64)));
+        DerivativePresetRegistry registry = preset is
+            "thumb" or "grid" or "viewer" or "download-web"
+                ? DerivativePresetRegistry.Standard
+                : new DerivativePresetRegistry(
+                    [
+                        new DerivativePreset(
+                            new DerivativePresetId(preset, 1),
+                            [
+                                new DerivativeRecipe(
+                                    schemaVersion: 1,
+                                    new DerivativeDimensions(256, 256),
+                                    DerivativeFit.Cover,
+                                    DerivativeFormat.WebP,
+                                    quality: 82,
+                                    DerivativeBackground.Transparent,
+                                    allowUpscale: false,
+                                    DerivativeMetadataBehavior.StripSensitive),
+                            ]),
+                    ]);
+        DerivativeGenerationRequest generation =
+            Assert.IsType<DerivativeGenerationRequest>(
+                registry.ResolveDefault(
+                    source,
+                    new DerivativePresetId(preset, 1),
+                    new ImagePipelineFingerprint("job-queue-pipeline"))
+                .GenerationRequest);
+        return DerivativeJobContract.CreatePayload(generation);
+    }
+
     private static DurableJob CreateJob(
         string key,
         int maxAttempts = 3,
         JobTenantId? tenantId = null,
         JobType? type = null,
-        string payload = """{"safe":true}""") =>
+        string payload = """{"safe":true}""",
+        int payloadVersion = 1) =>
         DurableJob.Create(
             new JobId(Guid.CreateVersion7()),
             tenantId ?? DefaultTenantId,
             type ?? new JobType("test.job"),
             payload,
-            1,
+            type == DerivativeJobContract.Type
+                ? DerivativeJobContract.PayloadVersion
+                : payloadVersion,
             new JobDedupeKey(key),
             10,
             maxAttempts,

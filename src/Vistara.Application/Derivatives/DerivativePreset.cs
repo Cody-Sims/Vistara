@@ -198,6 +198,11 @@ public sealed partial class DerivativePresetRegistry
 
     public string Fingerprint { get; }
 
+    public IReadOnlyList<DerivativePreset> Presets => _presets.Values
+        .OrderBy(preset => preset.Id.Name, StringComparer.Ordinal)
+        .ThenBy(preset => preset.Id.Revision)
+        .ToArray();
+
     public DerivativeNegotiationResult Negotiate(DerivativeOutputRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -265,6 +270,29 @@ public sealed partial class DerivativePresetRegistry
             dimensions,
             [DerivativeFormat.WebP, DerivativeFormat.Jpeg, DerivativeFormat.Png]);
         return Resolve(new DerivativeRequest(source, output, pipelineFingerprint));
+    }
+
+    public DerivativeResolutionResult ResolveDefault(
+        DerivativeSourceIdentity source,
+        string presetName,
+        ImagePipelineFingerprint pipelineFingerprint)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentException.ThrowIfNullOrWhiteSpace(presetName);
+        ArgumentNullException.ThrowIfNull(pipelineFingerprint);
+        DerivativePreset? active = _presets.Values
+            .Where(preset =>
+                string.Equals(
+                    preset.Id.Name,
+                    presetName.Trim(),
+                    StringComparison.Ordinal))
+            .OrderByDescending(preset => preset.Id.Revision)
+            .FirstOrDefault();
+        return active is null
+            ? new DerivativeResolutionResult(
+                DerivativeNegotiationStatus.PresetNotFound,
+                null)
+            : ResolveDefault(source, active.Id, pipelineFingerprint);
     }
 
     private static DerivativePresetRegistry CreateStandard() =>

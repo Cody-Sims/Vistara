@@ -496,10 +496,8 @@ public sealed class DerivativeWorkerTests
 
         internal DurableJob CreateJob(string? dedupeKey = null)
         {
-            var payload = new DerivativeJobPayloadV1(
-                Generation.Source.AssetId,
-                Generation.Source.RevisionId,
-                Generation.Preset.Id.Name);
+            DerivativeJobPayloadV1 payload =
+                DerivativeJobContract.CreatePayload(Generation);
             return CreateRawJob(
                 DerivativeJobContract.Serialize(payload),
                 dedupeKey ?? DerivativeJobContract.CreateDedupeKey(payload).Value);
