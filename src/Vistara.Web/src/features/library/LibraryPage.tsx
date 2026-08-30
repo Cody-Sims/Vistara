@@ -17,6 +17,7 @@ import type {
   TimelinePage,
   TimelineQuery,
 } from '../../api/generated';
+import { Skeleton } from '../../components';
 import { buildResponsiveImage } from '../viewer/responsiveImage';
 import {
   defaultLibraryState,
@@ -421,9 +422,12 @@ export function LibraryPage({
       </form>
 
       {query.isPending ? (
-        <p className={styles.statePanel} role="status" aria-live="polite">
-          Loading library…
-        </p>
+        <div className={styles.statePanel} aria-busy="true">
+          <p role="status" aria-live="polite">
+            Loading library…
+          </p>
+          <Skeleton count={12} shape="tile" />
+        </div>
       ) : null}
 
       {query.isError && !page ? (

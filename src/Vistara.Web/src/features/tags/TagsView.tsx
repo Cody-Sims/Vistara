@@ -10,6 +10,7 @@ import {
 } from '../../api/generated/client';
 import type { EntityTag, Tag } from '../../api/generated/models';
 import styles from './tags.module.css';
+import { Skeleton } from '../../components';
 
 type TagsClient = Pick<
   VistaraApiClient,
@@ -226,7 +227,12 @@ export function TagsView({
         <button type="submit">Search</button>
       </form>
 
-      {state === 'loading' ? <p role="status">Loading tags…</p> : null}
+      {state === 'loading' ? (
+        <div aria-busy="true">
+          <p role="status">Loading tags…</p>
+          <Skeleton count={5} shape="row" />
+        </div>
+      ) : null}
       {state === 'error' ? (
         <div className={styles.error} role="alert">
           <p>Tags could not be loaded.</p>

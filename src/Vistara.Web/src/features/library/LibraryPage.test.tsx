@@ -106,8 +106,12 @@ describe('library page', () => {
 
     expect(screen.getByText('Loading library…')).toBeInTheDocument();
     expect(
+      container.querySelector('[aria-busy="true"]'),
+    ).toBeInTheDocument();
+    expect(
       await screen.findByRole('heading', { name: 'June 10, 2026' }),
     ).toBeInTheDocument();
+    expect(container.querySelector('[aria-busy="true"]')).toBeNull();
 
     const images = container.querySelectorAll('img');
     expect(images.length).toBeGreaterThan(0);
