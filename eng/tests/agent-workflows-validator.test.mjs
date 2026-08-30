@@ -322,3 +322,111 @@ jobs:
     assert.throws(() => validateAgentWorkflows(root), /Copilot setup workflow/);
   });
 });
+
+test('rejects pull-request workflows that read repository secrets', () => {
+  withFixture((root) => {
+    const path = resolve(root, '.github/workflows/ci.yml');
+    const workflow = readFileSync(path, 'utf8').replace(
+      '      - run: echo test\n',
+      '      - run: echo "${{ secrets.LIVE_PROVIDER_KEY }}"\n',
+    );
+    writeFileSync(path, workflow);
+    assert.throws(
+      () => validateAgentWorkflows(root),
+      /must not read the secret LIVE_PROVIDER_KEY/,
+    );
+  });
+});
+
+test('rejects pull-request workflows that inherit secrets', () => {
+  withFixture((root) => {
+    const path = resolve(root, '.github/workflows/ci.yml');
+    const workflow = `${readFileSync(path, 'utf8')}    secrets: inherit\n`;
+    writeFileSync(path, workflow);
+    assert.throws(() => validateAgentWorkflows(root), /must not inherit secrets/);
+  });
+});
+
+test('accepts the built-in token in pull-request workflows', () => {
+  withFixture((root) => {
+    const path = resolve(root, '.github/workflows/ci.yml');
+    const workflow = readFileSync(path, 'utf8').replace(
+      '      - run: echo test\n',
+      '      - run: gh api rate_limit\n        env:\n          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n',
+    );
+    writeFileSync(path, workflow);
+    assert.doesNotThrow(() => validateAgentWorkflows(root));
+  });
+});
+
+test('requires a Dependabot configuration', () => {
+  withFixture((root) => {
+    rmSync(resolve(root, '.github/dependabot.yml'));
+    assert.throws(
+      () => validateAgentWorkflows(root),
+      /Dependabot configuration is required/,
+    );
+  });
+});
+
+test('requires Dependabot entries to declare a recurring schedule', () => {
+  withFixture((root) => {
+    writeFileSync(
+      resolve(root, '.github/dependabot.yml'),
+      `version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: quarterly
+    open-pull-requests-limit: 5
+`,
+    );
+    assert.throws(
+      () => validateAgentWorkflows(root),
+      /schedule\.interval must be daily, weekly, or monthly/,
+    );
+  });
+});
+
+test('requires Dependabot to bound open pull requests', () => {
+  withFixture((root) => {
+    writeFileSync(
+      resolve(root, '.github/dependabot.yml'),
+      `version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+`,
+    );
+    assert.throws(
+      () => validateAgentWorkflows(root),
+      /open-pull-requests-limit must be between 1 and 10/,
+    );
+  });
+});
+
+test('requires Dependabot to keep pinned actions current', () => {
+  withFixture((root) => {
+    writeFileSync(
+      resolve(root, '.github/dependabot.yml'),
+      `version: 2
+
+updates:
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+`,
+    );
+    assert.throws(
+      () => validateAgentWorkflows(root),
+      /github-actions updates are required/,
+    );
+  });
+});
