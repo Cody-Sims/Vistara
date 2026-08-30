@@ -115,6 +115,44 @@ public sealed class ExternalOidcLoginHandler
     }
 }
 
+public sealed class LocalReauthenticationHandler
+{
+    private readonly ILocalCredentialVerifier _verifier;
+    private readonly CookieSessionManager _sessions;
+
+    public LocalReauthenticationHandler(
+        ILocalCredentialVerifier verifier,
+        CookieSessionManager sessions)
+    {
+        _verifier = verifier ?? throw new ArgumentNullException(nameof(verifier));
+        _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
+    }
+
+    public async ValueTask<Result<IssuedBrowserSession>> HandleAsync(
+        LocalReauthenticationRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        User? user = await _verifier.VerifyAsync(
+            request.Login,
+            request.Password,
+            cancellationToken);
+        if (user?.Status != UserStatus.Active)
+        {
+            await _sessions.RecordReauthenticationRejectionAsync(
+                _sessions.UtcNow);
+            return Result.Failure<IssuedBrowserSession>(
+                CookieAuthErrors.InvalidCredentials);
+        }
+
+        return await _sessions.ReauthenticateAsync(
+            user,
+            request.SessionToken,
+            cancellationToken);
+    }
+}
+
 public sealed class CookieAuthenticationHandler(CookieSessionManager sessions)
 {
     private readonly CookieSessionManager _sessions =

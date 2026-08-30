@@ -12,6 +12,14 @@ public sealed record LocalLoginRequest(
     public override string ToString() => "[LocalLoginRequest REDACTED]";
 }
 
+public sealed record LocalReauthenticationRequest(
+    string Login,
+    string Password,
+    string SessionToken)
+{
+    public override string ToString() => "[LocalReauthenticationRequest REDACTED]";
+}
+
 public sealed record ExternalOidcLoginResult(
     string Issuer,
     string Subject,
@@ -21,14 +29,51 @@ public sealed record ExternalOidcLoginResult(
     public override string ToString() => "[ExternalOidcLoginResult REDACTED]";
 }
 
+public enum CookieAuthenticationStrength
+{
+    PrimaryCredential,
+}
+
+public sealed record CookieReauthenticationContext
+{
+    public CookieReauthenticationContext(
+        UserId actorId,
+        DateTimeOffset verifiedAtUtc,
+        CookieAuthenticationStrength strength)
+    {
+        if (verifiedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "Cookie reauthentication timestamps must use UTC.",
+                nameof(verifiedAtUtc));
+        }
+
+        if (!Enum.IsDefined(strength))
+        {
+            throw new ArgumentOutOfRangeException(nameof(strength));
+        }
+
+        ActorId = actorId;
+        VerifiedAtUtc = verifiedAtUtc;
+        Strength = strength;
+    }
+
+    public UserId ActorId { get; }
+
+    public DateTimeOffset VerifiedAtUtc { get; }
+
+    public CookieAuthenticationStrength Strength { get; }
+}
+
 public sealed record CookieAuthPrincipal(
     UserId UserId,
     TenantId? TenantId,
     TenantRole? Role,
-    string AntiforgeryTokenDigest)
+    string AntiforgeryTokenDigest,
+    CookieReauthenticationContext Reauthentication)
 {
     public override string ToString() =>
-        $"{nameof(CookieAuthPrincipal)} {{ UserId = {UserId}, TenantId = {TenantId}, Role = {Role}, AntiforgeryTokenDigest = [REDACTED] }}";
+        $"{nameof(CookieAuthPrincipal)} {{ UserId = {UserId}, TenantId = {TenantId}, Role = {Role}, AntiforgeryTokenDigest = [REDACTED], Reauthentication = [REDACTED] }}";
 }
 
 public sealed record IssuedBrowserSession(
@@ -113,6 +158,8 @@ public enum CookieAuthAuditAction
 {
     LoginSucceeded,
     LoginRejected,
+    ReauthenticationSucceeded,
+    ReauthenticationRejected,
     SessionAuthenticated,
     SessionRejected,
     SessionRotated,

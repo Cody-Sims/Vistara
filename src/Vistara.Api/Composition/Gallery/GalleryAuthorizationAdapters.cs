@@ -1,11 +1,9 @@
-using System.Globalization;
 using System.Security.Claims;
 using Vistara.Api.Composition.Platform;
 using Vistara.Api.Features.Albums;
 using Vistara.Api.Features.Assets;
 using Vistara.Api.Features.Lifecycle;
 using Vistara.Api.Features.Shares;
-using Vistara.Application.Common;
 using Vistara.Application.Gallery;
 using Vistara.Application.Lifecycle;
 
@@ -157,8 +155,7 @@ internal sealed class GalleryShareAuthorizationPort(
 }
 
 internal sealed class GalleryLifecycleAuthorizationPort(
-    IPlatformTenantContext tenantContext,
-    IClock clock) : ILifecycleAuthorizationPort
+    IPlatformTenantContext tenantContext) : ILifecycleAuthorizationPort
 {
     public ValueTask<LifecycleAccess> AuthorizeAsync(
         HttpContext context,
@@ -200,49 +197,70 @@ internal sealed class GalleryLifecycleAuthorizationPort(
             rights |= LifecycleRights.ManageHolds;
         }
 
-        DateTimeOffset? authenticatedAt = ReadAuthenticationTime(context.User);
-        if (role == "TenantOwner" && authenticatedAt.HasValue)
+        PlatformAuthenticationKind? authenticationKind =
+            ReadAuthenticationKind(context);
+        if (authenticationKind is null)
+        {
+            return ValueTask.FromResult(
+                LifecycleAccess.Denied(LifecycleAccessStatus.Forbidden));
+        }
+
+        bool purgeOperation = operation is
+            LifecycleApiOperation.PurgeDryRun or
+            LifecycleApiOperation.PurgeConfirm or
+            LifecycleApiOperation.PurgeStatus;
+        if (purgeOperation &&
+            authenticationKind != PlatformAuthenticationKind.Cookie)
+        {
+            return ValueTask.FromResult(
+                LifecycleAccess.Denied(LifecycleAccessStatus.Forbidden));
+        }
+
+        if (role == "TenantOwner" &&
+            authenticationKind == PlatformAuthenticationKind.Cookie)
         {
             rights |= LifecycleRights.Purge;
         }
 
-        bool apiKey = string.Equals(
-            context.User.FindFirstValue("vistara_auth_kind"),
-            PlatformAuthenticationKind.ApiKey.ToString(),
-            StringComparison.Ordinal);
-        LifecycleActorContext actor = apiKey
+        LifecycleActorContext actor =
+            authenticationKind == PlatformAuthenticationKind.ApiKey
             ? LifecycleActorContext.ApiKey(tenantId, actorId, rights)
             : LifecycleActorContext.Human(
                 tenantId,
                 actorId,
                 rights,
-                authenticatedAt ?? DateTimeOffset.UnixEpoch);
+                ReadReauthentication(context, actorId));
         return ValueTask.FromResult(LifecycleAccess.Authorized(actor));
     }
 
-    private DateTimeOffset? ReadAuthenticationTime(ClaimsPrincipal principal)
+    private static PlatformAuthenticationKind? ReadAuthenticationKind(
+        HttpContext context) =>
+        context.Items.TryGetValue(
+            PlatformAuthenticationState.KindKey,
+            out object? value) &&
+        value is PlatformAuthenticationKind kind
+            ? kind
+            : null;
+
+    private static LifecycleReauthenticationContext? ReadReauthentication(
+        HttpContext context,
+        Guid actorId)
     {
-        string? value = principal.FindFirstValue("auth_time");
-        if (!long.TryParse(
-                value,
-                NumberStyles.None,
-                CultureInfo.InvariantCulture,
-                out long seconds))
+        if (!context.Items.TryGetValue(
+                PlatformAuthenticationState.ReauthenticationKey,
+                out object? value) ||
+            value is not PlatformReauthenticationContext reauthentication ||
+            reauthentication.ActorId != actorId ||
+            reauthentication.Strength !=
+                PlatformAuthenticationStrength.PrimaryCredential)
         {
             return null;
         }
 
-        DateTimeOffset authenticatedAt;
-        try
-        {
-            authenticatedAt = DateTimeOffset.FromUnixTimeSeconds(seconds);
-        }
-        catch (ArgumentOutOfRangeException)
-        {
-            return null;
-        }
-
-        return authenticatedAt <= clock.UtcNow ? authenticatedAt : null;
+        return new LifecycleReauthenticationContext(
+            actorId,
+            reauthentication.VerifiedAtUtc,
+            LifecycleAuthenticationStrength.PrimaryCredential);
     }
 }
 

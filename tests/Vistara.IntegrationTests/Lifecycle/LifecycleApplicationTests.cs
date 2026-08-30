@@ -87,11 +87,61 @@ public sealed class LifecycleApplicationTests
         Assert.Equal(0, store.ConfirmCalls);
     }
 
+    [Fact]
+    public async Task Purge_confirmation_accepts_only_fresh_primary_credential_proof_for_the_actor()
+    {
+        var store = new RecordingLifecycleStore();
+        var service = new LifecycleService(
+            store,
+            new FixedClock(Now),
+            new SequenceUuid7Generator());
+        LifecycleActorContext freshHuman = LifecycleActorContext.Human(
+            TenantId,
+            ActorId,
+            LifecycleRights.Purge,
+            new LifecycleReauthenticationContext(
+                ActorId,
+                Now.AddMinutes(-5),
+                LifecycleAuthenticationStrength.PrimaryCredential));
+
+        Result<LifecyclePurgeBatchSnapshot> result =
+            await service.ConfirmPurgeAsync(
+                freshHuman,
+                Guid.CreateVersion7(Now.AddMilliseconds(22)),
+                expectedVersion: 2,
+                new string('c', 64),
+                "confirm-fresh-human",
+                CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(1, store.ConfirmCalls);
+        Assert.Equal(ActorId, store.LastConfirm?.ActorId);
+    }
+
+    [Fact]
+    public void Lifecycle_reauthentication_proof_must_belong_to_the_exact_actor()
+    {
+        Guid differentActor =
+            Guid.Parse("0199c222-2222-7222-8222-222222222223");
+
+        Assert.Throws<ArgumentException>(() =>
+            LifecycleActorContext.Human(
+                TenantId,
+                ActorId,
+                LifecycleRights.Purge,
+                new LifecycleReauthenticationContext(
+                    differentActor,
+                    Now,
+                    LifecycleAuthenticationStrength.PrimaryCredential)));
+    }
+
     private sealed class RecordingLifecycleStore : ILifecycleStore
     {
         public LifecycleTrashCommand? LastTrash { get; private set; }
 
         public int ConfirmCalls { get; private set; }
+
+        public LifecycleConfirmPurgeCommand? LastConfirm { get; private set; }
 
         public ValueTask<Result<LifecycleTrashPage>> ListTrashAsync(
             LifecycleTrashQuery query,
@@ -115,9 +165,25 @@ public sealed class LifecycleApplicationTests
             LifecycleConfirmPurgeCommand command,
             CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             ConfirmCalls++;
-            throw new InvalidOperationException(
-                "Purge confirmation should have been rejected before persistence.");
+            LastConfirm = command;
+            return ValueTask.FromResult(
+                Result.Success(
+                    new LifecyclePurgeBatchSnapshot(
+                        command.BatchId,
+                        "queued",
+                        Now.AddMinutes(-10),
+                        command.ConfirmedAtUtc,
+                        null,
+                        null,
+                        1,
+                        1,
+                        0,
+                        0,
+                        [],
+                        command.ExpectedVersion + 1,
+                        false)));
         }
 
         public ValueTask<Result<LifecycleJobSubmission>> SubmitRestoreAsync(

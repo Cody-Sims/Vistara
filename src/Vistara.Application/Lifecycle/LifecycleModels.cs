@@ -18,6 +18,57 @@ public enum LifecyclePrincipalKind
     ApiKey,
 }
 
+public enum LifecycleAuthenticationStrength
+{
+    PrimaryCredential,
+}
+
+public sealed record LifecycleReauthenticationContext
+{
+    public LifecycleReauthenticationContext(
+        Guid actorId,
+        DateTimeOffset verifiedAtUtc,
+        LifecycleAuthenticationStrength strength)
+    {
+        EnsureUuid7(actorId, nameof(actorId));
+        EnsureUtc(verifiedAtUtc, nameof(verifiedAtUtc));
+        if (!Enum.IsDefined(strength))
+        {
+            throw new ArgumentOutOfRangeException(nameof(strength));
+        }
+
+        ActorId = actorId;
+        VerifiedAtUtc = verifiedAtUtc;
+        Strength = strength;
+    }
+
+    public Guid ActorId { get; }
+
+    public DateTimeOffset VerifiedAtUtc { get; }
+
+    public LifecycleAuthenticationStrength Strength { get; }
+
+    private static void EnsureUuid7(Guid value, string parameterName)
+    {
+        if (value == Guid.Empty || value.Version != 7)
+        {
+            throw new ArgumentException(
+                "Lifecycle reauthentication actor identifiers must be UUIDv7 values.",
+                parameterName);
+        }
+    }
+
+    private static void EnsureUtc(DateTimeOffset value, string parameterName)
+    {
+        if (value.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "Lifecycle reauthentication timestamps must use UTC.",
+                parameterName);
+        }
+    }
+}
+
 public sealed record LifecycleActorContext
 {
     private LifecycleActorContext(
@@ -25,13 +76,13 @@ public sealed record LifecycleActorContext
         Guid actorId,
         LifecyclePrincipalKind principalKind,
         LifecycleRights permissions,
-        DateTimeOffset? authenticatedAtUtc)
+        LifecycleReauthenticationContext? reauthentication)
     {
         TenantId = tenantId;
         ActorId = actorId;
         PrincipalKind = principalKind;
         Permissions = permissions;
-        AuthenticatedAtUtc = authenticatedAtUtc;
+        Reauthentication = reauthentication;
     }
 
     public Guid TenantId { get; }
@@ -42,7 +93,10 @@ public sealed record LifecycleActorContext
 
     public LifecycleRights Permissions { get; }
 
-    public DateTimeOffset? AuthenticatedAtUtc { get; }
+    public LifecycleReauthenticationContext? Reauthentication { get; }
+
+    public DateTimeOffset? AuthenticatedAtUtc =>
+        Reauthentication?.VerifiedAtUtc;
 
     public static LifecycleActorContext Human(
         Guid tenantId,
@@ -54,12 +108,39 @@ public sealed record LifecycleActorContext
         EnsureUuid7(actorId, nameof(actorId));
         EnsurePermissions(permissions);
         EnsureUtc(authenticatedAtUtc, nameof(authenticatedAtUtc));
+        return Human(
+            tenantId,
+            actorId,
+            permissions,
+            new LifecycleReauthenticationContext(
+                actorId,
+                authenticatedAtUtc,
+                LifecycleAuthenticationStrength.PrimaryCredential));
+    }
+
+    public static LifecycleActorContext Human(
+        Guid tenantId,
+        Guid actorId,
+        LifecycleRights permissions,
+        LifecycleReauthenticationContext? reauthentication)
+    {
+        EnsureUuid7(tenantId, nameof(tenantId));
+        EnsureUuid7(actorId, nameof(actorId));
+        EnsurePermissions(permissions);
+        if (reauthentication is not null &&
+            reauthentication.ActorId != actorId)
+        {
+            throw new ArgumentException(
+                "Lifecycle reauthentication must belong to the acting user.",
+                nameof(reauthentication));
+        }
+
         return new(
             tenantId,
             actorId,
             LifecyclePrincipalKind.HumanUser,
             permissions,
-            authenticatedAtUtc);
+            reauthentication);
     }
 
     public static LifecycleActorContext ApiKey(
@@ -75,7 +156,7 @@ public sealed record LifecycleActorContext
             actorId,
             LifecyclePrincipalKind.ApiKey,
             permissions,
-            authenticatedAtUtc: null);
+            reauthentication: null);
     }
 
     public bool HasPermission(LifecycleRights permission) =>

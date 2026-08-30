@@ -162,6 +162,68 @@ public sealed class CookieSessionManager
                 refreshedCookie));
     }
 
+    public async ValueTask<Result<IssuedBrowserSession>> ReauthenticateAsync(
+        User credentialUser,
+        string? sessionToken,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(credentialUser);
+        cancellationToken.ThrowIfCancellationRequested();
+        DateTimeOffset now = _clock.UtcNow;
+        SessionResolution? resolution = await ResolveAsync(
+            sessionToken,
+            now,
+            cancellationToken);
+        if (resolution is null ||
+            resolution.User.Id != credentialUser.Id ||
+            credentialUser.Status != UserStatus.Active)
+        {
+            await RecordReauthenticationRejectionAsync(now);
+            return Result.Failure<IssuedBrowserSession>(
+                CookieAuthErrors.InvalidCredentials);
+        }
+
+        string antiforgeryToken = CookieTokenFormat.Create(_tokenSource);
+        for (int attempt = 0; attempt < MaximumTokenGenerationAttempts; attempt++)
+        {
+            string replacementToken = CookieTokenFormat.Create(_tokenSource);
+            CookieSessionRecord replacement = CreateReauthenticatedRecord(
+                replacementToken,
+                antiforgeryToken,
+                resolution.User,
+                resolution.Membership,
+                now);
+            bool rotated = await _store.RotateAsync(
+                resolution.Record.SessionTokenDigest,
+                resolution.Record.Version,
+                replacement,
+                now,
+                cancellationToken);
+            if (!rotated)
+            {
+                continue;
+            }
+
+            await CookieAuthTelemetry.TryWriteAsync(
+                _audit,
+                new CookieAuthAuditEvent(
+                    CookieAuthAuditAction.ReauthenticationSucceeded,
+                    replacement.UserId,
+                    replacement.TenantId,
+                    null,
+                    now));
+            return Result.Success(
+                new IssuedBrowserSession(
+                    CreatePrincipal(replacement),
+                    CreateCookie(replacementToken, replacement, now),
+                    antiforgeryToken));
+        }
+
+        await RecordReauthenticationRejectionAsync(now);
+        return Result.Failure<IssuedBrowserSession>(
+            CookieAuthErrors.InvalidCredentials);
+    }
+
     public async ValueTask<Result<IssuedBrowserSession>> SwitchTenantAsync(
         string? sessionToken,
         TenantId tenantId,
@@ -280,6 +342,16 @@ public sealed class CookieSessionManager
             _audit,
             new CookieAuthAuditEvent(
                 CookieAuthAuditAction.LoginRejected,
+                null,
+                null,
+                CookieAuthErrors.InvalidCredentials.Code,
+                now));
+
+    internal ValueTask RecordReauthenticationRejectionAsync(DateTimeOffset now) =>
+        CookieAuthTelemetry.TryWriteAsync(
+            _audit,
+            new CookieAuthAuditEvent(
+                CookieAuthAuditAction.ReauthenticationRejected,
                 null,
                 null,
                 CookieAuthErrors.InvalidCredentials.Code,
@@ -429,6 +501,29 @@ public sealed class CookieSessionManager
             Minimum(now + _options.IdleLifetime, current.AbsoluteExpiresAt),
             current.AbsoluteExpiresAt);
 
+    private CookieSessionRecord CreateReauthenticatedRecord(
+        string replacementToken,
+        string antiforgeryToken,
+        User user,
+        TenantMembership? membership,
+        DateTimeOffset now)
+    {
+        DateTimeOffset absoluteExpiry = now + _options.AbsoluteLifetime;
+        return new CookieSessionRecord(
+            new AuthSessionId(_idGenerator.NewId()),
+            CookieTokenCryptography.ComputeDigest(replacementToken),
+            CookieTokenCryptography.ComputeDigest(antiforgeryToken),
+            user.Id,
+            membership?.TenantId,
+            membership?.Role,
+            user.Version,
+            membership?.Version,
+            now,
+            now,
+            Minimum(now + _options.IdleLifetime, absoluteExpiry),
+            absoluteExpiry);
+    }
+
     private BrowserCookie CreateCookie(
         string plaintextToken,
         CookieSessionRecord record,
@@ -443,7 +538,11 @@ public sealed class CookieSessionManager
             record.UserId,
             record.TenantId,
             record.Role,
-            record.AntiforgeryTokenDigest);
+            record.AntiforgeryTokenDigest,
+            new CookieReauthenticationContext(
+                record.UserId,
+                record.IssuedAt,
+                CookieAuthenticationStrength.PrimaryCredential));
 
     private static DateTimeOffset Minimum(
         DateTimeOffset first,

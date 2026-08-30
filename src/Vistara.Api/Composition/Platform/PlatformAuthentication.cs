@@ -17,6 +17,47 @@ public enum PlatformAuthenticationKind
     Bearer,
 }
 
+public enum PlatformAuthenticationStrength
+{
+    PrimaryCredential,
+}
+
+public sealed record PlatformReauthenticationContext
+{
+    public PlatformReauthenticationContext(
+        Guid actorId,
+        DateTimeOffset verifiedAtUtc,
+        PlatformAuthenticationStrength strength)
+    {
+        if (actorId == Guid.Empty || actorId.Version != 7)
+        {
+            throw new ArgumentException(
+                "The reauthenticated actor ID must be UUIDv7.",
+                nameof(actorId));
+        }
+
+        if (verifiedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "The reauthentication timestamp must use UTC.",
+                nameof(verifiedAtUtc));
+        }
+
+        if (!Enum.IsDefined(strength))
+        {
+            throw new ArgumentOutOfRangeException(nameof(strength));
+        }
+
+        ActorId = actorId;
+        VerifiedAtUtc = verifiedAtUtc;
+        Strength = strength;
+    }
+
+    public Guid ActorId { get; }
+    public DateTimeOffset VerifiedAtUtc { get; }
+    public PlatformAuthenticationStrength Strength { get; }
+}
+
 public sealed record PlatformIdentity
 {
     public PlatformIdentity(
@@ -24,7 +65,8 @@ public sealed record PlatformIdentity
         Guid tenantId,
         string role,
         IReadOnlyCollection<string> scopes,
-        string? antiforgeryTokenDigest)
+        string? antiforgeryTokenDigest,
+        PlatformReauthenticationContext? reauthentication = null)
     {
         if (userId == Guid.Empty || userId.Version != 7)
         {
@@ -38,11 +80,20 @@ public sealed record PlatformIdentity
 
         ArgumentException.ThrowIfNullOrWhiteSpace(role);
         ArgumentNullException.ThrowIfNull(scopes);
+        if (reauthentication is not null &&
+            reauthentication.ActorId != userId)
+        {
+            throw new ArgumentException(
+                "Reauthentication must belong to the authenticated user.",
+                nameof(reauthentication));
+        }
+
         UserId = userId;
         TenantId = tenantId;
         Role = role;
         Scopes = scopes.ToArray();
         AntiforgeryTokenDigest = antiforgeryTokenDigest;
+        Reauthentication = reauthentication;
     }
 
     public Guid UserId { get; }
@@ -50,6 +101,7 @@ public sealed record PlatformIdentity
     public string Role { get; }
     public IReadOnlyCollection<string> Scopes { get; }
     public string? AntiforgeryTokenDigest { get; }
+    public PlatformReauthenticationContext? Reauthentication { get; }
 }
 
 public sealed record PlatformCredentialResult
@@ -110,6 +162,7 @@ internal static class PlatformAuthenticationState
 {
     internal static readonly object KindKey = new();
     internal static readonly object AntiforgeryDigestKey = new();
+    internal static readonly object ReauthenticationKey = new();
     internal static readonly object FailureCodeKey = new();
 
     internal static AuthenticateResult ToAuthenticateResult(
@@ -135,6 +188,19 @@ internal static class PlatformAuthenticationState
             new("vistara_auth_kind", kind.ToString()),
         };
         claims.AddRange(identity.Scopes.Select(scope => new Claim("scope", scope)));
+        if (identity.Reauthentication is { } reauthentication)
+        {
+            claims.Add(new Claim(
+                "auth_time",
+                reauthentication.VerifiedAtUtc
+                    .ToUnixTimeSeconds()
+                    .ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            claims.Add(new Claim(
+                "vistara_auth_strength",
+                reauthentication.Strength.ToString()));
+            context.Items[ReauthenticationKey] = reauthentication;
+        }
+
         context.Items[KindKey] = kind;
         if (identity.AntiforgeryTokenDigest is not null)
         {
@@ -355,7 +421,11 @@ internal sealed class DefaultPlatformCookieAuthenticator(IServiceProvider servic
                     session.Principal.TenantId.Value.Value,
                     session.Principal.Role.Value.ToString(),
                     PlatformScopeMapper.ForRole(session.Principal.Role.Value),
-                    session.Principal.AntiforgeryTokenDigest),
+                    session.Principal.AntiforgeryTokenDigest,
+                    new PlatformReauthenticationContext(
+                        session.Principal.Reauthentication.ActorId.Value,
+                        session.Principal.Reauthentication.VerifiedAtUtc,
+                        PlatformAuthenticationStrength.PrimaryCredential)),
                 session.RefreshedCookie?.ToSetCookieHeader());
         }
         catch (InvalidOperationException)

@@ -225,6 +225,94 @@ public sealed class CookieAuthSessionTests
     }
 
     [Fact]
+    public async Task CookieAuth_reauthentication_rotates_the_exact_actor_session_and_refresh_preserves_proof()
+    {
+        TestContext context = CreateContext(
+            new CookieAuthOptions(
+                TimeSpan.FromMinutes(30),
+                TimeSpan.FromHours(1),
+                TimeSpan.FromMinutes(10)));
+        IssuedBrowserSession issued = await context.Manager.IssueAsync(
+            context.User,
+            context.MembershipOne,
+            null,
+            CancellationToken.None);
+        context.Clock.UtcNow = Now.AddMinutes(4);
+        var reauthentication = new LocalReauthenticationHandler(
+            new FakeLocalCredentialVerifier(context.User),
+            context.Manager);
+
+        Result<IssuedBrowserSession> result = await reauthentication.HandleAsync(
+            new LocalReauthenticationRequest(
+                "alice",
+                "correct horse battery staple",
+                issued.Cookie.Value),
+            CancellationToken.None);
+
+        Assert.True(result.TryGetValue(out IssuedBrowserSession? reauthenticated));
+        Assert.True(context.Store.IsRevoked(issued.Cookie.Value));
+        Assert.Equal(
+            new CookieReauthenticationContext(
+                UserId,
+                Now.AddMinutes(4),
+                CookieAuthenticationStrength.PrimaryCredential),
+            reauthenticated.Principal.Reauthentication);
+        Assert.Equal(
+            Now.AddMinutes(4),
+            Assert.Single(context.Store.ActiveRecords).IssuedAt);
+
+        context.Clock.UtcNow = Now.AddMinutes(15);
+        Result<AuthenticatedBrowserSession> refreshed =
+            await context.Authenticator.AuthenticateAsync(
+                reauthenticated.Cookie.Value,
+                CancellationToken.None);
+
+        Assert.True(refreshed.TryGetValue(out AuthenticatedBrowserSession? active));
+        Assert.Equal(
+            reauthenticated.Principal.Reauthentication,
+            active.Principal.Reauthentication);
+
+        BrowserCookie deletion = await context.Logout.LogoutAsync(
+            active.RefreshedCookie!.Value,
+            CancellationToken.None);
+
+        Assert.True(deletion.IsDeletion);
+        Assert.Equal(
+            CookieAuthErrors.InvalidSession.Code,
+            (await context.Authenticator.AuthenticateAsync(
+                active.RefreshedCookie.Value,
+                CancellationToken.None)).Error?.Code);
+    }
+
+    [Fact]
+    public async Task CookieAuth_reauthentication_rejects_credentials_for_a_different_actor()
+    {
+        TestContext context = CreateContext();
+        IssuedBrowserSession issued = await context.Manager.IssueAsync(
+            context.User,
+            context.MembershipOne,
+            null,
+            CancellationToken.None);
+        User otherUser = CreateUser(
+            new UserId(Guid.Parse("0198b892-ae80-7000-8000-000000000005")),
+            "mallory@example.test",
+            "mallory");
+        var reauthentication = new LocalReauthenticationHandler(
+            new FakeLocalCredentialVerifier(otherUser),
+            context.Manager);
+
+        Result<IssuedBrowserSession> result = await reauthentication.HandleAsync(
+            new LocalReauthenticationRequest(
+                "mallory",
+                "correct-password-for-mallory",
+                issued.Cookie.Value),
+            CancellationToken.None);
+
+        Assert.Equal(CookieAuthErrors.InvalidCredentials.Code, result.Error?.Code);
+        Assert.False(context.Store.IsRevoked(issued.Cookie.Value));
+    }
+
+    [Fact]
     public async Task CookieAuth_membership_or_user_privilege_change_rotates_session()
     {
         TestContext context = CreateContext();
@@ -619,17 +707,23 @@ public sealed class CookieAuthSessionTests
             new CookieSessionInvalidator(store, clock));
     }
 
-    private static User CreateUser()
+    private static User CreateUser() =>
+        CreateUser(UserId, "alice@example.test", "alice");
+
+    private static User CreateUser(
+        UserId userId,
+        string email,
+        string login)
     {
         Result<User> result = User.Create(
-            UserId,
-            "alice@example.test",
-            "Alice",
+            userId,
+            email,
+            login,
             Now);
         Assert.True(result.TryGetValue(out User? user));
         Assert.True(user.LinkLocalIdentity(
             new LocalIdentityId(Guid.Parse("0198b892-ae80-7000-8000-000000000004")),
-            "alice",
+            login,
             Now).IsSuccess);
         return user;
     }

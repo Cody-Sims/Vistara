@@ -97,10 +97,15 @@ public sealed class LifecycleService(
         }
 
         DateTimeOffset now = RequireUtc(_clock.UtcNow);
+        LifecycleReauthenticationContext? reauthentication =
+            actor.Reauthentication;
         if (actor.PrincipalKind != LifecyclePrincipalKind.HumanUser ||
-            actor.AuthenticatedAtUtc is not { } authenticatedAt ||
-            authenticatedAt > now ||
-            now - authenticatedAt > PurgeReauthenticationWindow)
+            reauthentication is null ||
+            reauthentication.ActorId != actor.ActorId ||
+            reauthentication.Strength !=
+                LifecycleAuthenticationStrength.PrimaryCredential ||
+            reauthentication.VerifiedAtUtc > now ||
+            now - reauthentication.VerifiedAtUtc > PurgeReauthenticationWindow)
         {
             return ValueTask.FromResult(
                 Result.Failure<LifecyclePurgeBatchSnapshot>(
@@ -333,7 +338,7 @@ public static class LifecycleApplicationErrors
         "The actor is not permitted to perform this lifecycle operation.");
 
     public static readonly ResultError ReauthenticationRequired =
-        ResultError.Unauthorized(
+        ResultError.Forbidden(
             "lifecycle.reauthentication_required",
             "Recent human reauthentication is required for permanent deletion.");
 
