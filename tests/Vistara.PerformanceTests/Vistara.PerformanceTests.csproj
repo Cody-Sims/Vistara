@@ -5,6 +5,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" VersionOverride="0.15.6" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../../src/Vistara.Api/Vistara.Api.csproj" />
     <ProjectReference Include="../../src/Vistara.Worker/Vistara.Worker.csproj" />
   </ItemGroup>

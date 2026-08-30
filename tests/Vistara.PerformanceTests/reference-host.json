@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "referenceHost": {
+    "runtime": ".NET 10 Release",
+    "databaseProfiles": [
+      "SQLite WAL, one worker, 8 concurrent upload clients",
+      "PostgreSQL production profile"
+    ],
+    "requiredPopulation": {
+      "assets": 5000,
+      "readyPublicDerivative": true,
+      "authenticatedManagementPrincipal": true
+    }
+  },
+  "k6": {
+    "managementReadsPerSecond": 20,
+    "warmDerivativeReadsPerSecond": 30,
+    "uploadVirtualUsers": 4,
+    "defaultDuration": "30s"
+  },
+  "environment": {
+    "VISTARA_BASE_URL": "required",
+    "VISTARA_AUTHORIZATION": "required",
+    "VISTARA_DERIVATIVE_URL": "required for CDN-warm derivative",
+    "VISTARA_DERIVATIVE_AUTHORIZATION": "optional; public CDN runs should omit it",
+    "VISTARA_RUN_UPLOADS": "set true for upload/job concurrency",
+    "VISTARA_GALLERY_URL": "required for Chromium frontend budgets"
+  }
+}
