@@ -26,6 +26,7 @@ public static class TenantServiceCollectionExtensions
         services.TryAddSingleton<IClock>(SystemClock.Instance);
         services.TryAddSingleton<IUuid7Generator, Uuid7Generator>();
         services.TryAddScoped<TenantFactory>();
+        services.TryAddScoped<Vistara.Application.Identity.IdentityFactory>();
         services.TryAddScoped<RelationalTenantDirectory>();
         services.TryAddScoped<ITenantDirectoryPort, PlatformTenantDirectoryAdapter>();
         return services;
