@@ -1,4 +1,5 @@
 export { RequireAdministration, RequireSession } from './guards';
+export { LoginPage, type CapabilitiesClient } from './LoginPage';
 export { activeMembership, canAdminister, describeRole } from './roles';
 export { SessionProvider, type SessionClient } from './SessionProvider';
 export {

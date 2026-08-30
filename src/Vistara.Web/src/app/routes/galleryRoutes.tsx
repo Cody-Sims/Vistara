@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react';
 import { Navigate, type RouteObject } from 'react-router-dom';
+import { LoginPage } from '../../features/session';
+import { platformClient } from '../apiClients';
 import { ApplicationFrame } from '../ApplicationFrame';
 import {
   InitialLoadingPage,
@@ -114,6 +116,16 @@ export function galleryRoutes(
           element: <AccessibleNotFoundRoute />,
         },
       ],
+    },
+    {
+      path: '/login',
+      errorElement: <RouteErrorBoundary />,
+      element:
+        staticPreview || !liveFeatures ? (
+          <RoutePlaceholderPage title="Sign in" staticPreview={staticPreview} />
+        ) : (
+          <LoginPage capabilities={platformClient} />
+        ),
     },
     {
       path: '/s/:token',
