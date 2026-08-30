@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { VistaraApiError } from '../../api/generated/client';
 import type { Capabilities } from '../../api/platform';
+import { BrandMark } from '../../brand';
 import { Skeleton } from '../../components';
 import { useSession } from './sessionContext';
 import styles from './LoginPage.module.css';
@@ -99,7 +100,7 @@ export function LoginPage({ capabilities }: LoginPageProps) {
   return (
     <main className={styles.page} id="main-content">
       <section className={styles.card} aria-labelledby="login-heading">
-        <BrandMark />
+        <BrandMark className={styles.mark} title="Vistara" />
         <p className={styles.eyebrow}>Vistara</p>
         <h1 id="login-heading">Sign in</h1>
         <p className={styles.description}>
@@ -208,32 +209,6 @@ export function LoginPage({ capabilities }: LoginPageProps) {
         ) : null}
       </section>
     </main>
-  );
-}
-
-function BrandMark() {
-  return (
-    <svg
-      className={styles.mark}
-      viewBox="0 0 48 48"
-      role="img"
-      aria-label="Vistara"
-    >
-      <title>Vistara</title>
-      <rect
-        x="3"
-        y="7"
-        width="42"
-        height="34"
-        rx="7"
-        fill="var(--color-accent-soft)"
-      />
-      <path
-        d="M11 33.5 19 21l6.5 9.5L30 25l7 8.5Z"
-        fill="var(--color-accent)"
-      />
-      <circle cx="32.5" cy="16.5" r="3.5" fill="var(--color-accent-strong)" />
-    </svg>
   );
 }
 

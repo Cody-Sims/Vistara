@@ -6,6 +6,7 @@ import {
   useNavigation,
   useNavigationType,
 } from 'react-router-dom';
+import { BrandMark } from '../brand';
 import { ConnectivityStatus } from './ConnectivityStatus';
 import { PrimaryNavigation } from './navigation/PrimaryNavigation';
 import { ThemeControl } from './ThemeControl';
@@ -92,11 +93,7 @@ export function ApplicationFrame({
 function Brand() {
   return (
     <Link className={styles.brand} to="/library" aria-label="Vistara library">
-      <span aria-hidden="true" className={styles.brandMark}>
-        <span />
-        <span />
-        <span />
-      </span>
+      <BrandMark className={styles.brandMark} />
       <span className={styles.brandName}>Vistara</span>
     </Link>
   );

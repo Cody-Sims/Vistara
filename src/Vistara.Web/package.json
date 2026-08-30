@@ -12,6 +12,7 @@
     "test": "vitest",
     "api:generate": "node scripts/gallery-api.mjs generate",
     "api:check": "node scripts/gallery-api.mjs check && node --test scripts/gallery-api.node.mjs",
+    "brand:generate": "node scripts/write-brand-assets.mjs",
     "check": "npm run api:check && npm run lint && npm run typecheck && npm run test -- --run && npm run build"
   },
   "dependencies": {
