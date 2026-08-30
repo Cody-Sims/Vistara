@@ -389,7 +389,7 @@ internal sealed class ApiMigrationHealthProbe(IServiceProvider services)
         CancellationToken cancellationToken) =>
         ExecuteSchemaQueryAsync(
             services.GetRequiredService<VistaraDbContext>(),
-            """SELECT "tenant_id" FROM "worker_tenant_catalog" WHERE 1 = 0""",
+            """SELECT "routed_tenant_id" FROM "worker_tenant_catalog" WHERE 1 = 0""",
             cancellationToken);
 }
 
@@ -454,15 +454,21 @@ internal sealed class ApiStorageHealthProbe(IServiceProvider services)
         HealthDependency.Storage,
         HealthReasonCodes.StorageUnavailable)
 {
-    private static readonly BlobKey Sentinel = new("health/readiness");
+    private static readonly BlobListOptions Sentinel = new("health/");
 
     protected override async ValueTask CheckCoreAsync(
         IServiceProvider services,
         CancellationToken cancellationToken)
     {
-        _ = await services
-            .GetRequiredService<IBlobStore>()
-            .HeadAsync(Sentinel, cancellationToken);
+        IBlobStore store = services.GetRequiredService<IBlobStore>();
+        _ = store.Capabilities;
+        await foreach (BlobHead head in store.ListAsync(
+                           Sentinel,
+                           cancellationToken))
+        {
+            _ = head;
+            break;
+        }
     }
 }
 

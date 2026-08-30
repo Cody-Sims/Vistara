@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.Builder;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
@@ -6,7 +8,9 @@ using Microsoft.Extensions.DependencyInjection;
 using OpenTelemetry.Trace;
 using Vistara.Api.Composition.Runtime;
 using Vistara.Api.Health;
+using Vistara.Api.Composition.Media;
 using Vistara.Observability.Health;
+using Vistara.Persistence;
 using Xunit;
 
 namespace Vistara.IntegrationTests.Health;
@@ -109,6 +113,68 @@ public sealed class ApiHealthWiringTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             SendAsync(app, "/health/ready", aborted.Token));
+    }
+
+    [Fact]
+    public async Task Composed_api_readiness_is_healthy_against_a_created_database_and_store()
+    {
+        string root = Path.Combine(
+            AppContext.BaseDirectory,
+            "eng",
+            "tests",
+            "api-health",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string connectionString =
+            $"Data Source=ApiHealth-{Guid.NewGuid():N};Mode=Memory;Cache=Shared";
+        await using var anchor = new SqliteConnection(connectionString);
+        await anchor.OpenAsync(CancellationToken.None);
+        try
+        {
+            DbContextOptions<VistaraDbContext> contextOptions =
+                new DbContextOptionsBuilder<VistaraDbContext>()
+                    .UseSqlite(connectionString)
+                    .Options;
+            await using (var context = new VistaraDbContext(
+                             contextOptions,
+                             new FixedTenantScope(Guid.CreateVersion7())))
+            {
+                await context.Database.EnsureCreatedAsync(CancellationToken.None);
+            }
+
+            IConfiguration configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Media:Storage:Provider"] = "Local",
+                    ["Media:Storage:Local:RootPath"] = root,
+                    ["Media:Imaging:Provider"] = "NetVips",
+                })
+                .Build();
+            ServiceCollection services = [];
+            services.AddSingleton<ITenantScope>(
+                new FixedTenantScope(Guid.CreateVersion7()));
+            services.AddVistaraPersistence(options =>
+            {
+                options.Provider = VistaraDatabaseProvider.Sqlite;
+                options.ConnectionString = connectionString;
+            });
+            services.AddVistaraMedia(configuration);
+            services.AddVistaraApiHealth();
+            await using ServiceProvider provider = services.BuildServiceProvider();
+            await using AsyncServiceScope scope = provider.CreateAsyncScope();
+
+            HealthReport report = await scope.ServiceProvider
+                .GetRequiredService<SafeHealthEvaluator>()
+                .EvaluateAsync(HealthEndpointKind.Readiness, CancellationToken.None);
+
+            Assert.True(
+                report.State == HealthState.Healthy,
+                HealthReportJson.Serialize(report));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
