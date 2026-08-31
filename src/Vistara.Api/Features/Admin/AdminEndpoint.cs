@@ -466,6 +466,16 @@ public static class AdminServiceCollectionExtensions
         services.TryAddScoped<IAccountAuthorizationPort, ClaimsAccountAuthorizationPort>();
         services.TryAddScoped<RelationalAdminStore>();
         services.TryAddScoped<IAdminPort, PlatformAdminAdapter>();
+        services.TryAddSingleton<IPlatformRateLimitHook, PermitAllPlatformRateLimitHook>();
+        services.AddHttpClient(
+            PlatformStorageValidationProbe.HttpClientName,
+            client => client.Timeout = StorageValidationEndpoint.ProbeTimeout);
+        services.TryAddScoped<
+            IStorageValidationProbe,
+            PlatformStorageValidationProbe>();
+        services.TryAddScoped<
+            IStorageValidationPort,
+            PlatformStorageValidationAdapter>();
         return services;
     }
 }
@@ -502,6 +512,17 @@ public static class AdminEndpointMapping
                     context,
                     Authorization(context),
                     Admin(context),
+                    cancellationToken)));
+        Map(endpoints.MapPost(
+            "/api/v1/admin/storage/validate",
+            (HttpContext context, CancellationToken cancellationToken) =>
+                StorageValidationEndpoint.ValidateAsync(
+                    context,
+                    Authorization(context),
+                    context.RequestServices
+                        .GetRequiredService<IStorageValidationPort>(),
+                    context.RequestServices
+                        .GetRequiredService<IPlatformRateLimitHook>(),
                     cancellationToken)));
         Map(endpoints.MapGet(
             "/api/v1/admin/audit",
