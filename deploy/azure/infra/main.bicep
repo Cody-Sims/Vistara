@@ -124,6 +124,12 @@ param deployAppRegistration bool = true
 @description('Client ID of an already registered Entra application. Required when deployAppRegistration is false, and supplied by up.sh on the pass that turns Entra sign-in on.')
 param existingApplicationClientId string = ''
 
+@description('Activate the API and worker container apps. The first provision leaves this false so data, identity, Key Vault, the environment, and the migration job exist before any application replica starts; up.sh sets it true once the pepper, the Entra application, and the database roles are in place.')
+param deployApplications bool = false
+
+@description('Key Vault secret URI holding the API key pepper. Written by up.sh between the two provisions, never a value, and required once deployApplications is true.')
+param apiKeyPepperSecretUri string = ''
+
 @description('Keep PostgreSQL, Storage, and Key Vault behind CanNotDelete locks so teardown never removes evaluation data.')
 param retainData bool = true
 
@@ -149,11 +155,16 @@ var budgetName = 'budget-vistara-${environmentSlug}'
 
 var mediaContainerName = 'media'
 var dataProtectionContainerName = 'dataprotection'
+var dataProtectionBlobName = 'keys.xml'
 var postgresDatabaseName = 'vistara'
+var postgresTokenScope = 'https://ossrdbms-aad${environment().suffixes.sqlServerHostname}/.default'
 var postgresApiRole = 'vistara_api_runtime'
 var postgresWorkerRole = 'vistara_worker_runtime'
 var postgresMigratorRole = 'vistara_migrator'
 var registryPasswordSecretName = 'registry-password'
+var apiKeyPepperSecretName = 'api-key-pepper'
+var apiKeyPepperVersion = 'v1'
+var apiKeyPepperConfigurationKey = 'Platform:Authentication:ApiKeys:Peppers:${apiKeyPepperVersion}'
 
 // substring fails the deployment when '@sha256:' is absent, which is the only
 // assertion primitive available without the experimental assertions feature.
@@ -162,6 +173,18 @@ var workerImageDigest = substring(workerImage, indexOf(workerImage, '@sha256:'))
 var migrationImageDigest = substring(migrationImage, indexOf(migrationImage, '@sha256:'))
 
 var applicationClientId = trim(existingApplicationClientId)
+
+// A private registry password only ever travels as a Key Vault reference that
+// the operator created before provisioning.
+var privateRegistry = !empty(registryPasswordSecretUri)
+
+// substring() over a missing '/secrets/' fails the deployment here rather than
+// letting Container Apps reject an unresolvable Key Vault reference later.
+var apiKeyPepperSecretUriChecked = !deployApplications
+  ? ''
+  : (contains(apiKeyPepperSecretUri, '/secrets/')
+      ? apiKeyPepperSecretUri
+      : substring(apiKeyPepperSecretUri, indexOf(apiKeyPepperSecretUri, '/secrets/')))
 
 // main.parameters.json always supplies entraTenantId so up.sh --tenant-id can
 // reach the template; an unset azd value arrives as an empty string.
@@ -239,6 +262,7 @@ module storage 'modules/storage.bicep' = {
     storageRedundancy: storageRedundancy
     mediaContainerName: mediaContainerName
     dataProtectionContainerName: dataProtectionContainerName
+    dataProtectionBlobName: dataProtectionBlobName
     retainData: retainData
   }
 }
@@ -283,6 +307,8 @@ module rbac 'modules/rbac.bicep' = {
     keyVaultName: keyVault.outputs.name
     apiPrincipalId: identity.outputs.apiPrincipalId
     workerPrincipalId: identity.outputs.workerPrincipalId
+    migratePrincipalId: identity.outputs.migratePrincipalId
+    grantMigrateKeyVaultSecretsUser: privateRegistry
   }
 }
 
@@ -346,6 +372,12 @@ var mediaEnvironmentVariables = [
   {
     name: 'Media__Storage__Azure__ContainerName'
     value: mediaContainerName
+  }
+  // Required by the Azure media provider so the blob endpoint is asserted
+  // against the account rather than inferred from an ambient suffix.
+  {
+    name: 'Media__Storage__Azure__ServiceUri'
+    value: storage.outputs.blobEndpoint
   }
   {
     name: 'Media__Storage__Azure__CredentialMode'
@@ -509,24 +541,40 @@ var apiEnvironmentVariables = concat(
       name: 'Persistence__Azure__TokenRetryInterval'
       value: '00:00:05'
     }
+    // Container Apps ingress already refuses plain HTTP (allowInsecure is
+    // false), and the forwarded-header middleware trusts no proxy address by
+    // default, so an in-process redirect would loop against the edge instead of
+    // upgrading anything.
     {
       name: 'Security__Transport__RedirectHttpToHttps'
-      value: 'true'
+      value: 'false'
     }
     {
       name: 'Security__Proxy__ForwardLimit'
       value: '1'
     }
     {
+      name: 'Security__DataProtection__Enabled'
+      value: 'true'
+    }
+    {
       name: 'Security__DataProtection__ApplicationDiscriminator'
       value: 'vistara-${environmentSlug}'
     }
     {
-      name: 'Security__DataProtection__BlobUri'
-      value: storage.outputs.dataProtectionBlobUri
+      name: 'Security__DataProtection__BlobServiceUri'
+      value: storage.outputs.blobEndpoint
     }
     {
-      name: 'Security__DataProtection__KeyVaultKeyId'
+      name: 'Security__DataProtection__BlobContainerName'
+      value: dataProtectionContainerName
+    }
+    {
+      name: 'Security__DataProtection__KeyBlobName'
+      value: dataProtectionBlobName
+    }
+    {
+      name: 'Security__DataProtection__KeyVaultKeyIdentifier'
       value: keyVault.outputs.dataProtectionKeyId
     }
     {
@@ -534,7 +582,26 @@ var apiEnvironmentVariables = concat(
       value: identity.outputs.apiClientId
     }
     {
+      name: 'Security__RequiredSecretKeys__0'
+      value: apiKeyPepperConfigurationKey
+    }
+    {
+      name: 'Platform__Authentication__ApiKeys__CurrentPepperVersion'
+      value: apiKeyPepperVersion
+    }
+    {
+      name: 'Platform__Authentication__ApiKeys__Peppers__${apiKeyPepperVersion}'
+      secretRef: apiKeyPepperSecretName
+    }
+    {
       name: 'Media__Storage__Azure__ManagedIdentityClientId'
+      value: identity.outputs.apiClientId
+    }
+    // Azure SDK clients that are handed no explicit client id still resolve a
+    // user-assigned identity from this variable, so no ambient identity on the
+    // replica can be picked up instead.
+    {
+      name: 'AZURE_CLIENT_ID'
       value: identity.outputs.apiClientId
     }
     {
@@ -579,7 +646,15 @@ var workerEnvironmentVariables = concat(
       value: '00:00:05'
     }
     {
+      name: 'Persistence__Azure__TokenScope'
+      value: postgresTokenScope
+    }
+    {
       name: 'Media__Storage__Azure__ManagedIdentityClientId'
+      value: identity.outputs.workerClientId
+    }
+    {
+      name: 'AZURE_CLIENT_ID'
       value: identity.outputs.workerClientId
     }
     {
@@ -602,6 +677,9 @@ var workerEnvironmentVariables = concat(
   mediaEnvironmentVariables
 )
 
+// The migration entrypoint reads its token straight from the Container Apps
+// identity endpoint, so it takes MIGRATION_MANAGED_IDENTITY_CLIENT_ID rather
+// than the Persistence:Azure options the long-running hosts bind.
 var migrationEnvironmentVariables = [
   {
     name: 'MIGRATION_PROVIDER'
@@ -612,30 +690,18 @@ var migrationEnvironmentVariables = [
     value: migrationConnectionString
   }
   {
-    name: 'Persistence__Provider'
-    value: 'PostgreSql'
-  }
-  {
-    name: 'Persistence__Azure__EntraTokenEnabled'
-    value: 'true'
-  }
-  {
-    name: 'Persistence__Azure__ManagedIdentityClientId'
+    name: 'MIGRATION_MANAGED_IDENTITY_CLIENT_ID'
     value: identity.outputs.migrateClientId
   }
   {
-    name: 'Persistence__Azure__TokenRefreshInterval'
-    value: '00:55:00'
+    name: 'MIGRATION_ENTRA_TOKEN_SCOPE'
+    value: postgresTokenScope
   }
   {
-    name: 'Persistence__Azure__TokenRetryInterval'
-    value: '00:00:05'
+    name: 'AZURE_CLIENT_ID'
+    value: identity.outputs.migrateClientId
   }
 ]
-
-// A private registry password only ever travels as a Key Vault reference that
-// the operator created before provisioning.
-var privateRegistry = !empty(registryPasswordSecretUri)
 
 var apiRegistrySecrets = privateRegistry
   ? [
@@ -646,6 +712,20 @@ var apiRegistrySecrets = privateRegistry
       }
     ]
   : []
+
+// The pepper is generated and written to Key Vault by up.sh between the two
+// provisions, so the reference only exists on the activation pass.
+var apiKeyPepperSecrets = deployApplications
+  ? [
+      {
+        name: apiKeyPepperSecretName
+        keyVaultUrl: apiKeyPepperSecretUriChecked
+        identity: identity.outputs.apiResourceId
+      }
+    ]
+  : []
+
+var apiSecrets = concat(apiRegistrySecrets, apiKeyPepperSecrets)
 
 var workerRegistrySecrets = privateRegistry
   ? [
@@ -681,6 +761,9 @@ var registries = privateRegistry
 // Compute modules
 // ---------------------------------------------------------------------------
 
+// Deployed on both passes: HB-12 starts this job and waits for it to succeed
+// before the activation pass turns the API and worker on. A manual trigger
+// never starts a replica by itself, so an idle job cannot crash-loop.
 module migrationJob 'modules/migrate-job.bicep' = {
   scope: resourceGroup
   name: 'vistara-migrate-job'
@@ -702,7 +785,7 @@ module migrationJob 'modules/migrate-job.bicep' = {
   ]
 }
 
-module api 'modules/api.bicep' = {
+module api 'modules/api.bicep' = if (deployApplications) {
   scope: resourceGroup
   name: 'vistara-api'
   params: {
@@ -715,7 +798,7 @@ module api 'modules/api.bicep' = {
     managedEnvironmentResourceId: containerAppsEnvironment.outputs.resourceId
     userAssignedIdentityResourceId: identity.outputs.apiResourceId
     image: apiImage
-    secrets: apiRegistrySecrets
+    secrets: apiSecrets
     registries: registries
     environmentVariables: apiEnvironmentVariables
     minReplicas: apiMinReplicas
@@ -728,7 +811,7 @@ module api 'modules/api.bicep' = {
   ]
 }
 
-module worker 'modules/worker.bicep' = {
+module worker 'modules/worker.bicep' = if (deployApplications) {
   scope: resourceGroup
   name: 'vistara-worker'
   params: {
@@ -786,5 +869,5 @@ output DATAPROTECTION_KEY_ID string = keyVault.outputs.dataProtectionKeyId
 output AZURE_KEY_VAULT_ENDPOINT string = keyVault.outputs.vaultUri
 
 output MIGRATION_JOB_NAME string = migrationJob.outputs.name
-output API_CONTAINER_APP_NAME string = api.outputs.name
-output WORKER_CONTAINER_APP_NAME string = worker.outputs.name
+output API_CONTAINER_APP_NAME string = deployApplications ? api!.outputs.name : ''
+output WORKER_CONTAINER_APP_NAME string = deployApplications ? worker!.outputs.name : ''

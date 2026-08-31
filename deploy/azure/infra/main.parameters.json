@@ -80,6 +80,12 @@
     "existingApplicationClientId": {
       "value": "${VISTARA_APPLICATION_CLIENT_ID=}"
     },
+    "deployApplications": {
+      "value": ${VISTARA_DEPLOY_APPLICATIONS=false}
+    },
+    "apiKeyPepperSecretUri": {
+      "value": "${VISTARA_API_KEY_PEPPER_SECRET_URI=}"
+    },
     "retainData": {
       "value": ${VISTARA_RETAIN_DATA=true}
     }
