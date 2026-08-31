@@ -1,0 +1,87 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "${AZURE_ENV_NAME}"
+    },
+    "location": {
+      "value": "${AZURE_LOCATION}"
+    },
+    "apiImage": {
+      "value": "${VISTARA_API_IMAGE}"
+    },
+    "workerImage": {
+      "value": "${VISTARA_WORKER_IMAGE}"
+    },
+    "migrationImage": {
+      "value": "${VISTARA_MIGRATION_IMAGE}"
+    },
+    "registryServer": {
+      "value": "${VISTARA_REGISTRY_SERVER=ghcr.io}"
+    },
+    "registryUsername": {
+      "value": "${VISTARA_REGISTRY_USERNAME=}"
+    },
+    "registryPasswordSecretUri": {
+      "value": "${VISTARA_REGISTRY_PASSWORD_SECRET_URI=}"
+    },
+    "entraTenantId": {
+      "value": "${AZURE_TENANT_ID=}"
+    },
+    "firstOwnerObjectId": {
+      "value": "${VISTARA_FIRST_OWNER_OBJECT_ID}"
+    },
+    "postgresSku": {
+      "value": "${VISTARA_POSTGRES_SKU=Standard_B1ms}"
+    },
+    "postgresStorageGb": {
+      "value": ${VISTARA_POSTGRES_STORAGE_GB=32}
+    },
+    "postgresEntraAdminObjectId": {
+      "value": "${VISTARA_POSTGRES_ADMIN_OBJECT_ID}"
+    },
+    "postgresEntraAdminPrincipalName": {
+      "value": "${VISTARA_POSTGRES_ADMIN_PRINCIPAL_NAME}"
+    },
+    "postgresEntraAdminPrincipalType": {
+      "value": "${VISTARA_POSTGRES_ADMIN_PRINCIPAL_TYPE=User}"
+    },
+    "storageRedundancy": {
+      "value": "${VISTARA_STORAGE_REDUNDANCY=Standard_LRS}"
+    },
+    "apiMinReplicas": {
+      "value": ${VISTARA_API_MIN_REPLICAS=1}
+    },
+    "apiMaxReplicas": {
+      "value": ${VISTARA_API_MAX_REPLICAS=2}
+    },
+    "workerMinReplicas": {
+      "value": ${VISTARA_WORKER_MIN_REPLICAS=1}
+    },
+    "workerMaxReplicas": {
+      "value": ${VISTARA_WORKER_MAX_REPLICAS=1}
+    },
+    "budgetAmount": {
+      "value": ${VISTARA_BUDGET_AMOUNT=25}
+    },
+    "budgetContactEmails": {
+      "value": ${VISTARA_BUDGET_CONTACT_EMAILS=[]}
+    },
+    "customDomainName": {
+      "value": "${VISTARA_CUSTOM_DOMAIN_NAME=}"
+    },
+    "customDomainCertificateId": {
+      "value": "${VISTARA_CUSTOM_DOMAIN_CERTIFICATE_ID=}"
+    },
+    "deployAppRegistration": {
+      "value": ${VISTARA_DEPLOY_APP_REGISTRATION=true}
+    },
+    "existingApplicationClientId": {
+      "value": "${VISTARA_APPLICATION_CLIENT_ID=}"
+    },
+    "retainData": {
+      "value": ${VISTARA_RETAIN_DATA=true}
+    }
+  }
+}
