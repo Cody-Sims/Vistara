@@ -30,3 +30,7 @@ public sealed record TenantMemberCollectionResponse(
 public sealed record InviteTenantMemberRequest(
     [property: JsonPropertyName("email")] string? Email,
     [property: JsonPropertyName("role")] string? Role);
+
+public sealed record UpdateTenantMemberRequest(
+    [property: JsonPropertyName("role")] string? Role,
+    [property: JsonPropertyName("status")] string? Status);

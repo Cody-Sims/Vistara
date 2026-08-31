@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Vistara.Api.Features.Account;
+using Vistara.Api.Features.Tenants;
 using Vistara.Auth.Cookies;
 using Vistara.Domain.Common;
 using Vistara.Persistence;
@@ -68,6 +69,7 @@ internal sealed class AccountSurfaceHarness : IAsyncDisposable
             new Pbkdf2LocalPasswordHasher(100_000));
         configure?.Invoke(services);
         services.AddVistaraAccountSurface();
+        services.AddVistaraTenantAdministration();
         ServiceProvider provider = services.BuildServiceProvider(
             new ServiceProviderOptions { ValidateScopes = true });
         return new AccountSurfaceHarness(anchor, provider, connectionString);
@@ -88,6 +90,19 @@ internal sealed class AccountSurfaceHarness : IAsyncDisposable
             provisioned.TryGetValue(out ProvisionedOwnerView? owner),
             provisioned.Error?.Message ?? "Provisioning failed.");
         return owner!;
+    }
+
+    /// <summary>
+    /// Opens a scope whose ambient tenant context is already established, the
+    /// way the platform middleware does for an authenticated request.
+    /// </summary>
+    internal AsyncServiceScope CreateTenantScope(Guid tenantId)
+    {
+        AsyncServiceScope scope = _provider.CreateAsyncScope();
+        scope.ServiceProvider
+            .GetRequiredService<AmbientTenantScope>()
+            .Establish(tenantId);
+        return scope;
     }
 
     internal VistaraDbContext CreateContext(Guid tenantId) =>

@@ -75,6 +75,20 @@ public static class TenantEndpointMapping
                     Authorization(context),
                     Directory(context),
                     cancellationToken)));
+        Map(endpoints.MapPatch(
+            "/api/v1/tenants/{tenantId:guid}/members/{memberUserId:guid}",
+            (
+                Guid tenantId,
+                Guid memberUserId,
+                HttpContext context,
+                CancellationToken cancellationToken) =>
+                TenantEndpoint.UpdateMemberAsync(
+                    context,
+                    tenantId,
+                    memberUserId,
+                    Authorization(context),
+                    Directory(context),
+                    cancellationToken)));
         return endpoints;
     }
 

@@ -40,7 +40,7 @@ public sealed class TenantEndpointContractTests
             .SelectMany(source => source.Endpoints)
             .OfType<RouteEndpoint>()
             .ToArray();
-        Assert.Equal(3, endpoints.Length);
+        Assert.Equal(4, endpoints.Length);
         Assert.All(endpoints, endpoint => Assert.Equal(
             TenantEndpointMapping.PolicyName,
             Assert.Single(endpoint.Metadata.GetOrderedMetadata<IAuthorizeData>()).Policy));
@@ -52,6 +52,12 @@ public sealed class TenantEndpointContractTests
             endpoints.Count(endpoint =>
                 endpoint.RoutePattern.RawText ==
                 "/api/v1/tenants/{tenantId:guid}/members"));
+        Assert.Contains(
+            endpoints,
+            endpoint => endpoint.RoutePattern.RawText ==
+                "/api/v1/tenants/{tenantId:guid}/members/{memberUserId:guid}" &&
+                endpoint.Metadata.GetMetadata<HttpMethodMetadata>()!
+                    .HttpMethods.Contains("PATCH"));
     }
 
     [Fact]
@@ -290,6 +296,127 @@ public sealed class TenantEndpointContractTests
         Assert.Null(directory.Invitation);
     }
 
+    [Fact]
+    public async Task Updating_a_member_applies_the_precondition_and_returns_the_new_tag()
+    {
+        var directory = new FakeTenantDirectoryPort();
+
+        TestResponse response = await SendAsync(
+            "update",
+            directory,
+            routeTenantId: TenantId,
+            body: """{"role":"TenantAdmin","status":"Active"}""",
+            memberUserId: MemberId,
+            ifMatch: "\"v4\"");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("\"v5\"", response.ETag);
+        Assert.Equal(4, directory.ExpectedVersion);
+        Assert.NotNull(directory.MemberUpdate);
+        Assert.Equal(TenantId, directory.MemberUpdate.TenantId);
+        Assert.Equal(MemberId, directory.MemberUpdate.MemberUserId);
+        Assert.Equal(UserId, directory.MemberUpdate.ActorUserId);
+        Assert.Equal("TenantAdmin", directory.MemberUpdate.Role);
+        Assert.Equal("Active", directory.MemberUpdate.Status);
+    }
+
+    [Fact]
+    public async Task Updating_a_member_without_a_precondition_is_rejected()
+    {
+        var directory = new FakeTenantDirectoryPort();
+
+        TestResponse response = await SendAsync(
+            "update",
+            directory,
+            routeTenantId: TenantId,
+            body: """{"status":"Suspended"}""",
+            memberUserId: MemberId);
+
+        Assert.Equal(HttpStatusCode.PreconditionRequired, response.StatusCode);
+        Assert.Null(directory.MemberUpdate);
+    }
+
+    [Fact]
+    public async Task Updating_a_member_with_a_stale_precondition_answers_412()
+    {
+        var directory = new FakeTenantDirectoryPort
+        {
+            UpdateResult = Result.Failure<TenantMemberView>(ResultError.Conflict(
+                "tenants.member_version_conflict",
+                "The membership changed since it was read.")),
+        };
+
+        TestResponse response = await SendAsync(
+            "update",
+            directory,
+            routeTenantId: TenantId,
+            body: """{"status":"Suspended"}""",
+            memberUserId: MemberId,
+            ifMatch: "\"v1\"");
+
+        Assert.Equal(HttpStatusCode.PreconditionFailed, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Demoting_the_last_owner_is_a_state_conflict()
+    {
+        var directory = new FakeTenantDirectoryPort
+        {
+            UpdateResult = Result.Failure<TenantMemberView>(ResultError.Conflict(
+                "tenants.last_owner",
+                "A tenant must keep at least one active owner.")),
+        };
+
+        TestResponse response = await SendAsync(
+            "update",
+            directory,
+            routeTenantId: TenantId,
+            body: """{"role":"Member"}""",
+            memberUserId: MemberId,
+            ifMatch: "\"v4\"");
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        using JsonDocument problem = JsonDocument.Parse(response.Body);
+        Assert.Equal(
+            "tenants_last_owner",
+            problem.RootElement.GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Updating_a_member_of_another_tenant_is_concealed()
+    {
+        var directory = new FakeTenantDirectoryPort();
+
+        TestResponse response = await SendAsync(
+            "update",
+            directory,
+            routeTenantId: OtherTenantId,
+            body: """{"status":"Suspended"}""",
+            memberUserId: MemberId,
+            ifMatch: "\"v4\"");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Null(directory.MemberUpdate);
+    }
+
+    [Fact]
+    public async Task Only_an_owner_may_promote_a_member_to_owner()
+    {
+        var directory = new FakeTenantDirectoryPort();
+
+        TestResponse response = await SendAsync(
+            "update",
+            directory,
+            routeTenantId: TenantId,
+            body: """{"role":"TenantOwner"}""",
+            principal: Principal("TenantAdmin", "members.manage"),
+            memberUserId: MemberId,
+            ifMatch: "\"v4\"");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Null(directory.MemberUpdate);
+    }
+
     private static ClaimsPrincipal Principal(string role, params string[] scopes)
     {
         var claims = new List<Claim>
@@ -308,7 +435,9 @@ public sealed class TenantEndpointContractTests
         ITenantDirectoryPort directory,
         Guid? routeTenantId = null,
         string? body = null,
-        ClaimsPrincipal? principal = null)
+        ClaimsPrincipal? principal = null,
+        Guid? memberUserId = null,
+        string? ifMatch = null)
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.Services.AddSingleton(directory);
@@ -329,9 +458,21 @@ public sealed class TenantEndpointContractTests
                 "members.manage",
                 "assets.read"),
         };
-        context.Request.Method = operation == "invite"
-            ? HttpMethods.Post
-            : HttpMethods.Get;
+        context.Request.Method = operation switch
+        {
+            "invite" => HttpMethods.Post,
+            "update" => HttpMethods.Patch,
+            _ => HttpMethods.Get,
+        };
+        if (memberUserId is { } member)
+        {
+            context.Request.RouteValues["memberUserId"] = member.ToString("D");
+        }
+
+        if (ifMatch is not null)
+        {
+            context.Request.Headers.IfMatch = ifMatch;
+        }
         if (routeTenantId is { } id)
         {
             context.Request.RouteValues["tenantId"] = id.ToString("D");
@@ -354,6 +495,7 @@ public sealed class TenantEndpointContractTests
             context.Response.ContentType,
             context.Response.Headers.CacheControl.ToString(),
             context.Response.Headers.Location.ToString(),
+            context.Response.Headers.ETag.ToString(),
             responseBody);
     }
 
@@ -364,9 +506,11 @@ public sealed class TenantEndpointContractTests
             "/api/v1/tenants/{tenantId:guid}/members";
         return operation switch
         {
-            "tenants" => !members,
+            "tenants" => endpoint.RoutePattern.RawText == "/api/v1/tenants",
             "members" => members && methods.HttpMethods.Contains("GET"),
             "invite" => members && methods.HttpMethods.Contains("POST"),
+            "update" => endpoint.RoutePattern.RawText ==
+                "/api/v1/tenants/{tenantId:guid}/members/{memberUserId:guid}",
             _ => false,
         };
     }
@@ -376,6 +520,7 @@ public sealed class TenantEndpointContractTests
         string? ContentType,
         string CacheControl,
         string Location,
+        string ETag,
         string Body);
 
     private sealed class FakeTenantDirectoryPort : ITenantDirectoryPort
@@ -431,6 +576,31 @@ public sealed class TenantEndpointContractTests
                     new DateTimeOffset(2026, 8, 30, 12, 5, 0, TimeSpan.Zero),
                     4),
             ]);
+        }
+
+        public TenantMemberUpdate? MemberUpdate { get; private set; }
+
+        public long? ExpectedVersion { get; private set; }
+
+        public Result<TenantMemberView>? UpdateResult { get; init; }
+
+        public ValueTask<Result<TenantMemberView>> UpdateMemberAsync(
+            TenantMemberUpdate update,
+            long expectedVersion,
+            CancellationToken cancellationToken)
+        {
+            MemberUpdate = update;
+            ExpectedVersion = expectedVersion;
+            return ValueTask.FromResult(UpdateResult ?? Result.Success(
+                new TenantMemberView(
+                    update.MemberUserId,
+                    "member@example.com",
+                    "Member",
+                    update.Role ?? "Member",
+                    update.Status ?? "Active",
+                    new DateTimeOffset(2026, 8, 30, 12, 0, 0, TimeSpan.Zero),
+                    new DateTimeOffset(2026, 8, 30, 12, 5, 0, TimeSpan.Zero),
+                    expectedVersion + 1)));
         }
 
         public ValueTask<Result<TenantMemberView>> InviteMemberAsync(

@@ -22,6 +22,13 @@ public sealed record TenantMemberView(
     DateTimeOffset? JoinedAt,
     long Version);
 
+public sealed record TenantMemberUpdate(
+    Guid TenantId,
+    Guid ActorUserId,
+    Guid MemberUserId,
+    string? Role,
+    string? Status);
+
 public sealed record TenantMemberInvitation(
     Guid TenantId,
     Guid ActorUserId,
@@ -51,5 +58,14 @@ public interface ITenantDirectoryPort
 
     ValueTask<Result<TenantMemberView>> InviteMemberAsync(
         TenantMemberInvitation invitation,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Applies a role or status change guarded by the membership version. The
+    /// tenant must keep at least one active owner.
+    /// </summary>
+    ValueTask<Result<TenantMemberView>> UpdateMemberAsync(
+        TenantMemberUpdate update,
+        long expectedVersion,
         CancellationToken cancellationToken);
 }

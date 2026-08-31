@@ -216,6 +216,147 @@ public static class TenantEndpoint
             cancellationToken);
     }
 
+    public static async Task UpdateMemberAsync(
+        HttpContext context,
+        Guid tenantId,
+        Guid memberUserId,
+        IAccountAuthorizationPort authorization,
+        ITenantDirectoryPort directory,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(authorization);
+        ArgumentNullException.ThrowIfNull(directory);
+
+        AccountAccess access = await authorization.AuthorizeAsync(
+            context,
+            AccountOperation.ManageMembers,
+            cancellationToken);
+        if (access.Actor is not { } actor)
+        {
+            await DenyAsync(context, access.Status, cancellationToken);
+            return;
+        }
+
+        if (actor.TenantId != tenantId ||
+            memberUserId == Guid.Empty ||
+            memberUserId.Version != 7)
+        {
+            await WriteNotFoundAsync(context, cancellationToken);
+            return;
+        }
+
+        IfMatchCondition condition = ApiConcurrency.ReadIfMatch(context.Request);
+        if (!await ApiConcurrency.RequirePreconditionAsync(
+                context,
+                condition,
+                "tenants",
+                cancellationToken))
+        {
+            return;
+        }
+
+        UpdateTenantMemberRequest? request;
+        try
+        {
+            request = await JsonSerializer.DeserializeAsync<UpdateTenantMemberRequest>(
+                context.Request.Body,
+                ResponseJsonOptions,
+                cancellationToken);
+        }
+        catch (JsonException)
+        {
+            await ApiProblemWriter.WriteAsync(
+                context,
+                StatusCodes.Status400BadRequest,
+                "tenants.malformed_request",
+                "The membership request body could not be parsed.",
+                cancellationToken);
+            return;
+        }
+
+        if (request is null)
+        {
+            await ApiProblemWriter.WriteAsync(
+                context,
+                StatusCodes.Status400BadRequest,
+                "tenants.malformed_request",
+                "The membership request body is required.",
+                cancellationToken);
+            return;
+        }
+
+        if (string.Equals(request.Role, nameof(TenantRole.TenantOwner), StringComparison.Ordinal) &&
+            actor.Role != TenantRole.TenantOwner)
+        {
+            await ApiProblemWriter.WriteAsync(
+                context,
+                StatusCodes.Status403Forbidden,
+                "tenants.owner_role_requires_owner",
+                "Only a tenant owner may grant the tenant owner role.",
+                cancellationToken);
+            return;
+        }
+
+        long expected = condition.Kind == IfMatchKind.Wildcard
+            ? await CurrentVersionAsync(directory, tenantId, memberUserId, cancellationToken)
+            : condition.Version;
+        Result<TenantMemberView> updated = await directory.UpdateMemberAsync(
+            new TenantMemberUpdate(
+                tenantId,
+                actor.UserId,
+                memberUserId,
+                request.Role,
+                request.Status),
+            expected,
+            cancellationToken);
+        if (!updated.TryGetValue(out TenantMemberView? member))
+        {
+            if (updated.Error!.Code == "tenants.member_version_conflict")
+            {
+                await ApiConcurrency.WriteStaleAsync(
+                    context,
+                    "tenants",
+                    cancellationToken);
+                return;
+            }
+
+            if (updated.Error.Code == "tenants.member_not_found")
+            {
+                await WriteNotFoundAsync(context, cancellationToken);
+                return;
+            }
+
+            await ApiProblemWriter.WriteResultErrorAsync(
+                context,
+                updated.Error,
+                cancellationToken);
+            return;
+        }
+
+        context.Response.Headers.ETag = ApiConcurrency.ToETag(member.Version);
+        await WriteJsonAsync(
+            context,
+            StatusCodes.Status200OK,
+            Map(member),
+            cancellationToken);
+    }
+
+    private static async ValueTask<long> CurrentVersionAsync(
+        ITenantDirectoryPort directory,
+        Guid tenantId,
+        Guid memberUserId,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<TenantMemberView> members =
+            await directory.ListMembersAsync(tenantId, cancellationToken);
+        return members
+            .Where(member => member.UserId == memberUserId)
+            .Select(member => member.Version)
+            .DefaultIfEmpty(-1)
+            .First();
+    }
+
     private static TenantMemberResponse Map(TenantMemberView member) =>
         new(
             member.UserId,
