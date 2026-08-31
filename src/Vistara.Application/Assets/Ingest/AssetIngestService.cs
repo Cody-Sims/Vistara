@@ -21,9 +21,6 @@ public sealed class AssetIngestService(
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
 
-    private static readonly string[] StandardDerivativePresets =
-        ["thumb", "grid", "viewer", "download-web"];
-
     private static readonly ResultError ReservationNotFound = ResultError.NotFound(
         "asset_ingest.reservation_not_found",
         "The upload quota reservation was not found.");
@@ -164,7 +161,7 @@ public sealed class AssetIngestService(
             cancellationToken);
         ImagePipelineFingerprint derivativePipeline =
             _derivativeImageProcessor.PipelineFingerprint;
-        foreach (string preset in StandardDerivativePresets)
+        foreach (string preset in AssetReadinessPolicy.RequiredPresetNames)
         {
             await transaction.AddJobAsync(
                 CreateDerivativeJob(
