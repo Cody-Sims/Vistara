@@ -49,17 +49,21 @@ internal static class OidcTestProvider
     internal static OidcProviderOptions CreateOptions(
         Uri? redirectUri = null,
         IReadOnlyCollection<string>? scopes = null,
+        IReadOnlyCollection<string>? allowedSigningAlgorithms = null,
         TimeSpan? clockSkew = null,
         TimeSpan? httpTimeout = null,
         TimeSpan? metadataCacheLifetime = null,
-        TimeSpan? metadataRefreshBackoff = null) =>
+        TimeSpan? metadataRefreshBackoff = null,
+        TimeSpan? metadataStaleWhileUnavailable = null) =>
         new(
             TenantId,
             ClientId,
             redirectUri ?? RedirectUri,
             scopes: scopes,
+            allowedSigningAlgorithms: allowedSigningAlgorithms,
             clockSkew: clockSkew,
             httpTimeout: httpTimeout,
             metadataCacheLifetime: metadataCacheLifetime,
-            metadataRefreshBackoff: metadataRefreshBackoff);
+            metadataRefreshBackoff: metadataRefreshBackoff,
+            metadataStaleWhileUnavailable: metadataStaleWhileUnavailable);
 }

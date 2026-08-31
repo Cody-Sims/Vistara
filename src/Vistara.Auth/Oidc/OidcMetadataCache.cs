@@ -50,6 +50,7 @@ public sealed class OidcMetadataCache : IOidcMetadataProvider, IDisposable
 
     private OidcProviderMetadata? _cached;
     private DateTimeOffset _lastAttemptAt = DateTimeOffset.MinValue;
+    private bool _hasAttempted;
 
     public OidcMetadataCache(
         HttpClient httpClient,
@@ -76,41 +77,60 @@ public sealed class OidcMetadataCache : IOidcMetadataProvider, IDisposable
 
     public void Dispose() => _gate.Dispose();
 
+    /// <summary>
+    /// Resolution policy, in order:
+    ///
+    /// 1. A document inside <see cref="OidcProviderOptions.MetadataCacheLifetime"/>
+    ///    is served with no provider call.
+    /// 2. Otherwise a fetch is warranted, but only if the last attempt is older
+    ///    than <see cref="OidcProviderOptions.MetadataRefreshBackoff"/>. The
+    ///    backoff applies to the cold and expired paths as well as to forced
+    ///    refreshes, so a provider outage produces one attempt per backoff
+    ///    window no matter how many callers arrive; every other caller returns
+    ///    immediately without queueing behind a network timeout.
+    /// 3. When a fetch is suppressed or fails, an expired document is served
+    ///    only inside the explicit
+    ///    <see cref="OidcProviderOptions.MetadataStaleWhileUnavailable"/>
+    ///    window. Beyond it, the cache fails closed rather than authenticating
+    ///    against keys of unbounded age.
+    /// </summary>
     private async ValueTask<Result<OidcProviderMetadata>> AcquireAsync(
         bool forceRefresh,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        OidcProviderMetadata? snapshot = Volatile.Read(ref _cached);
         DateTimeOffset now = _clock.UtcNow.ToUniversalTime();
-        if (TryUseCache(forceRefresh, now, out OidcProviderMetadata? cached))
+        if (!forceRefresh && IsFresh(snapshot, now))
         {
-            return Result.Success(cached);
+            return Result.Success(snapshot!);
         }
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             now = _clock.UtcNow.ToUniversalTime();
-            if (TryUseCache(forceRefresh, now, out cached))
+            if (!forceRefresh && IsFresh(_cached, now))
             {
-                return Result.Success(cached);
+                return Result.Success(_cached!);
+            }
+
+            if (_hasAttempted && now - _lastAttemptAt < _options.MetadataRefreshBackoff)
+            {
+                return Resolve(_cached, now);
             }
 
             _lastAttemptAt = now;
+            _hasAttempted = true;
             OidcProviderMetadata? fetched = await FetchAsync(now, cancellationToken)
                 .ConfigureAwait(false);
             if (fetched is not null)
             {
-                _cached = fetched;
+                Volatile.Write(ref _cached, fetched);
                 return Result.Success(fetched);
             }
 
-            // A failed refresh must never discard a document that is still
-            // inside its lifetime; a transient provider outage should not sign
-            // every user out.
-            return _cached is not null && now - _cached.RetrievedAt < _options.MetadataCacheLifetime
-                ? Result.Success(_cached)
-                : Result.Failure<OidcProviderMetadata>(OidcErrors.MetadataUnavailable);
+            return Resolve(_cached, now);
         }
         finally
         {
@@ -118,21 +138,22 @@ public sealed class OidcMetadataCache : IOidcMetadataProvider, IDisposable
         }
     }
 
-    private bool TryUseCache(
-        bool forceRefresh,
-        DateTimeOffset now,
-        out OidcProviderMetadata cached)
+    private bool IsFresh(OidcProviderMetadata? candidate, DateTimeOffset now) =>
+        candidate is not null && now - candidate.RetrievedAt < _options.MetadataCacheLifetime;
+
+    private Result<OidcProviderMetadata> Resolve(
+        OidcProviderMetadata? candidate,
+        DateTimeOffset now)
     {
-        OidcProviderMetadata? candidate = _cached;
-        cached = candidate!;
         if (candidate is null)
         {
-            return false;
+            return Result.Failure<OidcProviderMetadata>(OidcErrors.MetadataUnavailable);
         }
 
-        return forceRefresh
-            ? now - _lastAttemptAt < _options.MetadataRefreshBackoff
-            : now - candidate.RetrievedAt < _options.MetadataCacheLifetime;
+        TimeSpan age = now - candidate.RetrievedAt;
+        return age < _options.MetadataCacheLifetime + _options.MetadataStaleWhileUnavailable
+            ? Result.Success(candidate)
+            : Result.Failure<OidcProviderMetadata>(OidcErrors.MetadataUnavailable);
     }
 
     private async Task<OidcProviderMetadata?> FetchAsync(

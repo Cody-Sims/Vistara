@@ -27,13 +27,15 @@ internal sealed class OidcProviderFixture : IDisposable
         TimeSpan? httpTimeout = null,
         TimeSpan? metadataCacheLifetime = null,
         TimeSpan? metadataRefreshBackoff = null,
+        TimeSpan? metadataStaleWhileUnavailable = null,
         IReadOnlyCollection<string>? scopes = null)
     {
         Options = OidcTestProvider.CreateOptions(
             scopes: scopes,
             httpTimeout: httpTimeout,
             metadataCacheLifetime: metadataCacheLifetime,
-            metadataRefreshBackoff: metadataRefreshBackoff);
+            metadataRefreshBackoff: metadataRefreshBackoff,
+            metadataStaleWhileUnavailable: metadataStaleWhileUnavailable);
         string tenantPath =
             $"https://{OidcProviderOptions.EntraLoginHost}/{OidcTestProvider.TenantId:D}";
         AuthorizationEndpoint = new Uri($"{tenantPath}/oauth2/v2.0/authorize");

@@ -17,6 +17,7 @@ public sealed class OidcProviderOptions
     public static readonly TimeSpan MaximumMetadataCacheLifetime = TimeSpan.FromHours(24);
     public static readonly TimeSpan MinimumMetadataCacheLifetime = TimeSpan.FromMinutes(1);
     public static readonly TimeSpan MaximumLoginRequestLifetime = TimeSpan.FromMinutes(30);
+    public static readonly TimeSpan MaximumMetadataStaleWhileUnavailable = TimeSpan.FromHours(24);
 
     /// <summary>
     /// The fixed Entra tenant that holds personal Microsoft accounts. Vistara
@@ -63,6 +64,7 @@ public sealed class OidcProviderOptions
         TimeSpan? httpTimeout = null,
         TimeSpan? metadataCacheLifetime = null,
         TimeSpan? metadataRefreshBackoff = null,
+        TimeSpan? metadataStaleWhileUnavailable = null,
         TimeSpan? loginRequestLifetime = null,
         bool requireHttps = true)
     {
@@ -115,6 +117,11 @@ public sealed class OidcProviderOptions
             TimeSpan.FromSeconds(1),
             MetadataCacheLifetime,
             nameof(metadataRefreshBackoff));
+        MetadataStaleWhileUnavailable = ValidateRange(
+            metadataStaleWhileUnavailable ?? TimeSpan.FromHours(1),
+            TimeSpan.Zero,
+            MaximumMetadataStaleWhileUnavailable,
+            nameof(metadataStaleWhileUnavailable));
         LoginRequestLifetime = ValidateRange(
             loginRequestLifetime ?? TimeSpan.FromMinutes(10),
             TimeSpan.FromMinutes(1),
@@ -159,6 +166,15 @@ public sealed class OidcProviderOptions
     public TimeSpan MetadataCacheLifetime { get; }
 
     public TimeSpan MetadataRefreshBackoff { get; }
+
+    /// <summary>
+    /// How long past <see cref="MetadataCacheLifetime"/> an already-retrieved
+    /// document may still be served while refreshes are failing. This is the
+    /// explicit staleness policy: outside this window an unreachable provider
+    /// fails closed rather than authenticating against keys of unbounded age.
+    /// Set to zero to disable stale serving entirely.
+    /// </summary>
+    public TimeSpan MetadataStaleWhileUnavailable { get; }
 
     public TimeSpan LoginRequestLifetime { get; }
 
