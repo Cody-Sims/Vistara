@@ -76,6 +76,9 @@ jobs:
       - name: Validate Compose topologies
         run: |
           set -euo pipefail
+          # Compose merge and include semantics differ between releases, so the
+          # version that rendered these topologies must stay in the log.
+          docker compose version
           for file in development starter postgres; do
             docker compose --env-file deploy/.env \
               --file "deploy/compose.$file.yml" config --quiet

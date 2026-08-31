@@ -1,0 +1,76 @@
+# Development overrides for compose.postgres.yml. Loaded through the ordered
+# `include: path:` list in compose.development.yml; never run this file on its
+# own. Redefining these services in compose.development.yml itself is rejected
+# by Compose as a conflict with an imported resource.
+services:
+  api:
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+    ports: !reset []
+
+  worker:
+    environment:
+      DOTNET_ENVIRONMENT: Development
+      Worker__InstanceId: development-worker
+
+  proxy:
+    volumes:
+      - ./nginx/development.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+
+  web:
+    image: node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e
+    working_dir: /workspace
+    command: ["sh", "-ec", "cp -R /source/. /workspace/ && npm ci && npm run dev -- --host 0.0.0.0"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ../src/Vistara.Web:/source:ro
+    tmpfs:
+      - /workspace:size=1g,mode=1770,exec
+      - /tmp:size=128m,mode=1770
+      - /root/.npm:size=128m,mode=1770
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+    networks: [edge, backend]
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.135.0@sha256:89107a3a8f4636a396927edf7025bb9614b8da2d92f4cc3f43109e8d115736e2
+    command: ["--config=/etc/otelcol-contrib/config.yml"]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./otel/collector.yml:/etc/otelcol-contrib/config.yml:ro
+    tmpfs:
+      - /tmp:size=32m,mode=1770,uid=10001,gid=10001
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "components"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+    restart: unless-stopped
+    networks: [backend]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
