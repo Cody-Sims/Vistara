@@ -16,7 +16,7 @@ import {
   AdminUsersPage,
 } from '../features/admin';
 import { SearchView } from '../features/search';
-import { LoginPage, SessionProvider } from '../features/session';
+import { LoginPage, SessionProvider, SetupPage } from '../features/session';
 import { currentUser } from '../features/session/sessionTestData';
 import { SettingsPage } from '../features/settings';
 import { auditAccessibilityTree } from './audit';
@@ -149,6 +149,13 @@ function routed(element: React.ReactNode, entry: string) {
 const pages: readonly { name: string; element: React.ReactNode }[] = [
   { name: 'sign in', element: routed(<LoginPage />, '/login') },
   {
+    name: 'first-run setup',
+    element: routed(
+      <SetupPage client={{ provisionFirstOwner: vi.fn() }} />,
+      '/setup',
+    ),
+  },
+  {
     name: 'settings',
     element: routed(<SettingsPage client={settingsClient} />, '/settings'),
   },
@@ -189,6 +196,7 @@ const pages: readonly { name: string; element: React.ReactNode }[] = [
             pendingUploadBytes: 0,
           }),
           validateStorage: vi.fn(),
+          getStorageValidationSupport: async () => ({ supported: true }),
         }}
       />,
       '/admin/storage',

@@ -23,6 +23,7 @@ function apiError(status: number) {
 interface Options {
   readonly login?: () => Promise<{ user: CurrentUser; csrfToken: string }>;
   readonly getSession?: () => Promise<CurrentUser>;
+  readonly getSetupState?: () => Promise<{ available: boolean }>;
   readonly entry?: string;
 }
 
@@ -38,9 +39,12 @@ function renderLogin(options: Options = {}) {
       vi.fn(async () => ({ user: currentUser(), csrfToken: 'token-1' })),
     logout: vi.fn(async () => undefined),
   };
+  const setup = options.getSetupState
+    ? { getSetupState: vi.fn(options.getSetupState) }
+    : undefined;
   const router = createMemoryRouter(
     [
-      { path: '/login', element: <LoginPage /> },
+      { path: '/login', element: <LoginPage setup={setup} /> },
       { path: '/library', element: <h1>Library</h1> },
       { path: '/settings', element: <h1>Settings</h1> },
     ],
@@ -177,6 +181,49 @@ describe('sign-in page', () => {
     expect(safeDestination('//example.invalid/library')).toBe('/library');
     expect(safeDestination('/\\example.invalid/library')).toBe('/library');
     expect(safeDestination('  /library')).toBe('/library');
+  });
+});
+
+describe('first-run discovery', () => {
+  it('offers setup when the deployment reports no owner', async () => {
+    renderLogin({ getSetupState: async () => ({ available: true }) });
+
+    expect(
+      await screen.findByRole('link', { name: 'Set up Vistara' }),
+    ).toHaveAttribute('href', '/setup');
+  });
+
+  it('hides setup once the deployment has an owner', async () => {
+    renderLogin({ getSetupState: async () => ({ available: false }) });
+
+    await screen.findByLabelText('Password');
+    expect(
+      screen.queryByRole('link', { name: /set up vistara/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('keeps a way in when the deployment cannot say', async () => {
+    renderLogin({
+      getSetupState: async () => {
+        throw apiError(404);
+      },
+    });
+
+    expect(
+      await screen.findByRole('link', { name: 'set up Vistara' }),
+    ).toHaveAttribute('href', '/setup');
+    expect(
+      screen.getByText(/does not report whether it has an owner/),
+    ).toBeInTheDocument();
+  });
+
+  it('says nothing about setup when no reader is provided', async () => {
+    renderLogin();
+
+    await screen.findByLabelText('Password');
+    expect(
+      screen.queryByRole('link', { name: /set up vistara/i }),
+    ).not.toBeInTheDocument();
   });
 });
 

@@ -309,6 +309,12 @@ export interface StorageValidationCheck {
   readonly detail?: string;
 }
 
+/** Response of `GET /api/v1/admin/storage/validate`; no credential involved. */
+export interface StorageValidationSupport {
+  readonly supported: boolean;
+  readonly providers?: readonly StorageProviderKind[];
+}
+
 export interface StorageValidationResponse {
   readonly valid: boolean;
   readonly provider: StorageProviderKind;

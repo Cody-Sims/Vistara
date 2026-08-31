@@ -268,6 +268,7 @@ describe('platform tenant administration client', () => {
         'getSession',
         'getSetupState',
         'getStorageSummary',
+        'getStorageValidationSupport',
         'provisionFirstOwner',
         'validateStorage',
         'inviteTenantMember',

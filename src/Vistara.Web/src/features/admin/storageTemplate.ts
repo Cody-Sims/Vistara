@@ -145,8 +145,21 @@ const azureAccount = /^[a-z0-9]{3,24}$/;
 const azureContainer = /^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])$/;
 const bucketName = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
 
+export interface DraftCheckOptions {
+  /**
+   * Credentials are only required for a connection test. The deploy template
+   * never contains one, so generating it must not demand a secret that the
+   * assistant has already cleared.
+   */
+  readonly requireCredentials?: boolean;
+}
+
 /** Checks what can be checked in the browser before any credential is sent. */
-export function checkStorageDraft(draft: StorageDraft): readonly DraftProblem[] {
+export function checkStorageDraft(
+  draft: StorageDraft,
+  options: DraftCheckOptions = {},
+): readonly DraftProblem[] {
+  const requireCredentials = options.requireCredentials !== false;
   const problems: DraftProblem[] = [];
 
   if (draft.provider === 'filesystem') {
@@ -178,14 +191,22 @@ export function checkStorageDraft(draft: StorageDraft): readonly DraftProblem[] 
       });
     }
 
-    if (azure.credentialKind === 'accountKey' && !azure.accountKey) {
+    if (
+      requireCredentials &&
+      azure.credentialKind === 'accountKey' &&
+      !azure.accountKey
+    ) {
       problems.push({
         field: 'azureBlob.accountKey',
         message: 'Paste the account key, or switch to a SAS token.',
       });
     }
 
-    if (azure.credentialKind === 'sasToken' && !azure.sasToken) {
+    if (
+      requireCredentials &&
+      azure.credentialKind === 'sasToken' &&
+      !azure.sasToken
+    ) {
       problems.push({
         field: 'azureBlob.sasToken',
         message: 'Paste the SAS token, or switch to an account key.',
@@ -215,14 +236,14 @@ export function checkStorageDraft(draft: StorageDraft): readonly DraftProblem[] 
     });
   }
 
-  if (!s3.accessKeyId) {
+  if (requireCredentials && !s3.accessKeyId) {
     problems.push({
       field: 's3.accessKeyId',
       message: 'Enter the access key ID for the least-privilege user.',
     });
   }
 
-  if (!s3.secretAccessKey) {
+  if (requireCredentials && !s3.secretAccessKey) {
     problems.push({
       field: 's3.secretAccessKey',
       message: 'Enter the secret access key.',

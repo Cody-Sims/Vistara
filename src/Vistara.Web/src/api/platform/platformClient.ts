@@ -24,6 +24,7 @@ import type {
   StorageSummary,
   StorageValidationRequest,
   StorageValidationResponse,
+  StorageValidationSupport,
   TenantMemberCollection,
   UpdateTenantMemberRequest,
   UpdateUserPreferencesRequest,
@@ -113,6 +114,17 @@ export class PlatformApiClient {
 
   public getStorageSummary(): Promise<StorageSummary> {
     return this.#request<StorageSummary>('GET', '/api/v1/admin/storage');
+  }
+
+  /**
+   * Asks whether this deployment can test a storage configuration at all. It
+   * carries no credential, so it is safe to call before one is entered.
+   */
+  public getStorageValidationSupport(): Promise<StorageValidationSupport> {
+    return this.#request<StorageValidationSupport>(
+      'GET',
+      '/api/v1/admin/storage/validate',
+    );
   }
 
   /**

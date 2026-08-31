@@ -22,5 +22,12 @@ describe('workspace address', () => {
     expect(isValidSlug('Studio')).toBe(false);
     expect(isValidSlug('studio space')).toBe(false);
     expect(isValidSlug('')).toBe(false);
+    // The API rejects consecutive hyphens, so the browser must too.
+    expect(isValidSlug('acme--prod')).toBe(false);
+  });
+
+  it('never derives an address the API would reject', () => {
+    expect(slugify('Acme -- Prod')).toBe('acme-prod');
+    expect(isValidSlug(slugify('Acme -- Prod'))).toBe(true);
   });
 });

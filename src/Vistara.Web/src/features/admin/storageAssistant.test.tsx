@@ -57,12 +57,18 @@ interface Options {
   readonly validateStorage?: (
     request: StorageValidationRequest,
   ) => Promise<StorageValidationResponse>;
+  readonly getStorageValidationSupport?: () => Promise<{
+    supported: boolean;
+  }>;
 }
 
 function renderStorage(options: Options = {}) {
   const client = {
     getStorageSummary: vi.fn(
       options.getStorageSummary ?? (async () => summary),
+    ),
+    getStorageValidationSupport: vi.fn(
+      options.getStorageValidationSupport ?? (async () => ({ supported: true })),
     ),
     validateStorage: vi.fn(
       options.validateStorage ??
@@ -186,7 +192,7 @@ describe('provider assistant', () => {
     );
     await user.click(screen.getByRole('button', { name: 'Test connection' }));
 
-    const problems = await screen.findByRole('list', {
+    const problems = await screen.findByRole('alert', {
       name: 'Configuration problems',
     });
     expect(
@@ -250,11 +256,31 @@ describe('provider assistant', () => {
     expect(document.body.innerHTML).not.toContain(secret);
   });
 
-  it('says plainly when the deployment cannot validate yet', async () => {
+  it('never sends a credential to a deployment that cannot validate', async () => {
+    const user = userEvent.setup();
+    const { client } = renderStorage({
+      getStorageValidationSupport: async () => {
+        throw apiError(404, 'not_found');
+      },
+    });
+
+    await fillS3(user);
+
+    const test = await screen.findByRole('button', {
+      name: 'Test connection',
+    });
+    await waitFor(() => expect(test).toBeDisabled());
+    expect(
+      screen.getByText(/cannot test storage connections yet/),
+    ).toBeInTheDocument();
+    expect(client.validateStorage).not.toHaveBeenCalled();
+  });
+
+  it('reports a validation route that answers with a failure', async () => {
     const user = userEvent.setup();
     renderStorage({
       validateStorage: async () => {
-        throw apiError(404, 'not_found');
+        throw apiError(500);
       },
     });
 
@@ -262,12 +288,70 @@ describe('provider assistant', () => {
     await user.click(screen.getByRole('button', { name: 'Test connection' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'cannot test storage connections yet',
+      'could not be tested',
+    );
+  });
+
+  it('announces local problems and moves focus to the first one', async () => {
+    const user = userEvent.setup();
+    renderStorage();
+
+    await user.click(
+      await screen.findByRole('radio', { name: /S3-compatible/ }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Test connection' }));
+
+    const problems = await screen.findByRole('alert', {
+      name: 'Configuration problems',
+    });
+    expect(problems).toHaveTextContent(/Enter the endpoint URL/);
+    await waitFor(() =>
+      expect(screen.getByLabelText('Endpoint URL')).toHaveFocus(),
     );
   });
 });
 
 describe('deploy template', () => {
+  it('can be generated after a test has cleared the credentials', async () => {
+    const user = userEvent.setup();
+    renderStorage();
+
+    await fillS3(user);
+    await user.click(screen.getByRole('button', { name: 'Test connection' }));
+    await screen.findByText('Connection succeeded.');
+    expect(screen.getByLabelText('Secret access key')).toHaveValue('');
+
+    await user.click(
+      screen.getByRole('button', { name: 'Generate deploy template' }),
+    );
+
+    const template = (await screen.findByLabelText(
+      'Deploy template',
+    )) as HTMLTextAreaElement;
+    expect(template.value).toContain(
+      'VISTARA_STORAGE__S3__BUCKET=vistara-media',
+    );
+    expect(template.value).not.toContain(secret);
+  });
+
+  it('withdraws a template that no longer matches the form', async () => {
+    const user = userEvent.setup();
+    renderStorage();
+
+    await fillS3(user);
+    await user.click(
+      screen.getByRole('button', { name: 'Generate deploy template' }),
+    );
+    await screen.findByLabelText('Deploy template');
+
+    await user.type(screen.getByLabelText('Bucket'), '-two');
+
+    expect(screen.queryByLabelText('Deploy template')).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Download template' }),
+    ).not.toBeInTheDocument();
+  });
+
   it('generates a redacted template and offers copy and download', async () => {
     const user = userEvent.setup();
     const writeText = vi.fn<(value: string) => Promise<void>>(

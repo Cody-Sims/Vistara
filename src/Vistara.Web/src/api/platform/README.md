@@ -61,6 +61,12 @@ and cleared immediately afterwards. Until this route exists the assistant says
 the deployment cannot test connections and offers the deploy template instead.
 
 ```jsonc
+// GET /api/v1/admin/storage/validate       (platform administrator only)
+// Credential-free probe. The assistant calls this first and only enables
+// "Test connection" when it answers 200, so a secret is never sent to a
+// deployment that cannot check it.
+{ "supported": true, "providers": ["filesystem", "azureBlob", "s3"] }
+
 // POST /api/v1/admin/storage/validate      (platform administrator only)
 // The body is never persisted, logged, or echoed back.
 {

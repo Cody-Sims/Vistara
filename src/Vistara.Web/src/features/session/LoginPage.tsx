@@ -32,7 +32,9 @@ export function LoginPage({ setup }: LoginPageProps = {}) {
   const [submitting, setSubmitting] = useState(false);
   const loginField = useRef<HTMLInputElement>(null);
   const passwordField = useRef<HTMLInputElement>(null);
-  const [setupAvailable, setSetupAvailable] = useState(false);
+  const [setupState, setSetupState] = useState<'open' | 'closed' | 'unknown'>(
+    'closed',
+  );
 
   useEffect(() => {
     if (!setup) {
@@ -43,12 +45,15 @@ export function LoginPage({ setup }: LoginPageProps = {}) {
     void setup.getSetupState().then(
       (state) => {
         if (active) {
-          setSetupAvailable(state.available === true);
+          setSetupState(state.available === true ? 'open' : 'closed');
         }
       },
       () => {
-        // A deployment that does not publish setup state is already set up as
-        // far as this page is concerned.
+        // A deployment that does not answer cannot say whether it has an owner,
+        // so the way to first-run setup stays visible with that caveat.
+        if (active) {
+          setSetupState('unknown');
+        }
       },
     );
 
@@ -174,13 +179,24 @@ export function LoginPage({ setup }: LoginPageProps = {}) {
           </p>
         </form>
 
-        {setupAvailable ? (
+        {setupState === 'open' ? (
           <p className={styles.hint}>
             This deployment has no owner yet.{' '}
             <Link className={styles.inlineLink} to="/setup">
               Set up Vistara
             </Link>{' '}
             to create the first workspace.
+          </p>
+        ) : null}
+
+        {setupState === 'unknown' ? (
+          <p className={styles.hint}>
+            This deployment does not report whether it has an owner. If it is
+            new,{' '}
+            <Link className={styles.inlineLink} to="/setup">
+              set up Vistara
+            </Link>
+            ; an existing workspace will say so.
           </p>
         ) : null}
 

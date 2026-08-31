@@ -7,10 +7,14 @@ export function slugify(value: string): string {
     .replace(/\p{Diacritic}/gu, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
+    // The API rejects consecutive hyphens, so collapse them here as well.
+    .replace(/-{2,}/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 63);
 }
 
 export function isValidSlug(value: string): boolean {
-  return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(value);
+  return (
+    /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(value) && !value.includes('--')
+  );
 }

@@ -39,7 +39,7 @@ import styles from './admin.module.css';
 
 export type AdminStorageClient = Pick<
   PlatformApiClient,
-  'getStorageSummary' | 'validateStorage'
+  'getStorageSummary' | 'validateStorage' | 'getStorageValidationSupport'
 >;
 
 interface AdminStoragePageProps {
@@ -50,7 +50,6 @@ type TestState =
   | { readonly kind: 'idle' }
   | { readonly kind: 'testing' }
   | { readonly kind: 'answered'; readonly result: StorageValidationResponse }
-  | { readonly kind: 'unavailable' }
   | { readonly kind: 'failed'; readonly message: string };
 
 const providers: readonly {
@@ -81,6 +80,20 @@ const statusLabels: Record<string, string> = {
   unavailable: 'Unavailable',
 };
 
+/** Maps a draft problem onto the field that owns it, for focus management. */
+const fieldIds: Record<string, string> = {
+  'filesystem.rootPath': 'storage-root-path',
+  'azureBlob.accountName': 'storage-azure-account',
+  'azureBlob.container': 'storage-azure-container',
+  'azureBlob.accountKey': 'storage-azure-key',
+  'azureBlob.sasToken': 'storage-azure-sas',
+  's3.endpoint': 'storage-s3-endpoint',
+  's3.region': 'storage-s3-region',
+  's3.bucket': 'storage-s3-bucket',
+  's3.accessKeyId': 'storage-s3-access-key',
+  's3.secretAccessKey': 'storage-s3-secret',
+};
+
 const checkLabels: Record<string, string> = {
   reachable: 'Endpoint reachable',
   authenticated: 'Credential accepted',
@@ -103,10 +116,40 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
     fileName: string;
     contents: string;
   }>();
+  const [templateDraft, setTemplateDraft] = useState<typeof draft>();
   const [copied, setCopied] = useState(false);
+  const [canValidate, setCanValidate] = useState<boolean>();
 
   // Credentials live only while this page is open.
   useEffect(() => clearStorageDraft, []);
+
+  // The credential-free probe decides whether a secret may be sent at all.
+  useEffect(() => {
+    let active = true;
+    void client.getStorageValidationSupport().then(
+      (support) => {
+        if (active) {
+          setCanValidate(support.supported === true);
+        }
+      },
+      () => {
+        if (active) {
+          setCanValidate(false);
+        }
+      },
+    );
+
+    return () => {
+      active = false;
+    };
+  }, [client]);
+
+  // A template describes one exact configuration; an edit withdraws it.
+  if (template && templateDraft && templateDraft !== draft) {
+    setTemplate(undefined);
+    setTemplateDraft(undefined);
+    setCopied(false);
+  }
 
   const problemFor = (field: string) =>
     problems.find((problem) => problem.field === field)?.message;
@@ -116,12 +159,22 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
     updateProviderDraft('s3', { accessKeyId: '', secretAccessKey: '' });
   }
 
+  function focusProblem(found: readonly DraftProblem[]) {
+    const first = found[0];
+    if (!first) {
+      return;
+    }
+
+    document.getElementById(fieldIds[first.field] ?? '')?.focus();
+  }
+
   async function runTest() {
     const found = checkStorageDraft(draft);
     setProblems(found);
     setCopied(false);
     if (found.length > 0) {
       setTest({ kind: 'idle' });
+      focusProblem(found);
       return;
     }
 
@@ -131,15 +184,13 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
       const result = await client.validateStorage(request);
       setTest({ kind: 'answered', result });
     } catch (error) {
-      setTest(
-        error instanceof VistaraApiError && error.status === 404
-          ? { kind: 'unavailable' }
-          : {
-              kind: 'failed',
-              message:
-                'The connection could not be tested. Nothing was changed and no credential was stored.',
-            },
-      );
+      setTest({
+        kind: 'failed',
+        message:
+          error instanceof VistaraApiError && error.status === 404
+            ? 'This deployment cannot test storage connections. Generate the template below and apply it on the server instead.'
+            : 'The connection could not be tested. Nothing was changed and no credential was stored.',
+      });
     } finally {
       // The credential has served its only purpose; it never survives the call.
       forgetSecrets();
@@ -147,12 +198,17 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
   }
 
   function generate() {
-    const found = checkStorageDraft(draft);
+    // The template never carries a credential, so none is required to build it.
+    const found = checkStorageDraft(draft, { requireCredentials: false });
     setProblems(found);
     setCopied(false);
     if (found.length === 0) {
       setTemplate(buildDeployTemplate(draft));
+      setTemplateDraft(draft);
+      return;
     }
+
+    focusProblem(found);
   }
 
   function download() {
@@ -542,8 +598,9 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
 
         <div className={styles.formActions}>
           <button
+            aria-describedby={canValidate === false ? 'validate-missing' : undefined}
             className={styles.primaryButton}
-            disabled={test.kind === 'testing'}
+            disabled={test.kind === 'testing' || canValidate !== true}
             type="button"
             onClick={() => void runTest()}
           >
@@ -565,8 +622,20 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
             : ''}
         </p>
 
+        {canValidate === false ? (
+          <p className={styles.alert} id="validate-missing">
+            This deployment cannot test storage connections yet, so no
+            credential is sent from here. Generate the template below and apply
+            it on the server instead.
+          </p>
+        ) : null}
+
         {problems.length > 0 ? (
-          <ul className={styles.problems} aria-label="Configuration problems">
+          <ul
+            className={styles.problems}
+            aria-label="Configuration problems"
+            role="alert"
+          >
             {problems.map((problem) => (
               <li key={problem.field}>{problem.message}</li>
             ))}
@@ -576,13 +645,6 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
         {test.kind === 'failed' ? (
           <p className={styles.alert} role="alert">
             {test.message}
-          </p>
-        ) : null}
-
-        {test.kind === 'unavailable' ? (
-          <p className={styles.alert} role="alert">
-            This deployment cannot test storage connections yet. Generate the
-            template below and apply it on the server instead.
           </p>
         ) : null}
 
