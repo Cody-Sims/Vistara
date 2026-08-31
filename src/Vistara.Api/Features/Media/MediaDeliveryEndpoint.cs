@@ -246,6 +246,52 @@ public static class MediaDeliveryEndpoint
             cancellationToken);
     }
 
+    /// <summary>
+    /// Delivers an already-authorized rendition. Sharing owns its own
+    /// authorization decision but must not restate byte, range, validator, and
+    /// media-type handling, so it delivers through this entry point.
+    /// </summary>
+    public static async Task DeliverRenditionAsync(
+        HttpContext context,
+        Func<ValueTask<MediaDeliveryResult>> resolve,
+        string cacheControl,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(resolve);
+        ArgumentException.ThrowIfNullOrWhiteSpace(cacheControl);
+
+        MediaDeliveryResult? result = await ResolveAsync(
+            context,
+            resolve,
+            cancellationToken);
+        if (result is null)
+        {
+            return;
+        }
+
+        await DeliverAsync(
+            context,
+            result,
+            expectedExtension: null,
+            cacheControl,
+            includeDownloadFileName: false,
+            allowQueued: true,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Writes a media problem response with the no-store and sniffing rules
+    /// every media route shares.
+    /// </summary>
+    public static Task WriteMediaProblemAsync(
+        HttpContext context,
+        int status,
+        string code,
+        string title,
+        CancellationToken cancellationToken) =>
+        WriteProblemAsync(context, status, code, title, cancellationToken);
+
     private static async Task DeliverAsync(
         HttpContext context,
         MediaDeliveryResult result,

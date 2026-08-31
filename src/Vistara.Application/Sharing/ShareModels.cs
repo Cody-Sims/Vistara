@@ -265,6 +265,32 @@ public sealed record SharePublicResult(
     SharePublicProjection? Share,
     string? ErrorCode = null);
 
+public enum ShareRenditionStatus
+{
+    Available,
+    NotFound,
+    Gone,
+}
+
+/// <summary>
+/// Everything a delivery grant needs to authorize one share-scoped rendition:
+/// the owning tenant, the share identity the grant binds to, the captured blob
+/// revision, and the access the rendition demands from the share policy.
+/// </summary>
+public sealed record ShareRenditionTarget(
+    Guid TenantId,
+    Guid ShareId,
+    long ShareVersion,
+    Guid AssetId,
+    Guid RevisionId,
+    string DeliveryIdentifier,
+    ShareAccess RequiredAccess);
+
+public sealed record ShareRenditionResult(
+    ShareRenditionStatus Status,
+    ShareRenditionTarget? Target,
+    string? ErrorCode = null);
+
 public enum ShareChallengeStatus
 {
     Authenticated,

@@ -11,6 +11,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Vistara.Api.Composition.Gallery;
 using Vistara.Api.Composition.Platform;
 using Vistara.Api.Composition.Runtime;
+using Vistara.Api.Features.Media;
+using Vistara.Api.Features.Shares;
 using Vistara.Api.Features.Uploads;
 using Vistara.Application.Common;
 using Vistara.Application.Common.Imaging;
@@ -88,6 +90,32 @@ public sealed class ShareTargetVersionEndToEndTests
         JsonElement publicAsset = publicBody.RootElement
             .GetProperty("assets").GetProperty("items")[0];
         Assert.Equal(assetId, publicAsset.GetProperty("id").GetGuid());
+        string[] paths = [.. publicAsset.GetProperty("renditions")
+            .EnumerateArray()
+            .Select(rendition => rendition.GetProperty("path").GetString()!)];
+
+        Assert.NotEmpty(paths);
+        Assert.All(paths, path => Assert.StartsWith(
+            $"/api/v1/public/shares/{token}/assets/{assetId:D}/renditions/",
+            path,
+            StringComparison.Ordinal));
+        Assert.All(paths, path => Assert.DoesNotContain(
+            "/media/",
+            path,
+            StringComparison.Ordinal));
+        Assert.All(paths, path => Assert.DoesNotContain(
+            "/delivery/",
+            path,
+            StringComparison.Ordinal));
+
+        // A recipient fetches the advertised path with no credential at all.
+        ApiResponse image = await scenario.SendAsync(HttpMethods.Get, paths[0]);
+
+        Assert.Equal(HttpStatusCode.OK, image.Status);
+        Assert.Equal("image/webp", image.ContentType);
+        Assert.Equal(ShareVersionScenario.RenditionBytes, image.Bytes);
+        Assert.Equal("private,no-store", image.Headers.CacheControl.ToString());
+        Assert.Equal("nosniff", image.Headers["X-Content-Type-Options"].ToString());
 
         ApiResponse revoked = await scenario.SendAsync(
             HttpMethods.Delete,
@@ -104,6 +132,13 @@ public sealed class ShareTargetVersionEndToEndTests
             HttpMethods.Get,
             $"/api/v1/public/shares/{token}");
         Assert.Equal(HttpStatusCode.Gone, gone.Status);
+
+        // Revocation reaches the bytes on the very next request.
+        ApiResponse revokedImage = await scenario.SendAsync(
+            HttpMethods.Get,
+            paths[0]);
+        Assert.Equal(HttpStatusCode.Gone, revokedImage.Status);
+        Assert.Equal("share_gone", ProblemCode(revokedImage));
     }
 
     /// <summary>
@@ -322,6 +357,258 @@ public sealed class ShareTargetVersionEndToEndTests
         Assert.Equal("share_not_found", ProblemCode(foreign));
     }
 
+    /// <summary>
+    /// A share link is the only credential a recipient holds, so every other
+    /// way of asking for the same bytes must be refused: an expired share, a
+    /// password-protected share before its challenge, a share without download
+    /// permission asking for the download rendition, a tampered identifier, and
+    /// a second share's token.
+    /// </summary>
+    [Fact]
+    public async Task Share_scoped_rendition_delivery_refuses_every_other_caller()
+    {
+        await using ShareVersionScenario scenario =
+            await ShareVersionScenario.CreateAsync();
+        Guid assetId = await scenario.IngestReadyAssetAsync();
+        AssetContractVersions asset = await scenario.ReadAssetAsync(assetId);
+        SharePublication open = await scenario.PublishShareAsync(
+            assetId,
+            asset.Version,
+            idempotencyKey: "share-delivery-open");
+        string viewPath = open.PathForKind("viewer");
+        string downloadPath = open.PathForIdentifier(
+            await scenario.ReadRenditionIdentifierAsync(assetId, "download-web"));
+
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await scenario.SendAsync(HttpMethods.Get, viewPath)).Status);
+
+        // A view-only share never publishes or serves the download rendition.
+        Assert.DoesNotContain(
+            "download-web",
+            open.RenditionKinds,
+            StringComparer.Ordinal);
+        ApiResponse withheld = await scenario.SendAsync(
+            HttpMethods.Get,
+            downloadPath);
+        Assert.Equal(HttpStatusCode.NotFound, withheld.Status);
+        Assert.Equal("share_rendition_not_found", ProblemCode(withheld));
+
+        ApiResponse tamperedRendition = await scenario.SendAsync(
+            HttpMethods.Get,
+            open.PathForIdentifier(Guid.CreateVersion7().ToString("D")));
+        Assert.Equal(HttpStatusCode.NotFound, tamperedRendition.Status);
+        Assert.Equal("share_rendition_not_found", ProblemCode(tamperedRendition));
+
+        ApiResponse tamperedToken = await scenario.SendAsync(
+            HttpMethods.Get,
+            viewPath.Replace(open.Token, $"{open.Token[..^2]}zz", StringComparison.Ordinal));
+        Assert.Equal(HttpStatusCode.NotFound, tamperedToken.Status);
+        Assert.Equal("share_rendition_not_found", ProblemCode(tamperedToken));
+
+        // A second share of a different asset cannot lend its token to this one.
+        Guid otherAssetId = await scenario.IngestReadyAssetAsync();
+        AssetContractVersions other = await scenario.ReadAssetAsync(otherAssetId);
+        SharePublication neighbourShare = await scenario.PublishShareAsync(
+            otherAssetId,
+            other.Version,
+            idempotencyKey: "share-delivery-other");
+        ApiResponse crossShare = await scenario.SendAsync(
+            HttpMethods.Get,
+            viewPath.Replace(open.Token, neighbourShare.Token, StringComparison.Ordinal));
+        Assert.Equal(HttpStatusCode.NotFound, crossShare.Status);
+        Assert.Equal("share_rendition_not_found", ProblemCode(crossShare));
+    }
+
+    [Fact]
+    public async Task A_download_permitted_share_serves_its_download_rendition()
+    {
+        await using ShareVersionScenario scenario =
+            await ShareVersionScenario.CreateAsync();
+        Guid assetId = await scenario.IngestReadyAssetAsync();
+        AssetContractVersions asset = await scenario.ReadAssetAsync(assetId);
+        SharePublication share = await scenario.PublishShareAsync(
+            assetId,
+            asset.Version,
+            idempotencyKey: "share-delivery-download",
+            downloadRenditions: true);
+
+        Assert.Contains("download-web", share.RenditionKinds, StringComparer.Ordinal);
+        ApiResponse served = await scenario.SendAsync(
+            HttpMethods.Get,
+            share.PathForKind("download-web"));
+
+        Assert.Equal(HttpStatusCode.OK, served.Status);
+        Assert.Equal(ShareVersionScenario.RenditionBytes, served.Bytes);
+    }
+
+    [Fact]
+    public async Task An_expired_share_stops_serving_its_renditions()
+    {
+        await using ShareVersionScenario scenario =
+            await ShareVersionScenario.CreateAsync();
+        Guid assetId = await scenario.IngestReadyAssetAsync();
+        AssetContractVersions asset = await scenario.ReadAssetAsync(assetId);
+        SharePublication share = await scenario.PublishShareAsync(
+            assetId,
+            asset.Version,
+            idempotencyKey: "share-delivery-expiring",
+            expiresAtUtc: ShareVersionScenario.ClockUtcNow.AddMinutes(30));
+        string path = share.PathForKind("viewer");
+
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await scenario.SendAsync(HttpMethods.Get, path)).Status);
+
+        scenario.Advance(TimeSpan.FromHours(1));
+        ApiResponse expired = await scenario.SendAsync(HttpMethods.Get, path);
+
+        Assert.Equal(HttpStatusCode.Gone, expired.Status);
+        Assert.Equal("share_gone", ProblemCode(expired));
+    }
+
+    [Fact]
+    public async Task A_password_protected_share_serves_renditions_only_after_its_challenge()
+    {
+        await using ShareVersionScenario scenario =
+            await ShareVersionScenario.CreateAsync();
+        Guid assetId = await scenario.IngestReadyAssetAsync();
+        AssetContractVersions asset = await scenario.ReadAssetAsync(assetId);
+        SharePublication share = await scenario.PublishShareAsync(
+            assetId,
+            asset.Version,
+            idempotencyKey: "share-delivery-password",
+            password: "correct horse battery staple");
+
+        // The projection withholds every asset until the challenge succeeds.
+        Assert.Empty(share.Assets);
+        string path = ShareRenditionRoute.Build(
+            share.Token,
+            assetId,
+            await scenario.ReadRenditionIdentifierAsync(assetId, "viewer"));
+        ApiResponse locked = await scenario.SendAsync(HttpMethods.Get, path);
+
+        Assert.Equal(HttpStatusCode.NotFound, locked.Status);
+        Assert.Equal("share_rendition_not_found", ProblemCode(locked));
+
+        string session = await scenario.ChallengeAsync(
+            share.Token,
+            "correct horse battery staple");
+        ApiResponse unlocked = await scenario.SendAsync(
+            HttpMethods.Get,
+            path,
+            headers: new Dictionary<string, string>
+            {
+                ["X-Vistara-Share-Session"] = session,
+            });
+
+        Assert.Equal(HttpStatusCode.OK, unlocked.Status);
+        Assert.Equal(ShareVersionScenario.RenditionBytes, unlocked.Bytes);
+    }
+
+    /// <summary>
+    /// A share of an asset whose derivatives have not landed would publish an
+    /// empty gallery, so creation fails explicitly instead.
+    /// </summary>
+    [Fact]
+    public async Task A_share_of_an_undeliverable_asset_fails_instead_of_succeeding_empty()
+    {
+        await using ShareVersionScenario scenario =
+            await ShareVersionScenario.CreateAsync();
+        Guid assetId = await scenario.IngestReadyAssetAsync();
+        await scenario.HideRenditionsAsync(assetId);
+        AssetContractVersions asset = await scenario.ReadAssetRowAsync(assetId);
+
+        ApiResponse rejected = await scenario.CreateSnapshotShareAsync(
+            assetId,
+            asset.Version,
+            idempotencyKey: "share-delivery-empty");
+
+        Assert.Equal(
+            HttpStatusCode.UnprocessableEntity,
+            rejected.Status);
+        Assert.Equal("share_target_not_deliverable", ProblemCode(rejected));
+    }
+
+    /// <summary>
+    /// A share link is opened by whoever holds it, including someone already
+    /// signed in to a different tenant in the same browser. That identity must
+    /// neither break delivery nor learn anything a stranger would not.
+    /// </summary>
+    [Fact]
+    public async Task A_signed_in_visitor_from_another_tenant_still_receives_shared_bytes()
+    {
+        await using ShareVersionScenario scenario =
+            await ShareVersionScenario.CreateAsync();
+        Guid assetId = await scenario.IngestReadyAssetAsync();
+        AssetContractVersions asset = await scenario.ReadAssetAsync(assetId);
+        SharePublication share = await scenario.PublishShareAsync(
+            assetId,
+            asset.Version,
+            idempotencyKey: "share-delivery-visitor");
+        string path = share.PathForKind("viewer");
+
+        ApiResponse visitor = await scenario.SendAsync(
+            HttpMethods.Get,
+            path,
+            apiKey: scenario.NeighbourApiKey);
+
+        Assert.Equal(HttpStatusCode.OK, visitor.Status);
+        Assert.Equal(ShareVersionScenario.RenditionBytes, visitor.Bytes);
+
+        // The same identity presenting a bad token learns exactly what an
+        // anonymous caller would.
+        ApiResponse probed = await scenario.SendAsync(
+            HttpMethods.Get,
+            path.Replace(share.Token, $"{share.Token[..^2]}zz", StringComparison.Ordinal),
+            apiKey: scenario.NeighbourApiKey);
+
+        Assert.Equal(HttpStatusCode.NotFound, probed.Status);
+        Assert.Equal("share_rendition_not_found", ProblemCode(probed));
+    }
+
+    /// <summary>
+    /// Album membership is not chosen asset by asset, so a member still waiting
+    /// for its derivatives is dropped instead of failing the whole album.
+    /// </summary>
+    [Fact]
+    public async Task An_album_share_drops_members_that_cannot_be_delivered_yet()
+    {
+        await using ShareVersionScenario scenario =
+            await ShareVersionScenario.CreateAsync();
+        Guid readyAssetId = await scenario.IngestReadyAssetAsync();
+        Guid pendingAssetId = await scenario.IngestReadyAssetAsync();
+        AssetContractVersions ready = await scenario.ReadAssetAsync(readyAssetId);
+        AssetContractVersions pending = await scenario.ReadAssetAsync(pendingAssetId);
+        Guid albumId = await scenario.CreateAlbumWithAssetsAsync(
+            (readyAssetId, ready.Version),
+            (pendingAssetId, pending.Version));
+        await scenario.HideRenditionsAsync(pendingAssetId);
+
+        ApiResponse created = await scenario.CreateAlbumShareAsync(
+            albumId,
+            "share-delivery-album-partial");
+
+        Assert.Equal(HttpStatusCode.Created, created.Status);
+        using JsonDocument body = JsonDocument.Parse(created.Body);
+        JsonElement detail = body.RootElement.GetProperty("share");
+        Assert.Equal(
+            1,
+            detail.GetProperty("share").GetProperty("target")
+                .GetProperty("assetCount").GetInt32());
+        Assert.Equal(
+            readyAssetId,
+            detail.GetProperty("snapshotAssets")[0].GetProperty("id").GetGuid());
+
+        await scenario.HideRenditionsAsync(readyAssetId);
+        ApiResponse empty = await scenario.CreateAlbumShareAsync(
+            albumId,
+            "share-delivery-album-empty");
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, empty.Status);
+        Assert.Equal("share_target_not_deliverable", ProblemCode(empty));
+    }
+
     private static string? ProblemCode(ApiResponse response)
     {
         using JsonDocument document = JsonDocument.Parse(response.Body);
@@ -334,7 +621,31 @@ public sealed class ShareTargetVersionEndToEndTests
 internal sealed record ApiResponse(
     HttpStatusCode Status,
     string Body,
+    byte[] Bytes,
+    string? ContentType,
     IHeaderDictionary Headers);
+
+/// <summary>
+/// A created share plus the public projection an anonymous recipient sees, so a
+/// test can follow exactly the paths the share advertises.
+/// </summary>
+internal sealed record SharePublication(
+    string Token,
+    Guid ShareId,
+    Guid AssetId,
+    IReadOnlyList<PublishedRendition> Assets)
+{
+    internal IReadOnlyList<string> RenditionKinds =>
+        [.. Assets.Select(rendition => rendition.Kind)];
+
+    internal string PathForKind(string kind) =>
+        Assets.Single(rendition => rendition.Kind == kind).Path;
+
+    internal string PathForIdentifier(string deliveryIdentifier) =>
+        ShareRenditionRoute.Build(Token, AssetId, deliveryIdentifier);
+}
+
+internal sealed record PublishedRendition(string Kind, string Path);
 
 internal sealed record AssetContractVersions(long Version, long RevisionNumber);
 
@@ -353,6 +664,7 @@ internal sealed class ShareVersionScenario : IAsyncDisposable
     private readonly ServiceProvider _ownerUploads;
     private readonly DbContextOptions<VistaraDbContext> _vistaraOptions;
     private readonly DbContextOptions<JobDbContext> _jobOptions;
+    private readonly ShareVersionClock _clock;
     private int _uploads;
 
     private ShareVersionScenario(
@@ -365,9 +677,11 @@ internal sealed class ShareVersionScenario : IAsyncDisposable
         DbContextOptions<JobDbContext> jobOptions,
         TenantIdentity owner,
         TenantIdentity neighbour,
+        ShareVersionClock clock,
         string ownerApiKey,
         string neighbourApiKey)
     {
+        _clock = clock;
         _scratchRoot = scratchRoot;
         _anchor = anchor;
         _worker = worker;
@@ -388,6 +702,16 @@ internal sealed class ShareVersionScenario : IAsyncDisposable
     internal string OwnerApiKey { get; }
 
     internal string NeighbourApiKey { get; }
+
+    internal static DateTimeOffset ClockUtcNow => Now;
+
+    internal static byte[] RenditionBytes => ReadinessImageProcessor.OutputBytes;
+
+    /// <summary>
+    /// Moves every host's clock forward together so share expiry is observed by
+    /// the projection, the delivery grant port, and the byte route alike.
+    /// </summary>
+    internal void Advance(TimeSpan elapsed) => _clock.Advance(elapsed);
 
     internal static async ValueTask<ShareVersionScenario> CreateAsync()
     {
@@ -442,9 +766,9 @@ internal sealed class ShareVersionScenario : IAsyncDisposable
         ServiceCollection workerServices = [];
         workerServices.AddSingleton<IBlobStore>(store);
         workerServices.AddSingleton<IImageProcessor>(new ReadinessImageProcessor());
-        workerServices.AddSingleton<IClock>(new ReadinessClock(Now));
-        workerServices.AddSingleton<IUuid7Generator>(
-            new Uuid7Generator(new ReadinessClock(Now)));
+        var clock = new ShareVersionClock(Now);
+        workerServices.AddSingleton<IClock>(clock);
+        workerServices.AddSingleton<IUuid7Generator>(new Uuid7Generator(clock));
         workerServices.AddVistaraWorkerPlatform(configuration);
         ServiceProvider worker = workerServices.BuildServiceProvider(
             new ServiceProviderOptions { ValidateScopes = true });
@@ -454,9 +778,8 @@ internal sealed class ShareVersionScenario : IAsyncDisposable
         uploadServices.AddScoped<ITenantScope>(_ => ownerContext);
         uploadServices.AddScoped<IPlatformTenantContext>(_ => ownerContext);
         uploadServices.AddSingleton<IBlobStore>(store);
-        uploadServices.AddSingleton<IClock>(new ReadinessClock(Now));
-        uploadServices.AddSingleton<IUuid7Generator>(
-            new Uuid7Generator(new ReadinessClock(Now)));
+        uploadServices.AddSingleton<IClock>(clock);
+        uploadServices.AddSingleton<IUuid7Generator>(new Uuid7Generator(clock));
         uploadServices.AddVistaraApiPlatform(configuration);
         uploadServices.AddVistaraApiPersistence(configuration);
         ServiceProvider ownerUploads = uploadServices.BuildServiceProvider(
@@ -465,12 +788,15 @@ internal sealed class ShareVersionScenario : IAsyncDisposable
         WebApplicationBuilder apiBuilder = WebApplication.CreateBuilder();
         apiBuilder.Configuration.AddInMemoryCollection(settings);
         apiBuilder.Services.AddSingleton<IBlobStore>(store);
+        apiBuilder.Services.AddSingleton<IClock>(clock);
+        apiBuilder.Services.AddSingleton<IUuid7Generator>(new Uuid7Generator(clock));
         apiBuilder.Services.AddVistaraApiRuntime(apiBuilder.Configuration);
         apiBuilder.Services.AddVistaraApiPlatform(apiBuilder.Configuration);
         apiBuilder.Services.AddVistaraApiPersistence(apiBuilder.Configuration);
         WebApplication api = apiBuilder.Build();
         api.UseVistaraPlatform();
         api.MapVistaraGalleryFeatures();
+        api.MapVistaraMedia();
 
         var scenario = new ShareVersionScenario(
             scratchRoot,
@@ -482,6 +808,7 @@ internal sealed class ShareVersionScenario : IAsyncDisposable
             jobOptions,
             owner,
             neighbour,
+            clock,
             await IssueApiKeyAsync(api, owner),
             await IssueApiKeyAsync(api, neighbour));
         return scenario;
@@ -594,13 +921,126 @@ internal sealed class ShareVersionScenario : IAsyncDisposable
             });
 
     /// <summary>
+    /// Creates a share and reads back the projection an anonymous recipient
+    /// receives, which is the only source of the rendition paths a test may
+    /// follow.
+    /// </summary>
+    internal async ValueTask<SharePublication> PublishShareAsync(
+        Guid assetId,
+        long version,
+        string idempotencyKey,
+        bool downloadRenditions = false,
+        string? password = null,
+        DateTimeOffset? expiresAtUtc = null)
+    {
+        string expiry = expiresAtUtc is { } expires
+            ? $",\n              \"expiresAt\": \"{expires.UtcDateTime:O}\""
+            : string.Empty;
+        string secret = password is null
+            ? string.Empty
+            : $",\n              \"password\": \"{password}\"";
+        ApiResponse created = await SendAsync(
+            HttpMethods.Post,
+            "/api/v1/shares",
+            apiKey: OwnerApiKey,
+            body: $$"""
+            {
+              "name": "Published share",
+              "targetKind": "snapshot",
+              "snapshotAssets": [{ "id": "{{assetId:D}}", "version": {{version}} }],
+              "permissions": {
+                "view": true,
+                "downloadRenditions": {{(downloadRenditions ? "true" : "false")}},
+                "downloadOriginal": false
+              },
+              "metadataExposure": "basic"{{expiry}}{{secret}}
+            }
+            """,
+            headers: new Dictionary<string, string>
+            {
+                ["Idempotency-Key"] = idempotencyKey,
+            });
+        Assert.Equal(HttpStatusCode.Created, created.Status);
+        using JsonDocument body = JsonDocument.Parse(created.Body);
+        string token = body.RootElement.GetProperty("publicToken").GetString()!;
+        Guid shareId = body.RootElement
+            .GetProperty("share").GetProperty("share").GetProperty("id").GetGuid();
+
+        ApiResponse published = await SendAsync(
+            HttpMethods.Get,
+            $"/api/v1/public/shares/{token}");
+        Assert.Equal(HttpStatusCode.OK, published.Status);
+        using JsonDocument projection = JsonDocument.Parse(published.Body);
+        PublishedRendition[] renditions = projection.RootElement
+            .TryGetProperty("assets", out JsonElement assets)
+            ? [.. assets.GetProperty("items")
+                .EnumerateArray()
+                .Where(asset => asset.GetProperty("id").GetGuid() == assetId)
+                .SelectMany(asset => asset.GetProperty("renditions").EnumerateArray())
+                .Select(rendition => new PublishedRendition(
+                    rendition.GetProperty("kind").GetString()!,
+                    rendition.GetProperty("path").GetString()!))]
+            : [];
+        return new SharePublication(token, shareId, assetId, renditions);
+    }
+
+    /// <summary>
+    /// Answers a share password challenge and returns the session token the
+    /// production endpoint issues in its scoped cookie.
+    /// </summary>
+    internal async ValueTask<string> ChallengeAsync(string token, string password)
+    {
+        ApiResponse challenged = await SendAsync(
+            HttpMethods.Post,
+            $"/api/v1/public/shares/{token}/challenge",
+            body: $$"""{ "password": "{{password}}" }""");
+        Assert.Equal(HttpStatusCode.OK, challenged.Status);
+        string cookie = Assert.Single(
+            challenged.Headers.SetCookie.ToArray(),
+            value => value!.StartsWith("Vistara.ShareSession=", StringComparison.Ordinal))!;
+        return cookie["Vistara.ShareSession=".Length..].Split(';')[0];
+    }
+
+    internal async ValueTask<string> ReadRenditionIdentifierAsync(
+        Guid assetId,
+        string preset)
+    {
+        await using SqliteCommand command = _anchor.CreateCommand();
+        command.CommandText =
+            "SELECT id FROM derivative_requests " +
+            "WHERE asset_id = $asset AND preset_name = $preset;";
+        command.Parameters.AddWithValue("$asset", assetId);
+        command.Parameters.AddWithValue("$preset", preset);
+        return Guid.Parse((string)(await command.ExecuteScalarAsync())!)
+            .ToString("D");
+    }
+
+    /// <summary>
+    /// Returns every derivative to a pre-Ready state, which is what a share
+    /// created before processing finishes would observe.
+    /// </summary>
+    internal async ValueTask HideRenditionsAsync(Guid assetId)
+    {
+        await using SqliteCommand command = _anchor.CreateCommand();
+        command.CommandText =
+            "UPDATE derivative_requests SET state = 'Processing' " +
+            "WHERE asset_id = $asset;";
+        command.Parameters.AddWithValue("$asset", assetId);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
     /// Creates an album through the production curation endpoints and adds the
     /// asset with the very same versioned reference contract share creation
     /// uses, which is what makes the two surfaces comparable.
     /// </summary>
-    internal async ValueTask<Guid> CreateAlbumWithAssetAsync(
+    internal ValueTask<Guid> CreateAlbumWithAssetAsync(
         Guid assetId,
-        long assetVersion)
+        long assetVersion) =>
+        CreateAlbumWithAssetsAsync((assetId, assetVersion));
+
+    internal async ValueTask<Guid> CreateAlbumWithAssetsAsync(
+        params (Guid AssetId, long Version)[] items)
     {
         ApiResponse created = await SendAsync(
             HttpMethods.Post,
@@ -618,13 +1058,17 @@ internal sealed class ShareVersionScenario : IAsyncDisposable
         JsonElement album = body.RootElement.GetProperty("album");
         Guid albumId = album.GetProperty("id").GetGuid();
         long albumVersion = album.GetProperty("version").GetInt64();
+        string references = string.Join(
+            ", ",
+            items.Select(item =>
+                $$"""{ "id": "{{item.AssetId:D}}", "version": {{item.Version}} }"""));
 
         ApiResponse added = await SendAsync(
             HttpMethods.Post,
             $"/api/v1/albums/{albumId:D}/items",
             apiKey: OwnerApiKey,
             body: $$"""
-            { "items": [{ "id": "{{assetId:D}}", "version": {{assetVersion}} }] }
+            { "items": [{{references}}] }
             """,
             headers: new Dictionary<string, string>
             {
@@ -634,6 +1078,31 @@ internal sealed class ShareVersionScenario : IAsyncDisposable
         Assert.Equal(HttpStatusCode.OK, added.Status);
         return albumId;
     }
+
+    internal Task<ApiResponse> CreateAlbumShareAsync(
+        Guid albumId,
+        string idempotencyKey) =>
+        SendAsync(
+            HttpMethods.Post,
+            "/api/v1/shares",
+            apiKey: OwnerApiKey,
+            body: $$"""
+            {
+              "name": "Album share",
+              "targetKind": "album",
+              "albumId": "{{albumId:D}}",
+              "permissions": {
+                "view": true,
+                "downloadRenditions": false,
+                "downloadOriginal": false
+              },
+              "metadataExposure": "basic"
+            }
+            """,
+            headers: new Dictionary<string, string>
+            {
+                ["Idempotency-Key"] = idempotencyKey,
+            });
 
     internal async ValueTask<AssetContractVersions> ReadAssetAsync(Guid assetId)
     {
@@ -756,9 +1225,12 @@ internal sealed class ShareVersionScenario : IAsyncDisposable
         }
 
         await pipeline(context);
+        byte[] bytes = ((MemoryStream)context.Response.Body).ToArray();
         return new ApiResponse(
             (HttpStatusCode)context.Response.StatusCode,
-            Encoding.UTF8.GetString(((MemoryStream)context.Response.Body).ToArray()),
+            Encoding.UTF8.GetString(bytes),
+            bytes,
+            context.Response.ContentType,
             context.Response.Headers);
     }
 
@@ -914,6 +1386,15 @@ internal sealed class ShareVersionScenario : IAsyncDisposable
     {
         internal static TenantIdentity Create(string slug) =>
             new(Guid.CreateVersion7(), Guid.CreateVersion7(), slug);
+    }
+
+    private sealed class ShareVersionClock(DateTimeOffset utcNow) : IClock
+    {
+        private DateTimeOffset _utcNow = utcNow;
+
+        public DateTimeOffset UtcNow => _utcNow;
+
+        internal void Advance(TimeSpan elapsed) => _utcNow = _utcNow.Add(elapsed);
     }
 
     private sealed class FixedPlatformTenantContext(Guid tenantId) :

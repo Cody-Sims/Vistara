@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Vistara.Persistence.Derivatives;
+using Vistara.Persistence.Model;
 
 namespace Vistara.Persistence.Media;
 
@@ -147,12 +148,15 @@ public sealed class RelationalMediaCatalogStore(
         CancellationToken cancellationToken)
     {
         EnsureTenant(tenantId);
+        TenantKey tenantKey = tenantId;
         DerivativeRequestRow? row = await (
             from derivative in _context.Set<DerivativeRequestRow>().AsNoTracking()
             join asset in _context.Assets.AsNoTracking()
                 on derivative.AssetId equals asset.Id
             where derivative.Id == renditionId &&
                 derivative.AssetId == assetId &&
+                derivative.TenantId == tenantKey &&
+                asset.TenantId == tenantKey &&
                 asset.Status == "Ready"
             select derivative)
             .SingleOrDefaultAsync(cancellationToken);

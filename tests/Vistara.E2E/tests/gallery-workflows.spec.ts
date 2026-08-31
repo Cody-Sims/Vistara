@@ -146,17 +146,41 @@ test.describe('integrated gallery workflows', () => {
       .click();
     await expect(page.getByText(primaryTitle, { exact: true })).toHaveCount(0);
 
-    // The share target carries the asset resource version, so read the
-    // version the API advertises now rather than assuming a seeded value.
-    const shareTarget = await request.get(
-      `${runtime.baseUrl}/api/v1/assets/${seeded.primaryAssetId}`,
-      { headers: { 'X-API-Key': seeded.apiKey } },
-    );
-    expect(shareTarget.status()).toBe(200);
-    const shareTargetVersion = (await shareTarget.json()).asset
-      .version as number;
+    // Only a Ready asset with a delivered rendition can be shared, and the
+    // share target carries the asset resource version, so both are read from
+    // the API for the image this run actually uploaded.
+    const uploadedTitle = `tiny-${browserName}.png`;
+    let shareTargetId = '';
+    let shareTargetVersion = 0;
+    await expect
+      .poll(
+        async () => {
+          const listed = await request.get(
+            `${runtime.baseUrl}/api/v1/assets?statuses=ready&limit=200`,
+            { headers: { 'X-API-Key': seeded.apiKey } },
+          );
+          if (listed.status() !== 200) return 0;
+          const page = (await listed.json()) as {
+            items: readonly {
+              id: string;
+              title: string;
+              version: number;
+              renditions: readonly unknown[];
+            }[];
+          };
+          const uploaded = page.items.find(
+            (asset) => asset.title === uploadedTitle,
+          );
+          if (!uploaded) return 0;
+          shareTargetId = uploaded.id;
+          shareTargetVersion = uploaded.version;
+          return uploaded.renditions.length;
+        },
+        { timeout: 60_000 },
+      )
+      .toBeGreaterThan(0);
     await page.goto(
-      `${runtime.baseUrl}/shared/links?assetId=${seeded.primaryAssetId}` +
+      `${runtime.baseUrl}/shared/links?assetId=${shareTargetId}` +
         `&version=${shareTargetVersion}`,
     );
     const sharesRegion = page.getByRole('region', { name: 'Share links' });
@@ -171,7 +195,21 @@ test.describe('integrated gallery workflows', () => {
     const publicPage = await publicContext.newPage();
     await publicPage.goto(shareUrl);
     await expect(publicPage.getByRole('heading', { name: shareName })).toBeVisible();
-    await expect(publicPage.getByText(primaryTitle, { exact: true })).toBeVisible();
+    await expect(publicPage.getByText(uploadedTitle, { exact: true })).toBeVisible();
+    // A recipient carries only the share link, so the shared image has to load
+    // from a share-scoped delivery path with no gallery credential. The E2E
+    // pipeline emits placeholder bytes that no browser decodes, so the transfer
+    // itself is the evidence.
+    const sharedImage = publicPage.getByRole('img').first();
+    await expect(sharedImage).toBeVisible();
+    const sharedSource = await sharedImage.getAttribute('src');
+    expect(sharedSource).toContain('/api/v1/public/shares/');
+    const delivered = await publicPage.request.get(
+      `${runtime.baseUrl}${sharedSource}`,
+    );
+    expect(delivered.status()).toBe(200);
+    expect(delivered.headers()['cache-control']).toBe('private,no-store');
+    expect((await delivered.body()).length).toBeGreaterThan(0);
     await publicContext.close();
 
     await page.getByRole('button', { name: 'Close without copying' }).click();
