@@ -27,13 +27,18 @@ function user(overrides: Partial<CurrentUser> = {}): CurrentUser {
     tenants: [membership('tenant-a', 'TenantAdmin')],
     csrfHeaderName: 'X-Vistara-CSRF',
     csrfToken: 'csrf-token-1',
+    authenticationKind: 'cookie',
     ...overrides,
   };
 }
 
-/** The same account reached with an API key: no antiforgery token is issued. */
+/** The same account reached with a credential bound to one tenant. */
 function tenantBound(overrides: Partial<CurrentUser> = {}): CurrentUser {
-  return { ...user(overrides), csrfToken: undefined };
+  return user({
+    csrfToken: undefined,
+    authenticationKind: 'apiKey',
+    ...overrides,
+  });
 }
 
 describe('active membership', () => {
@@ -135,13 +140,35 @@ describe('administration', () => {
 });
 
 describe('credential kind', () => {
-  it('reads an interactive cookie session from its antiforgery token', () => {
-    expect(credentialKind(user())).toBe('browser');
+  it('reports the credential the API says authenticated the session', () => {
+    expect(credentialKind(user())).toBe('cookie');
+    expect(credentialKind(tenantBound())).toBe('apiKey');
+    expect(
+      credentialKind(tenantBound({ authenticationKind: 'bearer' })),
+    ).toBe('bearer');
   });
 
-  it('reads a credential without an antiforgery token as tenant-bound', () => {
-    expect(credentialKind(tenantBound())).toBe('tenantBound');
-    expect(credentialKind(undefined)).toBe('tenantBound');
+  it('reports an unpublished or unknown credential as unknown', () => {
+    expect(credentialKind(undefined)).toBe('unknown');
+    expect(credentialKind(user({ authenticationKind: undefined }))).toBe(
+      'unknown',
+    );
+    expect(
+      credentialKind(
+        user({
+          authenticationKind: 'passkey' as CurrentUser['authenticationKind'],
+        }),
+      ),
+    ).toBe('unknown');
+  });
+
+  it('never reads the credential from the antiforgery token', () => {
+    // A cookie session between token issues, and a key that somehow carries
+    // one, are both named by the contract rather than guessed at.
+    expect(credentialKind(user({ csrfToken: undefined }))).toBe('cookie');
+    expect(credentialKind(tenantBound({ csrfToken: 'borrowed' }))).toBe(
+      'apiKey',
+    );
   });
 });
 
@@ -158,16 +185,36 @@ describe('session scopes', () => {
   });
 
   it('assumes no scope for a tenant-bound credential, whatever role it reports', () => {
+    for (const kind of ['apiKey', 'bearer'] as const) {
+      expect(
+        sessionScopes(
+          tenantBound({
+            authenticationKind: kind,
+            role: 'TenantOwner',
+            tenants: [membership('tenant-a', 'TenantOwner')],
+          }),
+        ),
+      ).toEqual([]);
+    }
+
+    expect(hasScope(tenantBound(), 'members.manage')).toBe(false);
+    expect(hasScope(user(), 'members.manage')).toBe(true);
+  });
+
+  it('grants nothing when the credential kind was not published', () => {
+    expect(sessionScopes(user({ authenticationKind: undefined }))).toEqual([]);
+  });
+
+  it('grants a cookie session its scopes with no antiforgery token held', () => {
     expect(
       sessionScopes(
-        tenantBound({
+        user({
+          csrfToken: undefined,
           role: 'TenantOwner',
           tenants: [membership('tenant-a', 'TenantOwner')],
         }),
       ),
-    ).toEqual([]);
-    expect(hasScope(tenantBound(), 'members.manage')).toBe(false);
-    expect(hasScope(user(), 'members.manage')).toBe(true);
+    ).toContain('quotas.manage');
   });
 
   it('grants nothing for a membership that is not active', () => {
@@ -178,15 +225,30 @@ describe('session scopes', () => {
 });
 
 describe('administration with a tenant-bound credential', () => {
-  it('refuses an owner reported by an API key that cannot administer', () => {
+  it('refuses an owner reported by a key or token that cannot administer', () => {
+    for (const kind of ['apiKey', 'bearer'] as const) {
+      expect(
+        canAdminister(
+          tenantBound({
+            authenticationKind: kind,
+            role: 'TenantOwner',
+            tenants: [membership('tenant-a', 'TenantOwner')],
+          }),
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it('keeps an owner administering while their antiforgery token is absent', () => {
     expect(
       canAdminister(
-        tenantBound({
+        user({
+          csrfToken: undefined,
           role: 'TenantOwner',
           tenants: [membership('tenant-a', 'TenantOwner')],
         }),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it('still admits the same owner on an interactive session', () => {

@@ -38,7 +38,7 @@ export interface SessionContextValue {
 
 const anonymousSession: SessionContextValue = {
   status: 'anonymous',
-  credentialKind: 'tenantBound',
+  credentialKind: 'unknown',
   scopes: [],
   canAdminister: false,
   signOutIncomplete: false,

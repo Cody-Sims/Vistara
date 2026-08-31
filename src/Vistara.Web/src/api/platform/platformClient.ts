@@ -7,6 +7,7 @@ import { readRetryAfterSeconds, VistaraThrottledError } from './throttling';
 import type { EntityTag } from '../generated/models';
 import type {
   ApiKeyCollection,
+  AuthenticationKind,
   Capabilities,
   CreateApiKeyRequest,
   CreatedApiKey,
@@ -58,6 +59,8 @@ export class PlatformApiClient {
   readonly #unauthorized = new Set<() => void>();
   #antiforgeryHeader = defaultAntiforgeryHeader;
   #antiforgeryToken = '';
+  /** The credential the API last said it authenticated this client with. */
+  #authenticationKind: AuthenticationKind | undefined;
 
   public constructor(options: ApiClientOptions = {}) {
     this.#baseUrl = options.baseUrl?.replace(/\/+$/, '') ?? '';
@@ -82,6 +85,7 @@ export class PlatformApiClient {
   public async getSession(): Promise<CurrentUser> {
     const user = await this.#request<CurrentUser>('GET', '/api/v1/me');
     this.#adoptHeaderName(user.csrfHeaderName);
+    this.#authenticationKind = user.authenticationKind;
     if (user.csrfToken) {
       this.#antiforgeryToken = user.csrfToken;
     }
@@ -97,6 +101,7 @@ export class PlatformApiClient {
     );
 
     this.#adoptHeaderName(session.user.csrfHeaderName);
+    this.#authenticationKind = session.user.authenticationKind ?? 'cookie';
     this.#antiforgeryToken = session.csrfToken;
     return session;
   }
@@ -106,6 +111,7 @@ export class PlatformApiClient {
       await this.#request<void>('POST', '/api/v1/auth/logout');
     } finally {
       this.#antiforgeryToken = '';
+      this.#authenticationKind = undefined;
     }
   }
 
@@ -271,10 +277,16 @@ export class PlatformApiClient {
 
   /**
    * A reloaded browser holds the session cookie but no antiforgery token, so
-   * the session is read once before the first unsafe request.
+   * the session is read once before the first unsafe request. A credential
+   * bound to one tenant is never asked: the API issues it no token, so the
+   * read would repeat before every unsafe request and answer nothing.
    */
   async #ensureAntiforgeryToken(): Promise<void> {
-    if (this.#antiforgeryToken) {
+    if (
+      this.#antiforgeryToken ||
+      (this.#authenticationKind !== undefined &&
+        this.#authenticationKind !== 'cookie')
+    ) {
       return;
     }
 
@@ -322,7 +334,14 @@ export class PlatformApiClient {
     }
 
     const headers = new Headers({ Accept: 'application/json' });
-    if (method !== 'GET' && this.#antiforgeryToken) {
+    // The token belongs to a cookie session and is spent on unsafe requests
+    // only; no other credential is ever accompanied by one.
+    if (
+      method !== 'GET' &&
+      this.#antiforgeryToken &&
+      this.#authenticationKind !== 'apiKey' &&
+      this.#authenticationKind !== 'bearer'
+    ) {
       headers.set(this.#antiforgeryHeader, this.#antiforgeryToken);
     }
     if (options.ifMatch) {
@@ -343,6 +362,7 @@ export class PlatformApiClient {
 
     if (response.status === 401 && !anonymousRoutes.has(path)) {
       this.#antiforgeryToken = '';
+      this.#authenticationKind = undefined;
       for (const listener of this.#unauthorized) {
         listener();
       }

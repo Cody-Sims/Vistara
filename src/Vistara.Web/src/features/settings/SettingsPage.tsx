@@ -101,11 +101,11 @@ export function SettingsPage({ client }: SettingsPageProps) {
             <dd>{describeCredential(session.credentialKind)}</dd>
           </div>
         </dl>
-        {session.credentialKind === 'tenantBound' ? (
+        {session.credentialKind !== 'cookie' ? (
           <p className={styles.hint}>
-            This workspace was reached with a workspace credential, such as an
-            API key. It reads and writes gallery content only; administration
-            needs an interactive sign-in.
+            This workspace was reached with a credential bound to it, such as
+            an API key. It reads and writes gallery content only;
+            administration needs an interactive sign-in.
           </p>
         ) : null}
         <div className={styles.actions}>

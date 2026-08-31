@@ -13,7 +13,7 @@ Every route below is implemented on the API branch
 
 | Route | Request | Response | Used by |
 |---|---|---|---|
-| `GET /api/v1/me` | — | `CurrentUser` | session bootstrap |
+| `GET /api/v1/me` | — | `CurrentUser` (with `authenticationKind`) | session bootstrap |
 | `POST /api/v1/auth/login` | `{ login, password, tenantId? }` | `{ user, csrfToken }` | `/login` |
 | `POST /api/v1/auth/logout` | — | `204` | account menu, `/settings` |
 | `GET /api/v1/capabilities` | — | `Capabilities` | deployment limits |
@@ -44,14 +44,19 @@ Every route below is implemented on the API branch
   default). A reloaded browser therefore reads the session once before its
   first unsafe request. The token is held in memory only and dropped on
   sign-out; nothing is persisted.
-- `GET /api/v1/me` names the membership role but publishes no scopes and no
-  credential kind. The antiforgery token is the only signal the contract gives:
-  an interactive cookie session receives one, a tenant-bound credential such as
-  an API key never does. `src/features/session/roles.ts` therefore reads the
-  credential kind from `csrfToken`, derives scopes from the membership role for
-  a cookie session only, and assumes none for a tenant-bound credential, whose
-  key scopes never include `members.manage` or `quotas.manage`. Administration
-  screens are offered by scope, not by the reported role.
+- `GET /api/v1/me` and the `user` of a successful login publish
+  `authenticationKind`: `cookie`, `apiKey` or `bearer`. Only `cookie` is an
+  interactive session. `src/features/session/roles.ts` reads that field,
+  derives scopes from the membership role for a cookie session only, and
+  assumes none for a key or token, whose own scopes are never published and
+  never include `members.manage` or `quotas.manage`. Administration screens
+  are offered by scope, not by the reported role, and a deployment that has
+  not published the field yet is read as an unknown credential rather than as
+  an interactive one.
+- `csrfToken` is transient and says nothing about the credential: a cookie
+  session between issues has none. It is read once before the first unsafe
+  request of a cookie session and sent on unsafe requests only; a keyed or
+  bearer session is never asked for one.
 - Entity tags are `"v{version}"` (`src/api/versionTag.ts`).
 - `412` means a stale `If-Match`: reload the record and reapply the edit.
   `409` means a state conflict that repeating the same edit will not fix.

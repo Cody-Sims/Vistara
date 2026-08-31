@@ -42,6 +42,14 @@ const currentUser = {
   ],
   csrfHeaderName: 'X-Vistara-CSRF',
   csrfToken: 'session-token',
+  authenticationKind: 'cookie',
+};
+
+/** The same account reached with a key: the API issues it no token. */
+const keyedUser = {
+  ...currentUser,
+  csrfToken: undefined,
+  authenticationKind: 'apiKey',
 };
 
 describe('platform session client', () => {
@@ -322,6 +330,66 @@ describe('restored browser sessions', () => {
     expect(
       new Headers(fetch.mock.calls[1]![1]?.headers).get('X-Vistara-CSRF'),
     ).toBe('session-token');
+  });
+
+  it('never asks a keyed session for an antiforgery token it cannot issue', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(jsonResponse(keyedUser))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = new PlatformApiClient({ fetch });
+
+    await client.getSession();
+    await client.revokeApiKey('key-1');
+    await client.revokeApiKey('key-2');
+
+    expect(fetch.mock.calls.map((call) => call[0])).toEqual([
+      '/api/v1/me',
+      '/api/v1/api-keys/key-1',
+      '/api/v1/api-keys/key-2',
+    ]);
+    expect(
+      new Headers(fetch.mock.calls[1]![1]?.headers).get('X-Vistara-CSRF'),
+    ).toBeNull();
+  });
+
+  it('reads a cookie session again when its token has not been issued yet', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(jsonResponse({ ...currentUser, csrfToken: undefined }))
+      .mockResolvedValueOnce(jsonResponse(currentUser))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = new PlatformApiClient({ fetch });
+
+    await client.getSession();
+    await client.revokeApiKey('key-1');
+
+    expect(fetch.mock.calls[1]![0]).toBe('/api/v1/me');
+    expect(
+      new Headers(fetch.mock.calls[2]![1]?.headers).get('X-Vistara-CSRF'),
+    ).toBe('session-token');
+  });
+
+  it('treats the session opened by sign-in as a cookie session', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          user: { ...currentUser, authenticationKind: undefined },
+          csrfToken: 'login-token',
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = new PlatformApiClient({ fetch });
+
+    await client.login({ login: 'ada@example.test', password: 'pw' });
+    await client.revokeApiKey('key-1');
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(
+      new Headers(fetch.mock.calls[1]![1]?.headers).get('X-Vistara-CSRF'),
+    ).toBe('login-token');
   });
 
   it('never delays sign-in behind a session read', async () => {

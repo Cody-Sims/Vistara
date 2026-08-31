@@ -1,4 +1,5 @@
 import type {
+  AuthenticationKind,
   CurrentUser,
   TenantMembership,
   TenantRole,
@@ -20,12 +21,11 @@ export type SessionScope =
   | 'quotas.manage';
 
 /**
- * How the API authenticated this session. `GET /api/v1/me` issues `csrfToken`
- * only to an interactive cookie session, so a credential that arrives without
- * one is tenant-bound: an API key or another automation credential whose own
- * scopes the contract never publishes.
+ * The credential this session was authenticated with. `unknown` covers an
+ * anonymous session and a deployment that does not publish
+ * `authenticationKind`; neither is treated as interactive.
  */
-export type CredentialKind = 'browser' | 'tenantBound';
+export type CredentialKind = AuthenticationKind | 'unknown';
 
 /**
  * Scopes the API derives from a membership role for a cookie session. This
@@ -77,15 +77,28 @@ export function activeMembership(
   );
 }
 
+/**
+ * Reads the credential the API named. It is never guessed from `csrfToken`:
+ * that token is transient, so a cookie session between issues would be
+ * demoted and a key that carried one would be promoted.
+ */
 export function credentialKind(user: CurrentUser | undefined): CredentialKind {
-  return user?.csrfToken ? 'browser' : 'tenantBound';
+  switch (user?.authenticationKind) {
+    case 'cookie':
+    case 'apiKey':
+    case 'bearer':
+      return user.authenticationKind;
+    default:
+      return 'unknown';
+  }
 }
 
 /**
- * What this session may ask the API for. A tenant-bound credential carries the
- * scopes of the key it was issued for, which `GET /api/v1/me` does not
- * publish, so none are assumed: the role it reports is not authority on its
- * own and the administration screens it would open answer `403`.
+ * What this session may ask the API for. Only an interactive cookie session
+ * carries the scopes of its membership role. A key or token carries the scopes
+ * it was issued with, which `GET /api/v1/me` does not publish, so none are
+ * assumed: the role it reports is not authority on its own and the
+ * administration screens it would open answer `403`.
  */
 export function sessionScopes(
   user: CurrentUser | undefined,
@@ -94,7 +107,7 @@ export function sessionScopes(
   if (
     membership === undefined ||
     membership.membershipStatus !== 'Active' ||
-    credentialKind(user) !== 'browser' ||
+    credentialKind(user) !== 'cookie' ||
     (user?.role !== undefined && user.role !== membership.role)
   ) {
     return [];
@@ -148,5 +161,14 @@ export const previewScopes: readonly SessionScope[] =
 
 /** How the session reached the API, in words the interface can show. */
 export function describeCredential(kind: CredentialKind): string {
-  return kind === 'browser' ? 'Signed-in session' : 'Workspace credential';
+  switch (kind) {
+    case 'cookie':
+      return 'Signed-in session';
+    case 'apiKey':
+      return 'API key';
+    case 'bearer':
+      return 'Bearer token';
+    default:
+      return 'Unrecognised credential';
+  }
 }

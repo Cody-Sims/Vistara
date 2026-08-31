@@ -96,7 +96,7 @@ function AdministrationGate({ children, scope }: AdministrationGuardProps) {
     return <>{children}</>;
   }
 
-  if (session.credentialKind === 'tenantBound') {
+  if (session.credentialKind !== 'cookie') {
     return (
       <section
         className={styles.guard}
@@ -107,10 +107,10 @@ function AdministrationGate({ children, scope }: AdministrationGuardProps) {
           Administration needs a signed-in session
         </h1>
         <p className={styles.description}>
-          This workspace was reached with a workspace credential, such as an
-          API key. Those credentials read and write gallery content only, so
-          administration is unavailable however the workspace names your role.
-          Sign in with your account to administer it.
+          This workspace was reached with a credential bound to it, such as an
+          API key or a bearer token. Those credentials read and write gallery
+          content only, so administration is unavailable however the workspace
+          names your role. Sign in with your account to administer it.
         </p>
         <div className={styles.actions}>
           <Link className={styles.primaryButton} to="/library">

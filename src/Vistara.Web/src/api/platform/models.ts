@@ -13,6 +13,14 @@ export interface TenantMembership {
   readonly membershipStatus: MembershipStatus;
 }
 
+/**
+ * The credential the API authenticated a request with, as published by
+ * `GET /api/v1/me` and by the `user` of a successful login. Only `cookie` is
+ * an interactive browser session; the other two are bound to one tenant and
+ * carry the scopes of the key or token rather than of the membership role.
+ */
+export type AuthenticationKind = 'cookie' | 'apiKey' | 'bearer';
+
 /** Response of `GET /api/v1/me`, and the `user` of a successful login. */
 export interface CurrentUser {
   readonly userId: Uuid;
@@ -22,9 +30,19 @@ export interface CurrentUser {
   readonly tenantId?: Uuid;
   readonly role?: TenantRole;
   readonly tenants: readonly TenantMembership[];
+  /**
+   * How the API authenticated this session. Optional only so a deployment
+   * that has not published it yet is read as an unknown credential rather
+   * than mistaken for an interactive session.
+   */
+  readonly authenticationKind?: AuthenticationKind;
   /** Header the deployment expects the antiforgery token in. */
   readonly csrfHeaderName: string;
-  /** Token for the current cookie session; absent for non-browser principals. */
+  /**
+   * Antiforgery token for the current cookie session, used only on unsafe
+   * requests. It is transient: a cookie session between issues has none, so
+   * it never says which credential authenticated the session.
+   */
   readonly csrfToken?: string;
 }
 

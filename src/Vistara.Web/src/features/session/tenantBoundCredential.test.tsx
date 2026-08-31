@@ -1,4 +1,5 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CurrentUser } from '../../api/platform';
@@ -7,6 +8,7 @@ import { ApplicationProviders } from '../../app/ApplicationProviders';
 import { PrimaryNavigation } from '../../app/navigation/PrimaryNavigation';
 import { createAppRouter } from '../../app/router';
 import { SessionProvider } from './SessionProvider';
+import { useSession } from './sessionContext';
 import { currentUser, tenantBoundUser } from './sessionTestData';
 
 const imported = vi.hoisted(() => ({ count: 0 }));
@@ -34,6 +36,31 @@ function sessionClient(user: CurrentUser) {
     login: vi.fn(),
     logout: vi.fn(async () => undefined),
   };
+}
+
+/** Renders the rail with a control that rereads the session on demand. */
+function renderRefreshable(client: ReturnType<typeof sessionClient>) {
+  function Screen() {
+    const session = useSession();
+    return (
+      <>
+        <button type="button" onClick={() => void session.reload()}>
+          Reread session
+        </button>
+        <PrimaryNavigation variant="rail" />
+      </>
+    );
+  }
+
+  const router = createMemoryRouter([{ path: '*', element: <Screen /> }], {
+    initialEntries: ['/library'],
+  });
+
+  render(
+    <SessionProvider client={client}>
+      <RouterProvider router={router} />
+    </SessionProvider>,
+  );
 }
 
 function renderNavigation(user: CurrentUser) {
@@ -80,13 +107,35 @@ describe('tenant-bound credential', () => {
     ).not.toBeInTheDocument();
   });
 
+  it('offers no administration navigation to an owner holding a bearer token', async () => {
+    renderNavigation(tenantBoundUser({ authenticationKind: 'bearer' }));
+
+    expect(
+      await screen.findAllByRole('button', { name: /Ada Lovelace/ }),
+    ).not.toHaveLength(0);
+    expect(
+      screen.queryByRole('navigation', { name: 'Administration' }),
+    ).not.toBeInTheDocument();
+  });
+
   it('names the credential so the read-only context is not read as owner rights', async () => {
     renderNavigation(tenantBoundUser());
 
     const [account] = await screen.findAllByRole('button', {
       name: /Ada Lovelace/,
     });
-    expect(account).toHaveTextContent(/Workspace credential/i);
+    expect(account).toHaveTextContent(/API key/i);
+  });
+
+  it('refuses a session whose credential the deployment does not publish', async () => {
+    renderNavigation(currentUser({ authenticationKind: undefined }, 'TenantOwner'));
+
+    expect(
+      await screen.findAllByRole('button', { name: /Ada Lovelace/ }),
+    ).not.toHaveLength(0);
+    expect(
+      screen.queryByRole('navigation', { name: 'Administration' }),
+    ).not.toBeInTheDocument();
   });
 
   it('explains the credential instead of opening the storage assistant', async () => {
@@ -110,6 +159,66 @@ describe('tenant-bound credential', () => {
     expect(
       await screen.findByRole('heading', { name: 'Storage' }),
     ).toBeInTheDocument();
+  });
+
+  it('keeps a cookie owner administering while no antiforgery token is held', async () => {
+    renderNavigation(currentUser({ csrfToken: undefined }, 'TenantOwner'));
+
+    const administration = await screen.findByRole('navigation', {
+      name: 'Administration',
+    });
+    expect(
+      within(administration).getByRole('link', { name: 'Storage' }),
+    ).toBeInTheDocument();
+  });
+
+  it('opens administration for a cookie owner with no antiforgery token yet', async () => {
+    renderAt('/admin/storage', currentUser({ csrfToken: undefined }, 'TenantOwner'));
+
+    expect(
+      await screen.findByRole('heading', { name: 'Storage' }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe('refreshed session state', () => {
+  it('adopts the credential the session is reread with', async () => {
+    const user = userEvent.setup();
+    const client = sessionClient(tenantBoundUser());
+    client.getSession
+      .mockResolvedValueOnce(tenantBoundUser())
+      .mockResolvedValue(currentUser({}, 'TenantOwner'));
+    renderRefreshable(client);
+
+    await screen.findAllByRole('button', { name: /Ada Lovelace/ });
+    expect(
+      screen.queryByRole('navigation', { name: 'Administration' }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Reread session' }));
+
+    expect(
+      await screen.findByRole('navigation', { name: 'Administration' }),
+    ).toBeInTheDocument();
+  });
+
+  it('withdraws administration when the session is reread as a key', async () => {
+    const user = userEvent.setup();
+    const client = sessionClient(currentUser({}, 'TenantOwner'));
+    client.getSession
+      .mockResolvedValueOnce(currentUser({}, 'TenantOwner'))
+      .mockResolvedValue(tenantBoundUser());
+    renderRefreshable(client);
+
+    await screen.findByRole('navigation', { name: 'Administration' });
+
+    await user.click(screen.getByRole('button', { name: 'Reread session' }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('navigation', { name: 'Administration' }),
+      ).not.toBeInTheDocument(),
+    );
   });
 });
 

@@ -193,7 +193,7 @@ function AccountControl({ compact = false }: { readonly compact?: boolean }) {
         <span className={styles.linkLabel}>
           {displayName}
           <span className={styles.accountRole}>
-            {session.credentialKind === 'browser'
+            {session.credentialKind === 'cookie'
               ? describeRole(session.role)
               : `${describeRole(session.role)} · ${describeCredential(
                   session.credentialKind,

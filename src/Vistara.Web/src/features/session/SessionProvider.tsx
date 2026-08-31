@@ -179,11 +179,12 @@ export function SessionProvider({
   const signIn = useCallback(
     async (credentials: LoginRequest) => {
       const session = await client.login(credentials);
-      // Login answers the antiforgery token beside the user rather than on it;
-      // carrying it onto the session is what marks this as the cookie session
-      // it just opened, exactly as a later `GET /api/v1/me` would.
+      // Login answers the antiforgery token beside the user rather than on
+      // it, and opens a cookie session by definition; both are carried onto
+      // the session exactly as a later `GET /api/v1/me` would publish them.
       const user: CurrentUser = {
         ...session.user,
+        authenticationKind: session.user.authenticationKind ?? 'cookie',
         csrfToken: session.user.csrfToken ?? session.csrfToken,
       };
       setSignOutIncomplete(false);
@@ -221,7 +222,7 @@ export function SessionProvider({
       membership,
       role: membership?.role,
       credentialKind:
-        state.status === 'preview' ? 'browser' : credentialKind(state.user),
+        state.status === 'preview' ? 'cookie' : credentialKind(state.user),
       scopes:
         state.status === 'preview' ? previewScopes : sessionScopes(state.user),
       canAdminister:

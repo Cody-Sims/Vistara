@@ -1,8 +1,8 @@
 import type { CurrentUser, TenantRole } from '../../api/platform';
 
 /**
- * An interactive cookie session, which `GET /api/v1/me` answers with an
- * antiforgery token.
+ * An interactive cookie session, which `GET /api/v1/me` publishes as
+ * `authenticationKind: 'cookie'`.
  */
 export function currentUser(
   overrides: Partial<CurrentUser> = {},
@@ -25,18 +25,21 @@ export function currentUser(
     ],
     csrfHeaderName: 'X-Vistara-CSRF',
     csrfToken: 'csrf-token-1',
+    authenticationKind: 'cookie',
     ...overrides,
   };
 }
 
 /**
- * A tenant-bound credential such as an API key. `GET /api/v1/me` still names
- * the membership role, but issues no antiforgery token because the principal
- * is not an interactive browser session.
+ * A credential bound to one tenant. `GET /api/v1/me` still names the
+ * membership role, and publishes the credential that carried the request.
  */
 export function tenantBoundUser(
   overrides: Partial<CurrentUser> = {},
   role: TenantRole = 'TenantOwner',
 ): CurrentUser {
-  return { ...currentUser(overrides, role), csrfToken: undefined };
+  return currentUser(
+    { csrfToken: undefined, authenticationKind: 'apiKey', ...overrides },
+    role,
+  );
 }
