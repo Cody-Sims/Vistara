@@ -37,6 +37,13 @@ case "$1" in
     ;;
   logs)
     echo "container log"
+    if [[ -n "\${FAKE_PRE_REPLAY_SERVER_SQLSTATE:-}" ]]; then
+      echo "2026-08-31 03:41:39.482 UTC [113] ERROR:  \${FAKE_PRE_REPLAY_SERVER_SQLSTATE}: relation \\"__EFMigrationsHistory\\" already exists"
+    fi
+    if [[ "\${FAKE_REPLAY_LOG_STYLE:-bundle}" == "server" ]] && log_contains "replay-run"; then
+      echo "2026-08-31 03:41:40.111 UTC [117] ERROR:  \${FAKE_REPLAY_SQLSTATE:-42P07}: relation \\"assets\\" already exists"
+      echo "2026-08-31 03:41:40.111 UTC [117] STATEMENT:  CREATE TABLE assets ()"
+    fi
     exit 0
     ;;
   exec)
@@ -48,12 +55,18 @@ case "$1" in
       exit 0
     fi
     if [[ "$*" == *"DELETE FROM"* ]]; then
+      pin="$(printf '%s' "$*" | grep --extended-regexp --only-matching "'[^']+'" | tail -n 1 | tr -d "'")"
+      printf '%s %s\\n' "replay-pin" "$pin" >> "$FAKE_DOCKER_LOG"
       printf '%s\\n' "replay-phase" >> "$FAKE_DOCKER_LOG"
       echo "DELETE 1"
       exit 0
     fi
-    if [[ "$*" == *"ORDER BY \\"MigrationId\\" DESC"* ]]; then
-      echo "\${FAKE_NEWEST_MIGRATION:-20260831002849_AddUserPreferences}"
+    if [[ "$*" == *"ORDER BY \\"MigrationId\\" ASC"* ]]; then
+      echo "\${FAKE_OLDEST_MIGRATION:-20260829000000_InitialCreate}"
+      exit 0
+    fi
+    if [[ "$*" == *"WHERE \\"MigrationId\\" >="* ]]; then
+      echo "\${FAKE_REPLAY_LEDGER_ROWS:-4}"
       exit 0
     fi
     if [[ "$*" == *__EFMigrationsHistory* ]]; then
@@ -75,7 +88,19 @@ case "$1" in
         echo "Error: libgssapi_krb5.so.2: cannot open shared object file: No such file or directory"
       fi
       if log_contains "replay-phase"; then
-        echo "\${FAKE_REPLAY_OUTPUT:-42P07: relation \\"user_preferences\\" already exists}"
+        printf '%s\\n' "replay-run" >> "$FAKE_DOCKER_LOG"
+        pin="$(grep '^replay-pin ' "$FAKE_DOCKER_LOG" | tail -n 1 | cut -d ' ' -f 2)"
+        if [[ "$pin" != "\${FAKE_OLDEST_MIGRATION:-20260829000000_InitialCreate}" ]]; then
+          # The newest migrations only move data, so replaying them succeeds.
+          echo "No migrations were applied. The database is already up to date."
+          exit "\${FAKE_DATA_ONLY_REPLAY_EXIT:-0}"
+        fi
+        if [[ "\${FAKE_REPLAY_LOG_STYLE:-bundle}" == "bundle" ]]; then
+          echo "    SqlState: \${FAKE_REPLAY_SQLSTATE:-42P07}"
+          echo "\${FAKE_REPLAY_SQLSTATE:-42P07}: relation \\"assets\\" already exists"
+        else
+          echo "Npgsql.PostgresException: relation \\"assets\\" already exists"
+        fi
         exit "\${FAKE_REPLAY_EXIT:-1}"
       fi
       if log_contains "ledger-read"; then
@@ -129,6 +154,10 @@ function withGate(body) {
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+const OLDEST_MIGRATION = '20260829000000_InitialCreate';
+const NEWEST_DATA_ONLY_MIGRATION = '20260901120000_BackfillAssetOwners';
+const DUPLICATE_OBJECT_SQLSTATES = ['42P07', '42701', '42710', '42723', '42P06', '42P04'];
 
 test('passes when every concurrent migration bundle succeeds with one ledger', () => {
   withGate(({ run, logPath }) => {
@@ -206,6 +235,55 @@ test('fails when the repeated bundle run reports an error', () => {
   });
 });
 
+test('replays the oldest applied migration and every later ledger row', () => {
+  withGate(({ run, logPath }) => {
+    const result = run();
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+
+    const invocations = readFileSync(logPath, 'utf8').split('\n');
+    assert.ok(
+      invocations.some((line) =>
+        line.includes(`DELETE FROM "__EFMigrationsHistory" WHERE "MigrationId" >= '${OLDEST_MIGRATION}'`)),
+      'the probe must clear the oldest applied migration and everything after it',
+    );
+    assert.ok(
+      !invocations.some((line) => line.includes('ORDER BY "MigrationId" DESC')),
+      'the probe must not assume the newest migration conflicts',
+    );
+  });
+});
+
+for (const sqlstate of DUPLICATE_OBJECT_SQLSTATES) {
+  test(`accepts a replay rejected with SQLSTATE ${sqlstate}`, () => {
+    withGate(({ run }) => {
+      const result = run({ FAKE_REPLAY_SQLSTATE: sqlstate });
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.match(result.stdout, /migration lock gate passed/i);
+    });
+  });
+}
+
+test('accepts a replay whose SQLSTATE only reaches the PostgreSQL server log', () => {
+  withGate(({ run }) => {
+    const result = run({ FAKE_REPLAY_LOG_STYLE: 'server', FAKE_REPLAY_SQLSTATE: '42710' });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /migration lock gate passed/i);
+  });
+});
+
+test('fails when a data-only migration is pinned and the replay succeeds', () => {
+  withGate(({ run }) => {
+    const result = run({}, [
+      '--concurrency',
+      String(CONCURRENCY),
+      '--replay-migration',
+      NEWEST_DATA_ONLY_MIGRATION,
+    ]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /must fail the migration bundle/i);
+  });
+});
+
 test('fails when a replayed migration is swallowed instead of failing', () => {
   withGate(({ run }) => {
     const result = run({ FAKE_REPLAY_EXIT: '0' });
@@ -214,10 +292,37 @@ test('fails when a replayed migration is swallowed instead of failing', () => {
   });
 });
 
-test('fails when a replayed migration hides the underlying database error', () => {
+test('fails when the replay is rejected for a reason other than a duplicate object', () => {
   withGate(({ run }) => {
-    const result = run({ FAKE_REPLAY_OUTPUT: 'the bundle gave up' });
+    const result = run({ FAKE_REPLAY_SQLSTATE: '42501' });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /underlying PostgreSQL error/i);
+    assert.match(result.stderr, /duplicate object SQLSTATE/i);
+  });
+});
+
+test('fails when neither the bundle nor the server reports a SQLSTATE', () => {
+  withGate(({ run }) => {
+    const result = run({ FAKE_REPLAY_LOG_STYLE: 'none' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /duplicate object SQLSTATE/i);
+  });
+});
+
+test('ignores a duplicate SQLSTATE logged before the replay started', () => {
+  withGate(({ run }) => {
+    const result = run({
+      FAKE_REPLAY_LOG_STYLE: 'none',
+      FAKE_PRE_REPLAY_SERVER_SQLSTATE: '42P07',
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /duplicate object SQLSTATE/i);
+  });
+});
+
+test('fails when the pinned migration is missing from the ledger', () => {
+  withGate(({ run }) => {
+    const result = run({ FAKE_REPLAY_LEDGER_ROWS: '0' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /no ledger row/i);
   });
 });

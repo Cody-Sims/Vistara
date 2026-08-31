@@ -11,13 +11,20 @@ migration_image="${MIGRATION_IMAGE:-vistara-migrations:ci}"
 postgres_image="${POSTGRES_IMAGE:-postgres:18.0-bookworm@sha256:3f55f8895c4ed50603e2fbdfc72fffeeaba3173321fee5cb825bbbeb30d9d854}"
 log_directory="artifacts/migration-lock"
 concurrency="${MIGRATION_LOCK_CONCURRENCY:-3}"
+replay_migration=""
+
+# PostgreSQL reports every duplicate schema object with one of these SQLSTATEs.
+# They are stable across releases and locales, unlike the message text.
+duplicate_object_pattern='(^|[^0-9A-Za-z])(42701|42710|42723|42P04|42P06|42P07)([^0-9A-Za-z]|$)'
+duplicate_object_sqlstates='42701, 42710, 42723, 42P04, 42P06, 42P07'
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --log-directory) log_directory="${2:-}"; shift 2 ;;
     --concurrency) concurrency="${2:-}"; shift 2 ;;
+    --replay-migration) replay_migration="${2:-}"; shift 2 ;;
     --help|-h)
-      echo "Usage: migration-lock.sh [--log-directory DIR] [--concurrency N]"
+      echo "Usage: migration-lock.sh [--log-directory DIR] [--concurrency N] [--replay-migration ID]"
       exit 0
       ;;
     *)
@@ -100,7 +107,8 @@ assert_no_missing_libraries() {
   --env POSTGRES_USER=vistara_migrator \
   --env "POSTGRES_PASSWORD=$password" \
   --env POSTGRES_DB=vistara \
-  "$postgres_image" >/dev/null
+  "$postgres_image" \
+  -c log_error_verbosity=verbose >/dev/null
 
 for attempt in $(seq 1 60); do
   if "$docker_cli" exec "$postgres_container" \
@@ -163,17 +171,40 @@ repeat_ledger_count="$(psql_query 'SELECT count(*) FROM "__EFMigrationsHistory";
 [ "$repeat_ledger_count" = "$ledger_count" ] ||
   fail "The migration bundle is not idempotent: ledger moved from $ledger_count to $repeat_ledger_count."
 
-# Serialization must not be bought by swallowing errors: forcing the newest
-# migration to be replayed over its own objects has to fail the bundle.
-replayed_migration="$(psql_query 'SELECT "MigrationId" FROM "__EFMigrationsHistory" ORDER BY "MigrationId" DESC LIMIT 1;')"
-[ -n "$replayed_migration" ] || fail "The newest applied migration could not be read."
-psql_query "DELETE FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" = '$replayed_migration';" >/dev/null
+# Serialization must not be bought by swallowing errors. The newest migration
+# may be data-only, so pin the oldest applied migration instead: it is the one
+# that creates the schema, and replaying it over the live objects is guaranteed
+# to collide. Every later ledger row goes with it so the replay starts there.
+if [ -z "$replay_migration" ]; then
+  replay_migration="$(psql_query 'SELECT "MigrationId" FROM "__EFMigrationsHistory" ORDER BY "MigrationId" ASC LIMIT 1;')"
+fi
+[ -n "$replay_migration" ] || fail "The oldest applied migration could not be read."
+
+replay_ledger_rows="$(psql_query "SELECT count(*) FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" >= '$replay_migration';")"
+[ "$replay_ledger_rows" != "0" ] ||
+  fail "The replay probe found no ledger row at or after $replay_migration."
+
+psql_query "DELETE FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" >= '$replay_migration';" >/dev/null
+
+"$docker_cli" logs "$postgres_container" \
+  > "$log_directory/postgres-before-replay.log" 2>&1 || true
+server_log_offset="$(wc -l < "$log_directory/postgres-before-replay.log" | tr -d '[:space:]')"
 
 replay_status=0
 run_bundle replay || replay_status=$?
 [ "$replay_status" -ne 0 ] ||
-  fail "Replaying $replayed_migration over existing objects must fail the migration bundle."
-grep --quiet "already exists" "$log_directory/replay.log" ||
-  fail "Replaying $replayed_migration must surface the underlying PostgreSQL error."
+  fail "Replaying $replay_migration over existing objects must fail the migration bundle."
+
+# The bundle normally prints the SQLSTATE itself. When it does not, fall back to
+# the server log written since the replay started; PostgreSQL runs with verbose
+# error output so each entry carries its SQLSTATE.
+if ! grep --extended-regexp --quiet "$duplicate_object_pattern" "$log_directory/replay.log"; then
+  "$docker_cli" logs "$postgres_container" \
+    > "$log_directory/postgres-after-replay.log" 2>&1 || true
+  tail -n "+$((server_log_offset + 1))" "$log_directory/postgres-after-replay.log" \
+    > "$log_directory/postgres-replay.log"
+  grep --extended-regexp --quiet "$duplicate_object_pattern" "$log_directory/postgres-replay.log" ||
+    fail "Replaying $replay_migration must report a duplicate object SQLSTATE ($duplicate_object_sqlstates); neither the bundle log nor the server log did."
+fi
 
 echo "Migration lock gate passed: $ledger_count migrations applied exactly once across $concurrency concurrent bundles."
