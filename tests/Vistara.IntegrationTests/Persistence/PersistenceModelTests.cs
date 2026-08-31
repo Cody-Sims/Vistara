@@ -57,6 +57,7 @@ public sealed class PersistenceModelTests
                 "jobs",
                 "local_credentials",
                 "local_identities",
+                "oidc_login_requests",
                 "outbox_messages",
                 "outbox_sequences",
                 "platform_bootstrap",

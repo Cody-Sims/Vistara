@@ -216,11 +216,21 @@ public sealed class ApiRuntimeCompositionTests
                 .Options;
         using var catalog = new AuthenticationCatalogDbContext(options);
 
-        Microsoft.EntityFrameworkCore.Metadata.IEntityType entity =
-            Assert.Single(catalog.Model.GetEntityTypes());
+        Dictionary<string, string[]> entities = catalog.Model.GetEntityTypes()
+            .ToDictionary(
+                entity => entity.ClrType.FullName!,
+                entity => entity.GetProperties()
+                    .Select(property => property.Name)
+                    .Order(StringComparer.Ordinal)
+                    .ToArray(),
+                StringComparer.Ordinal);
+
         Assert.Equal(
-            "Vistara.Persistence.Auth.AuthenticationRouteRow",
-            entity.ClrType.FullName);
+            [
+                "Vistara.Persistence.Auth.AuthenticationRouteRow",
+                "Vistara.Persistence.Model.OidcLoginRequestRow",
+            ],
+            entities.Keys.Order(StringComparer.Ordinal));
         Assert.Equal(
             [
                 "CreatedAtUtc",
@@ -230,10 +240,33 @@ public sealed class ApiRuntimeCompositionTests
                 "PrincipalId",
                 "RoutedTenantId",
             ],
-            entity.GetProperties()
-                .Select(property => property.Name)
-                .Order(StringComparer.Ordinal)
-                .ToArray());
+            entities["Vistara.Persistence.Auth.AuthenticationRouteRow"]);
+
+        // The in-flight OIDC login request is written before any tenant or user
+        // is resolved. It may therefore carry no tenant, user, or credential
+        // identity, and state/nonce/handle values only as digests.
+        string[] loginRequest =
+            entities["Vistara.Persistence.Model.OidcLoginRequestRow"];
+        Assert.Equal(
+            [
+                "CodeVerifier",
+                "ConsumedAtUtc",
+                "CreatedAtUtc",
+                "ExpiresAtUtc",
+                "HandleDigest",
+                "NonceDigest",
+                "ProviderId",
+                "RedirectUri",
+                "ReturnTo",
+                "StateDigest",
+            ],
+            loginRequest);
+        Assert.DoesNotContain(
+            loginRequest,
+            property =>
+                property.Contains("Tenant", StringComparison.Ordinal) ||
+                property.Contains("User", StringComparison.Ordinal) ||
+                property is "Nonce" or "State" or "Handle");
     }
 
     [Fact]
