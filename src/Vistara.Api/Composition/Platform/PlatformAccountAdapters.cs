@@ -7,6 +7,7 @@ using Vistara.Auth.Cookies;
 using Vistara.Domain.Common;
 using Vistara.Domain.Identity;
 using Vistara.Domain.Tenancy;
+using Vistara.Persistence.Auth;
 using Vistara.Persistence.Identity;
 using Vistara.Persistence.Tenancy;
 
@@ -133,6 +134,41 @@ internal sealed class PlatformBrowserSessionAdapter(
     {
         await RetireSessionAsync(sessionToken, cancellationToken);
         return sessionFactory.CreateDeletionCookie().ToSetCookieHeader();
+    }
+
+    public async ValueTask<string?> IssueAntiforgeryTokenAsync(
+        string? sessionToken,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionToken))
+        {
+            return null;
+        }
+
+        string digest = CookieTokenCryptography.ComputeDigest(sessionToken);
+        Guid? owner =
+            await sessionFactory.FindSessionTenantAsync(digest, cancellationToken);
+        if (owner is not { } tenantId)
+        {
+            return null;
+        }
+
+        RelationalAuthenticationStore store = sessionFactory.CreateStore(tenantId);
+        PersistedCookieSession? session =
+            await store.FindCookieSessionAsync(digest, cancellationToken);
+        if (session is null || session.RevokedAtUtc.HasValue)
+        {
+            return null;
+        }
+
+        string token = sessionFactory.CreateAntiforgeryToken();
+        bool rotated = await store.RotateCookieAntiforgeryAsync(
+            digest,
+            session.Version,
+            CookieTokenCryptography.ComputeDigest(token),
+            clock.UtcNow,
+            cancellationToken);
+        return rotated ? token : null;
     }
 
     public async ValueTask<Result<CurrentUserView>> DescribeAsync(

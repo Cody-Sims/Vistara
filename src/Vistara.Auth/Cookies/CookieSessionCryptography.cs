@@ -7,6 +7,20 @@ public sealed class CryptographicCookieTokenSource : ICookieTokenSource
     public void Fill(Span<byte> destination) => RandomNumberGenerator.Fill(destination);
 }
 
+/// <summary>
+/// Creates antiforgery tokens in the same shape as session tokens so a
+/// restored browser session can be handed a usable token without reissuing
+/// the session cookie.
+/// </summary>
+public static class CookieAntiforgeryTokenFactory
+{
+    public static string Create(ICookieTokenSource source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        return CookieTokenFormat.Create(source);
+    }
+}
+
 internal static class CookieTokenFormat
 {
     public const int TokenByteLength = 32;

@@ -37,7 +37,7 @@ public sealed class AccountEndpointContractTests
             .SelectMany(source => source.Endpoints)
             .OfType<RouteEndpoint>()
             .ToArray();
-        Assert.Equal(4, endpoints.Length);
+        Assert.Equal(6, endpoints.Length);
         foreach (string route in new[]
                  {
                      "/api/v1/auth/login",
@@ -56,12 +56,22 @@ public sealed class AccountEndpointContractTests
                 endpoint.Metadata.GetMetadata<HttpMethodMetadata>()!.HttpMethods);
         }
 
-        RouteEndpoint me = Assert.Single(
+        foreach (string guarded in new[] { "/api/v1/me", "/api/v1/me/preferences" })
+        {
+            Assert.All(
+                endpoints.Where(candidate =>
+                    candidate.RoutePattern.RawText == guarded),
+                candidate => Assert.Equal(
+                    AccountEndpointMapping.PolicyName,
+                    Assert.Single(
+                        candidate.Metadata.GetOrderedMetadata<IAuthorizeData>()).Policy));
+        }
+
+        Assert.Contains(
             endpoints,
-            candidate => candidate.RoutePattern.RawText == "/api/v1/me");
-        Assert.Equal(
-            AccountEndpointMapping.PolicyName,
-            Assert.Single(me.Metadata.GetOrderedMetadata<IAuthorizeData>()).Policy);
+            candidate => candidate.RoutePattern.RawText == "/api/v1/me/preferences" &&
+                candidate.Metadata.GetMetadata<HttpMethodMetadata>()!
+                    .HttpMethods.Contains("PATCH"));
     }
 
     [Fact]
@@ -208,6 +218,61 @@ public sealed class AccountEndpointContractTests
         Assert.Equal(
             "X-Vistara-CSRF",
             json.RootElement.GetProperty("csrfHeaderName").GetString());
+    }
+
+    [Fact]
+    public async Task Current_user_returns_a_fresh_antiforgery_token_for_a_cookie_session()
+    {
+        var sessions = new FakeBrowserSessionPort();
+
+        TestResponse response = await SendAsync(
+            "me",
+            sessions,
+            configure: context =>
+                context.Request.Headers.Cookie = $"{SessionCookie}=live-token");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("live-token", sessions.AntiforgeryRequestToken);
+        using JsonDocument json = JsonDocument.Parse(response.Body);
+        Assert.Equal(
+            "restored-csrf-token",
+            json.RootElement.GetProperty("csrfToken").GetString());
+    }
+
+    [Fact]
+    public async Task Current_user_omits_the_token_when_no_session_cookie_is_present()
+    {
+        var sessions = new FakeBrowserSessionPort();
+
+        TestResponse response = await SendAsync("me", sessions);
+
+        using JsonDocument json = JsonDocument.Parse(response.Body);
+        Assert.False(json.RootElement.TryGetProperty("csrfToken", out _));
+    }
+
+    [Fact]
+    public async Task Tenant_bound_credentials_never_receive_an_antiforgery_token()
+    {
+        var sessions = new FakeBrowserSessionPort();
+
+        TestResponse response = await SendAsync(
+            "me",
+            sessions,
+            principal: new ClaimsPrincipal(new ClaimsIdentity(
+                [
+                    new Claim("tenant_id", TenantId.ToString("D")),
+                    new Claim(ClaimTypes.NameIdentifier, UserId.ToString("D")),
+                    new Claim(ClaimTypes.Role, "TenantOwner"),
+                    new Claim("vistara_auth_kind", "ApiKey"),
+                ],
+                "test")),
+            configure: context =>
+                context.Request.Headers.Cookie = $"{SessionCookie}=live-token");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Null(sessions.AntiforgeryRequestToken);
+        using JsonDocument json = JsonDocument.Parse(response.Body);
+        Assert.False(json.RootElement.TryGetProperty("csrfToken", out _));
     }
 
     [Fact]
@@ -390,6 +455,8 @@ public sealed class AccountEndpointContractTests
 
         public string? LastLogoutToken { get; private set; }
 
+        public string? AntiforgeryRequestToken { get; private set; }
+
         public Result<BrowserSessionResult>? LoginResult { get; init; }
 
         public ValueTask<Result<BrowserSessionResult>> LoginAsync(
@@ -402,6 +469,15 @@ public sealed class AccountEndpointContractTests
                     View(),
                     $"{SessionCookie}=token; Path=/; Max-Age=1800; Secure; HttpOnly; SameSite=Lax",
                     "csrf-token")));
+        }
+
+        public ValueTask<string?> IssueAntiforgeryTokenAsync(
+            string? sessionToken,
+            CancellationToken cancellationToken)
+        {
+            AntiforgeryRequestToken = sessionToken;
+            return ValueTask.FromResult<string?>(
+                sessionToken is null ? null : "restored-csrf-token");
         }
 
         public ValueTask<string> LogoutAsync(

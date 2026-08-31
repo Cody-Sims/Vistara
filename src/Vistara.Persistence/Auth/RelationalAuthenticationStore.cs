@@ -354,6 +354,63 @@ public sealed class RelationalAuthenticationStore(
         }
     }
 
+    /// <summary>
+    /// Replaces only the antiforgery digest of a live session. The session
+    /// token and cookie are untouched, so a reloaded browser can obtain a
+    /// usable antiforgery token without signing in again.
+    /// </summary>
+    public async ValueTask<bool> RotateCookieAntiforgeryAsync(
+        string sessionTokenDigest,
+        long expectedVersion,
+        string antiforgeryTokenDigest,
+        DateTimeOffset rotatedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionTokenDigest);
+        ArgumentException.ThrowIfNullOrWhiteSpace(antiforgeryTokenDigest);
+        PersistedAuthenticationRoute? route = await FindRouteAsync(
+            AuthenticationRouteKinds.CookieSession,
+            CookieLookupDigest(sessionTokenDigest),
+            cancellationToken);
+        if (route is null)
+        {
+            return false;
+        }
+
+        TenantScopeGuard.EstablishOrValidate(_requestTenantScope, route.TenantId);
+        await using VistaraDbContext context =
+            _tenantContexts.Create(route.TenantId);
+        CookieSessionRow? current = await context.Set<CookieSessionRow>()
+            .SingleOrDefaultAsync(
+                row =>
+                    row.Id == route.CredentialId &&
+                    row.SessionTokenDigest == sessionTokenDigest,
+                cancellationToken);
+        if (current is null ||
+            current.RevokedAtUtc.HasValue ||
+            current.Version != expectedVersion)
+        {
+            return false;
+        }
+
+        current.AntiforgeryTokenDigest = antiforgeryTokenDigest;
+        current.LastSeenAtUtc = rotatedAtUtc > current.LastSeenAtUtc
+            ? rotatedAtUtc
+            : current.LastSeenAtUtc;
+        current.Version = checked(current.Version + 1);
+        context.Entry(current).Property(row => row.Version).OriginalValue =
+            expectedVersion;
+        try
+        {
+            await context.SaveChangesAsync(cancellationToken);
+            return true;
+        }
+        catch (DbUpdateException)
+        {
+            return false;
+        }
+    }
+
     public async ValueTask RevokeCookieSessionAsync(
         string sessionTokenDigest,
         DateTimeOffset revokedAtUtc,

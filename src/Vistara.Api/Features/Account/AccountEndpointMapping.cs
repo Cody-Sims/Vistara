@@ -44,6 +44,8 @@ public static class AccountServiceCollectionExtensions
             ILocalCredentialVerifier,
             PlatformLocalCredentialVerifier>();
         services.TryAddScoped<IBrowserSessionPort, PlatformBrowserSessionAdapter>();
+        services.TryAddScoped<RelationalUserPreferenceStore>();
+        services.TryAddScoped<IUserPreferencesPort, PlatformUserPreferencesAdapter>();
         services.TryAddScoped<
             IFirstOwnerProvisioningPort,
             PlatformFirstOwnerProvisioningAdapter>();
@@ -96,6 +98,24 @@ public static class AccountEndpointMapping
                         cancellationToken))
             .AllowAnonymous();
         endpoints.MapGet(
+                "/api/v1/me/preferences",
+                (HttpContext context, CancellationToken cancellationToken) =>
+                    UserPreferencesEndpoint.GetAsync(
+                        context,
+                        Authorization(context),
+                        Preferences(context),
+                        cancellationToken))
+            .RequireAuthorization(PolicyName);
+        endpoints.MapPatch(
+                "/api/v1/me/preferences",
+                (HttpContext context, CancellationToken cancellationToken) =>
+                    UserPreferencesEndpoint.PatchAsync(
+                        context,
+                        Authorization(context),
+                        Preferences(context),
+                        cancellationToken))
+            .RequireAuthorization(PolicyName);
+        endpoints.MapGet(
                 "/api/v1/me",
                 (HttpContext context, CancellationToken cancellationToken) =>
                     AccountEndpoint.GetCurrentUserAsync(
@@ -108,6 +128,12 @@ public static class AccountEndpointMapping
             .RequireAuthorization(PolicyName);
         return endpoints;
     }
+
+    private static IAccountAuthorizationPort Authorization(HttpContext context) =>
+        context.RequestServices.GetRequiredService<IAccountAuthorizationPort>();
+
+    private static IUserPreferencesPort Preferences(HttpContext context) =>
+        context.RequestServices.GetRequiredService<IUserPreferencesPort>();
 
     private static IBrowserSessionPort Sessions(HttpContext context) =>
         context.RequestServices.GetRequiredService<IBrowserSessionPort>();

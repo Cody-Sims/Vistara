@@ -124,6 +124,7 @@ public static class PersistenceServiceCollectionExtensions
         });
         services.AddScoped<RelationalAuthenticationStore>();
         services.AddScoped<Identity.RelationalIdentityCatalog>();
+        services.AddScoped<Identity.RelationalUserPreferenceStore>();
         services.TryAddScoped<
             Vistara.Application.Common.Auditing.IAuditWriter,
             Auditing.RelationalAuditWriter>();

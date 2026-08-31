@@ -38,6 +38,15 @@ public interface IBrowserSessionPort
         BrowserLoginCommand command,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Issues a fresh antiforgery token for a live cookie session so a
+    /// reloaded browser can make unsafe requests without signing in again.
+    /// Returns <c>null</c> when the caller holds no live browser session.
+    /// </summary>
+    ValueTask<string?> IssueAntiforgeryTokenAsync(
+        string? sessionToken,
+        CancellationToken cancellationToken);
+
     /// <summary>Revokes the session and returns the deletion cookie header.</summary>
     ValueTask<string> LogoutAsync(
         string? sessionToken,

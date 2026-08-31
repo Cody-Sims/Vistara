@@ -21,7 +21,10 @@ public sealed record CurrentUserResponse(
     [property: JsonPropertyName("tenantId")] Guid? TenantId,
     [property: JsonPropertyName("role")] string? Role,
     [property: JsonPropertyName("tenants")] IReadOnlyList<CurrentUserTenantResponse> Tenants,
-    [property: JsonPropertyName("csrfHeaderName")] string CsrfHeaderName);
+    [property: JsonPropertyName("csrfHeaderName")] string CsrfHeaderName,
+    [property: JsonPropertyName("csrfToken")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? CsrfToken = null);
 
 public sealed record LoginResponse(
     [property: JsonPropertyName("user")] CurrentUserResponse User,
@@ -42,3 +45,11 @@ public sealed record ProvisionFirstOwnerResponse(
     [property: JsonPropertyName("email")] string Email,
     [property: JsonPropertyName("displayName")] string DisplayName,
     [property: JsonPropertyName("role")] string Role);
+
+public sealed record UserPreferencesResponse(
+    [property: JsonPropertyName("density")] string Density,
+    [property: JsonPropertyName("reducedMotion")] bool ReducedMotion,
+    [property: JsonPropertyName("screenReaderPagedMode")] bool ScreenReaderPagedMode,
+    [property: JsonPropertyName("locale")] string? Locale,
+    [property: JsonPropertyName("timeZone")] string? TimeZone,
+    [property: JsonPropertyName("version")] long Version);

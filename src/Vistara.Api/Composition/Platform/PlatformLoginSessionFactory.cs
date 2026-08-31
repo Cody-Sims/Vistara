@@ -41,6 +41,9 @@ internal sealed class PlatformLoginSessionFactory(
 
     internal BrowserCookie CreateDeletionCookie() => BrowserCookie.Delete(options);
 
+    internal string CreateAntiforgeryToken() =>
+        CookieAntiforgeryTokenFactory.Create(tokens);
+
     internal TenantScopedSessions Create(Guid tenantId)
     {
         RelationalAuthenticationStore store = CreateStore(tenantId);

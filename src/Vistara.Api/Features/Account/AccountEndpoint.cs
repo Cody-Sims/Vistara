@@ -148,10 +148,17 @@ public static class AccountEndpoint
             return;
         }
 
+        // A reloaded browser holds the session cookie but no antiforgery
+        // token, so a live cookie session is handed a fresh one here.
+        string? antiforgeryToken = actor.MayEnumerateOtherTenants
+            ? await sessions.IssueAntiforgeryTokenAsync(
+                ReadSessionToken(context, cookies),
+                cancellationToken)
+            : null;
         await WriteJsonAsync(
             context,
             StatusCodes.Status200OK,
-            Map(user, cookies),
+            Map(user, cookies, antiforgeryToken),
             cancellationToken);
     }
 
@@ -274,7 +281,8 @@ public static class AccountEndpoint
 
     private static CurrentUserResponse Map(
         CurrentUserView user,
-        CookieAuthOptions cookies) =>
+        CookieAuthOptions cookies,
+        string? antiforgeryToken = null) =>
         new(
             user.UserId,
             user.Email,
@@ -289,7 +297,8 @@ public static class AccountEndpoint
                     tenant.Role,
                     tenant.MembershipStatus))
                 .ToArray(),
-            cookies.AntiforgeryHeaderName);
+            cookies.AntiforgeryHeaderName,
+            antiforgeryToken);
 
     private static Task WriteInvalidCredentialsAsync(
         HttpContext context,

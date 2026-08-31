@@ -21,6 +21,8 @@ public sealed class IdentityCatalogDbContext(
 
     public DbSet<LocalCredentialRow> LocalCredentials => Set<LocalCredentialRow>();
 
+    public DbSet<UserPreferenceRow> UserPreferences => Set<UserPreferenceRow>();
+
     /// <summary>
     /// Tenant rows exposed only for the membership directory. PostgreSQL still
     /// enforces row-level security; the identity_directory policy grants the
@@ -57,6 +59,15 @@ public sealed class IdentityCatalogDbContext(
             entity.HasKey(row => row.LocalIdentityId);
             entity.HasIndex(row => row.UserId);
             entity.Property(row => row.PasswordHash).HasMaxLength(512);
+            entity.Property(row => row.Version).IsConcurrencyToken();
+        });
+        modelBuilder.Entity<UserPreferenceRow>(entity =>
+        {
+            entity.ToTable("user_preferences");
+            entity.HasKey(row => row.UserId);
+            entity.Property(row => row.Density).HasMaxLength(16);
+            entity.Property(row => row.Locale).HasMaxLength(35);
+            entity.Property(row => row.TimeZone).HasMaxLength(64);
             entity.Property(row => row.Version).IsConcurrencyToken();
         });
         modelBuilder.Entity<TenantRow>(entity =>
