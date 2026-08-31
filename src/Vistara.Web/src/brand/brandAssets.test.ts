@@ -54,7 +54,7 @@ describe('brand and installable assets', () => {
     };
 
     expect(manifest.name).toBe('Vistara');
-    expect(manifest.start_url).toBe('/');
+    expect(manifest.start_url).toBe('./');
     expect(manifest.display).toBe('standalone');
     expect(manifest.theme_color).toBe('#11110f');
     expect(manifest.background_color).toBe('#11110f');
@@ -74,14 +74,37 @@ describe('brand and installable assets', () => {
     }
   }, 60_000);
 
-  it('links the icons, manifest, and social preview from the document', () => {
-    expect(html).toContain('rel="manifest" href="/manifest.webmanifest"');
-    expect(html).toContain('href="/favicon.svg"');
-    expect(html).toContain('rel="apple-touch-icon"');
-    expect(html).toContain('property="og:image"');
-    expect(html).toContain('/social-preview.png');
-    expect(html).toContain('name="twitter:card"');
+  it('resolves every manifest reference relative to the manifest itself', () => {
+    const manifest = JSON.parse(
+      readPublic('manifest.webmanifest').toString('utf8'),
+    ) as {
+      start_url: string;
+      scope: string;
+      id?: string;
+      icons: { src: string }[];
+    };
+
+    expect(manifest.scope).toBe('./');
+    expect(manifest.id).toBeUndefined();
+    for (const reference of [
+      manifest.start_url,
+      manifest.scope,
+      ...manifest.icons.map((icon) => icon.src),
+    ]) {
+      expect(reference.startsWith('./')).toBe(true);
+    }
+  });
+
+  it('links the icons and manifest through the configured base', () => {
+    expect(html).toContain('rel="manifest" href="%BASE_URL%manifest.webmanifest"');
+    expect(html).toContain('href="%BASE_URL%favicon.svg"');
+    expect(html).toContain('href="%BASE_URL%apple-touch-icon.png"');
     expect(html).toContain('property="og:title"');
+  });
+
+  it('never ships an unresolvable preview image URL in the source document', () => {
+    expect(html).not.toContain('og:image');
+    expect(html).not.toContain('twitter:image');
   });
 
   it('keeps the scalable mark free of raster payloads', () => {

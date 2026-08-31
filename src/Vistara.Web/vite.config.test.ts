@@ -30,8 +30,50 @@ describe('Vite build artifacts', () => {
     ).toBe(productionIndex);
     expectReferencedAssetsToExist(production.root, production.build.outDir, production.base);
     expectReferencedAssetsToExist(pages.root, pages.build.outDir, pages.base);
+
+    for (const target of [production, pages]) {
+      expectInstallableAssets(target.root, target.build.outDir, target.base);
+    }
   }, 120_000);
 });
+
+function expectInstallableAssets(root: string, outDir: string, base: string) {
+  const artifactRoot = resolve(root, outDir);
+  const html = readFileSync(resolve(artifactRoot, 'index.html'), 'utf8');
+
+  for (const asset of [
+    'manifest.webmanifest',
+    'favicon.svg',
+    'favicon.ico',
+    'apple-touch-icon.png',
+    'icon-192.png',
+    'icon-512.png',
+    'icon-maskable-512.png',
+  ]) {
+    expect(existsSync(resolve(artifactRoot, asset))).toBe(true);
+  }
+
+  expect(html).toContain(`href="${base}manifest.webmanifest"`);
+  expect(html).toContain(`href="${base}favicon.svg"`);
+  expect(html).toContain(`href="${base}apple-touch-icon.png"`);
+  expect(html).not.toContain('%BASE_URL%');
+
+  // No deployment origin is configured for these builds, so no preview image
+  // URL may be advertised at all.
+  expect(html).not.toContain('og:image');
+
+  const manifest = JSON.parse(
+    readFileSync(resolve(artifactRoot, 'manifest.webmanifest'), 'utf8'),
+  ) as { start_url: string; scope: string; icons: { src: string }[] };
+  for (const reference of [
+    manifest.start_url,
+    manifest.scope,
+    ...manifest.icons.map((icon) => icon.src),
+  ]) {
+    expect(new URL(reference, `https://vistara.invalid${base}manifest.webmanifest`).pathname)
+      .toContain(base);
+  }
+}
 
 async function buildWithMode(mode: string) {
   await execFileAsync(process.execPath, [viteCli, 'build', '--mode', mode], {

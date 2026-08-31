@@ -327,24 +327,25 @@ export function buildBrandAssets() {
     render(1200, 630, socialShader(1200, 630), 2),
   );
 
+  // Every reference is relative to the manifest so the same file is valid at
+  // the root and under a sub-path such as the GitHub Pages preview.
   const manifest = {
     name: 'Vistara',
     short_name: 'Vistara',
     description:
       'Vistara, a self-hosted image control plane and responsive gallery.',
-    id: '/',
-    start_url: '/',
-    scope: '/',
+    start_url: './',
+    scope: './',
     display: 'standalone',
     orientation: 'any',
     background_color: '#11110f',
     theme_color: '#11110f',
     icons: [
-      { src: '/favicon.svg', sizes: 'any', type: 'image/svg+xml' },
-      { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
-      { src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
+      { src: './favicon.svg', sizes: 'any', type: 'image/svg+xml' },
+      { src: './icon-192.png', sizes: '192x192', type: 'image/png' },
+      { src: './icon-512.png', sizes: '512x512', type: 'image/png' },
       {
-        src: '/icon-maskable-512.png',
+        src: './icon-maskable-512.png',
         sizes: '512x512',
         type: 'image/png',
         purpose: 'maskable',
