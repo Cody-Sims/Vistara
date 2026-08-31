@@ -162,6 +162,22 @@ public static class AccountEndpoint
             cancellationToken);
     }
 
+    public static async Task DescribeSetupAsync(
+        HttpContext context,
+        IFirstOwnerProvisioningPort provisioning,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(provisioning);
+
+        await WriteJsonAsync(
+            context,
+            StatusCodes.Status200OK,
+            new SetupAvailabilityResponse(
+                await provisioning.IsAvailableAsync(cancellationToken)),
+            cancellationToken);
+    }
+
     public static async Task ProvisionFirstOwnerAsync(
         HttpContext context,
         IFirstOwnerProvisioningPort provisioning,

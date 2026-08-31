@@ -19,6 +19,25 @@ public sealed class FirstOwnerProvisioningTests
     ];
 
     [Fact]
+    public async Task Setup_availability_closes_once_an_owner_exists()
+    {
+        await using AccountSurfaceHarness harness =
+            await AccountSurfaceHarness.CreateAsync();
+
+        Assert.True(await IsAvailableAsync(harness));
+        _ = await harness.ProvisionAsync();
+        Assert.False(await IsAvailableAsync(harness));
+    }
+
+    private static async Task<bool> IsAvailableAsync(AccountSurfaceHarness harness)
+    {
+        await using AsyncServiceScope scope = harness.Services.CreateAsyncScope();
+        return await scope.ServiceProvider
+            .GetRequiredService<IFirstOwnerProvisioningPort>()
+            .IsAvailableAsync(default);
+    }
+
+    [Fact]
     public async Task Provisioning_commits_the_whole_owner_in_one_transaction()
     {
         await using AccountSurfaceHarness harness =

@@ -29,6 +29,7 @@ A composition root wires the whole surface with
 | `GET /api/v1/capabilities` | Deployment capabilities and configured limits | `ETag`, `304` |
 | `POST /api/v1/auth/login` | Local cookie sign-in; returns `csrfToken` | — |
 | `POST /api/v1/auth/logout` | Ends the session; always clears the cookie | — |
+| `GET /api/v1/setup` | Whether provisioning is still open (anonymous) | — |
 | `POST /api/v1/setup` | One-time first-owner provisioning | `409` once claimed |
 | `GET /api/v1/me` | Current principal, memberships, `csrfToken` | — |
 | `GET /api/v1/me/preferences` | Account preferences | `ETag` |
@@ -103,6 +104,21 @@ nothing is allowed. In `PATCH`, an absent quota member is unchanged and an
 explicit `null` clears the limit, so a retention-only patch can never turn an
 unlimited tenant into a blocked one. Quota members this release does not model
 are preserved verbatim.
+
+## First-run setup discovery
+
+`GET /api/v1/setup` is anonymous so a first-run client can link to the setup
+screen without attempting provisioning.
+
+```jsonc
+// GET /api/v1/setup      (anonymous)
+{ "available": true }     // false once an owner owns the bootstrap marker
+```
+
+Availability is read from the same database-enforced singleton marker that
+`POST /api/v1/setup` claims, so it can never disagree with the route it
+advertises. `false` is advisory only: the `POST` still answers
+`409 setup.already_provisioned` on its own.
 
 ## Antiforgery
 

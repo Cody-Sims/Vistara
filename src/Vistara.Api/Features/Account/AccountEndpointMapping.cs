@@ -88,6 +88,15 @@ public static class AccountEndpointMapping
                         Cookies(context),
                         cancellationToken))
             .AllowAnonymous();
+        endpoints.MapGet(
+                "/api/v1/setup",
+                (HttpContext context, CancellationToken cancellationToken) =>
+                    AccountEndpoint.DescribeSetupAsync(
+                        context,
+                        context.RequestServices
+                            .GetRequiredService<IFirstOwnerProvisioningPort>(),
+                        cancellationToken))
+            .AllowAnonymous();
         endpoints.MapPost(
                 "/api/v1/setup",
                 (HttpContext context, CancellationToken cancellationToken) =>

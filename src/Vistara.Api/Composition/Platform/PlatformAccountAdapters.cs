@@ -323,6 +323,12 @@ internal sealed class PlatformFirstOwnerProvisioningAdapter(
     IUuid7Generator ids,
     IClock clock) : IFirstOwnerProvisioningPort
 {
+    public ValueTask<bool> IsAvailableAsync(CancellationToken cancellationToken) =>
+        Negate(store.IsProvisionedAsync(cancellationToken));
+
+    private static async ValueTask<bool> Negate(ValueTask<bool> provisioned) =>
+        !await provisioned;
+
     public async ValueTask<Result<ProvisionedOwnerView>> ProvisionAsync(
         FirstOwnerProvisioningCommand command,
         CancellationToken cancellationToken)

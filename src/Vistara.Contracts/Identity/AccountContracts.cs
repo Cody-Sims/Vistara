@@ -30,6 +30,13 @@ public sealed record LoginResponse(
     [property: JsonPropertyName("user")] CurrentUserResponse User,
     [property: JsonPropertyName("csrfToken")] string CsrfToken);
 
+/// <summary>
+/// Whether first-owner provisioning is still open. Answered anonymously so a
+/// first-run client can link to setup without guessing.
+/// </summary>
+public sealed record SetupAvailabilityResponse(
+    [property: JsonPropertyName("available")] bool Available);
+
 public sealed record ProvisionFirstOwnerRequest(
     [property: JsonPropertyName("tenantSlug")] string? TenantSlug,
     [property: JsonPropertyName("tenantName")] string? TenantName,

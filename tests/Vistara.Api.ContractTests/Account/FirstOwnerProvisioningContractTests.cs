@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
@@ -116,6 +117,63 @@ public sealed class FirstOwnerProvisioningContractTests
         Assert.Null(provisioning.Command);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Setup_availability_is_readable_without_any_credential(
+        bool available)
+    {
+        var provisioning = new FakeProvisioningPort { Available = available };
+
+        TestResponse response = await DescribeAsync(provisioning);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("no-store", response.CacheControl);
+        using JsonDocument json = JsonDocument.Parse(response.Body);
+        Assert.Equal(
+            ["available"],
+            json.RootElement.EnumerateObject()
+                .Select(member => member.Name)
+                .ToArray());
+        Assert.Equal(available, json.RootElement.GetProperty("available").GetBoolean());
+    }
+
+    private static async Task<TestResponse> DescribeAsync(
+        IFirstOwnerProvisioningPort provisioning)
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.Services.AddSingleton(provisioning);
+        builder.Services.AddVistaraAccountSurface();
+        WebApplication app = builder.Build();
+        app.MapVistaraAccount();
+
+        RouteEndpoint endpoint = ((IEndpointRouteBuilder)app).DataSources
+            .SelectMany(source => source.Endpoints)
+            .OfType<RouteEndpoint>()
+            .Single(candidate =>
+                candidate.RoutePattern.RawText == "/api/v1/setup" &&
+                candidate.Metadata.GetMetadata<HttpMethodMetadata>()!
+                    .HttpMethods.Contains("GET"));
+        Assert.NotNull(endpoint.Metadata.GetMetadata<IAllowAnonymous>());
+        await using AsyncServiceScope scope = app.Services.CreateAsyncScope();
+        var context = new DefaultHttpContext
+        {
+            RequestServices = scope.ServiceProvider,
+        };
+        context.Request.Method = HttpMethods.Get;
+        context.Response.Body = new MemoryStream();
+
+        await endpoint.RequestDelegate!(context);
+        context.Response.Body.Position = 0;
+        string responseBody = await new StreamReader(context.Response.Body, Encoding.UTF8)
+            .ReadToEndAsync(CancellationToken.None);
+        return new TestResponse(
+            (HttpStatusCode)context.Response.StatusCode,
+            context.Response.Headers.CacheControl.ToString(),
+            context.Response.Headers.Location.ToString(),
+            responseBody);
+    }
+
     private static async Task<TestResponse> SendAsync(
         IFirstOwnerProvisioningPort provisioning,
         string body)
@@ -129,7 +187,10 @@ public sealed class FirstOwnerProvisioningContractTests
         RouteEndpoint endpoint = ((IEndpointRouteBuilder)app).DataSources
             .SelectMany(source => source.Endpoints)
             .OfType<RouteEndpoint>()
-            .Single(candidate => candidate.RoutePattern.RawText == "/api/v1/setup");
+            .Single(candidate =>
+                candidate.RoutePattern.RawText == "/api/v1/setup" &&
+                candidate.Metadata.GetMetadata<HttpMethodMetadata>()!
+                    .HttpMethods.Contains("POST"));
         await using AsyncServiceScope scope = app.Services.CreateAsyncScope();
         var context = new DefaultHttpContext
         {
@@ -162,6 +223,11 @@ public sealed class FirstOwnerProvisioningContractTests
         public FirstOwnerProvisioningCommand? Command { get; private set; }
 
         public Result<ProvisionedOwnerView>? Result { get; init; }
+
+        public bool Available { get; init; } = true;
+
+        public ValueTask<bool> IsAvailableAsync(CancellationToken cancellationToken) =>
+            ValueTask.FromResult(Available);
 
         public ValueTask<Result<ProvisionedOwnerView>> ProvisionAsync(
             FirstOwnerProvisioningCommand command,

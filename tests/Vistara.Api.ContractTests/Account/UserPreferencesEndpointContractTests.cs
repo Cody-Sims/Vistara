@@ -345,6 +345,9 @@ public sealed class UserPreferencesEndpointContractTests
 
     private sealed class UnusedProvisioningPort : IFirstOwnerProvisioningPort
     {
+        public ValueTask<bool> IsAvailableAsync(CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
         public ValueTask<Result<ProvisionedOwnerView>> ProvisionAsync(
             FirstOwnerProvisioningCommand command,
             CancellationToken cancellationToken) =>

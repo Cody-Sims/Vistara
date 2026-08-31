@@ -37,7 +37,7 @@ public sealed class AccountEndpointContractTests
             .SelectMany(source => source.Endpoints)
             .OfType<RouteEndpoint>()
             .ToArray();
-        Assert.Equal(6, endpoints.Length);
+        Assert.Equal(7, endpoints.Length);
         foreach (string route in new[]
                  {
                      "/api/v1/auth/login",
@@ -47,14 +47,22 @@ public sealed class AccountEndpointContractTests
         {
             RouteEndpoint endpoint = Assert.Single(
                 endpoints,
-                candidate => candidate.RoutePattern.RawText == route);
+                candidate => candidate.RoutePattern.RawText == route &&
+                    candidate.Metadata.GetMetadata<HttpMethodMetadata>()!
+                        .HttpMethods.Contains("POST"));
             Assert.Contains(
                 endpoint.Metadata.GetOrderedMetadata<IAllowAnonymous>(),
                 metadata => metadata is not null);
-            Assert.Contains(
-                "POST",
-                endpoint.Metadata.GetMetadata<HttpMethodMetadata>()!.HttpMethods);
         }
+
+        RouteEndpoint availability = Assert.Single(
+            endpoints,
+            candidate => candidate.RoutePattern.RawText == "/api/v1/setup" &&
+                candidate.Metadata.GetMetadata<HttpMethodMetadata>()!
+                    .HttpMethods.Contains("GET"));
+        Assert.Contains(
+            availability.Metadata.GetOrderedMetadata<IAllowAnonymous>(),
+            metadata => metadata is not null);
 
         foreach (string guarded in new[] { "/api/v1/me", "/api/v1/me/preferences" })
         {
@@ -433,6 +441,9 @@ public sealed class AccountEndpointContractTests
 
     private sealed class UnusedProvisioningPort : IFirstOwnerProvisioningPort
     {
+        public ValueTask<bool> IsAvailableAsync(CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
         public ValueTask<Result<ProvisionedOwnerView>> ProvisionAsync(
             FirstOwnerProvisioningCommand command,
             CancellationToken cancellationToken) =>

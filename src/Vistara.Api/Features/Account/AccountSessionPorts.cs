@@ -86,6 +86,12 @@ public sealed record ProvisionedOwnerView(
 /// </summary>
 public interface IFirstOwnerProvisioningPort
 {
+    /// <summary>
+    /// Reports whether provisioning is still open, so a first-run client can
+    /// offer the setup route without attempting it.
+    /// </summary>
+    ValueTask<bool> IsAvailableAsync(CancellationToken cancellationToken);
+
     ValueTask<Result<ProvisionedOwnerView>> ProvisionAsync(
         FirstOwnerProvisioningCommand command,
         CancellationToken cancellationToken);
