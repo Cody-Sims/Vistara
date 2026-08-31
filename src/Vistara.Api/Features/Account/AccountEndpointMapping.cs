@@ -8,14 +8,17 @@ using Vistara.Application.Common;
 using Vistara.Application.Identity;
 using Vistara.Application.Tenancy;
 using Vistara.Auth.Cookies;
+using Vistara.Persistence.Identity;
 
 namespace Vistara.Api.Features.Account;
 
 public static class AccountServiceCollectionExtensions
 {
     /// <summary>
-    /// Registers browser session, current-principal, and first-owner
-    /// provisioning defaults using try-add semantics.
+    /// Registers every dependency the browser session, current-principal, and
+    /// first-owner provisioning surface needs on top of
+    /// <c>AddVistaraPersistence</c>. Registrations use try-add semantics so a
+    /// composition root that already supplies a service keeps it.
     /// </summary>
     public static IServiceCollection AddVistaraAccountSurface(
         this IServiceCollection services)
@@ -25,11 +28,18 @@ public static class AccountServiceCollectionExtensions
         services.TryAddScoped<IAccountAuthorizationPort, ClaimsAccountAuthorizationPort>();
         services.TryAddSingleton<IClock>(SystemClock.Instance);
         services.TryAddSingleton<IUuid7Generator, Uuid7Generator>();
-        services.TryAddScoped<TenantFactory>();
-        services.TryAddScoped<IdentityFactory>();
+        services.TryAddSingleton(new CookieAuthOptions());
+        services.TryAddSingleton<ICookieTokenSource, CryptographicCookieTokenSource>();
         services.TryAddSingleton<ILocalPasswordHasher, Pbkdf2LocalPasswordHasher>();
         services.TryAddSingleton<DummyLocalPasswordVerifier>();
-        services.TryAddSingleton(new CookieAuthOptions());
+        services.TryAddSingleton<
+            IFirstOwnerProvisioningGuard,
+            NoOpFirstOwnerProvisioningGuard>();
+        services.TryAddScoped<TenantFactory>();
+        services.TryAddScoped<IdentityFactory>();
+        services.TryAddScoped<RelationalIdentityCatalog>();
+        services.TryAddScoped<RelationalFirstOwnerProvisioningStore>();
+        services.TryAddScoped<PlatformLoginSessionFactory>();
         services.TryAddScoped<
             ILocalCredentialVerifier,
             PlatformLocalCredentialVerifier>();
@@ -44,6 +54,14 @@ public static class AccountServiceCollectionExtensions
 public static class AccountEndpointMapping
 {
     public const string PolicyName = "Vistara.Account";
+
+    /// <summary>Routes that must remain reachable without any credential.</summary>
+    public static IReadOnlyList<string> AnonymousRoutes { get; } =
+    [
+        "/api/v1/auth/login",
+        "/api/v1/auth/logout",
+        "/api/v1/setup",
+    ];
 
     public static IEndpointRouteBuilder MapVistaraAccount(
         this IEndpointRouteBuilder endpoints)

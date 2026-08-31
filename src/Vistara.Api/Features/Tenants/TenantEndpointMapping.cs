@@ -28,6 +28,7 @@ public static class TenantServiceCollectionExtensions
         services.TryAddScoped<TenantFactory>();
         services.TryAddScoped<Vistara.Application.Identity.IdentityFactory>();
         services.TryAddScoped<RelationalTenantDirectory>();
+        services.TryAddScoped<Vistara.Persistence.Identity.RelationalIdentityCatalog>();
         services.TryAddScoped<ITenantDirectoryPort, PlatformTenantDirectoryAdapter>();
         return services;
     }

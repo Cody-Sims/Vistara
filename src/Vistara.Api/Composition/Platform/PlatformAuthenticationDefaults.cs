@@ -17,11 +17,24 @@ public static class PlatformAuthenticationDefaults
 
 public static class PlatformAuthenticationSelector
 {
+    /// <summary>
+    /// Bootstrap routes that must authenticate anonymously. A browser can
+    /// legitimately hold a stale, revoked, or wrong-tenant session cookie while
+    /// signing in, signing out, or provisioning the first owner, and that
+    /// cookie must never turn those requests into a challenge.
+    /// </summary>
+    private static readonly string[] AnonymousBootstrapPaths =
+    [
+        "/api/v1/auth/login",
+        "/api/v1/auth/logout",
+        "/api/v1/setup",
+    ];
+
     public static string Select(HttpRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        if (IsPublicMediaRequest(request))
+        if (IsPublicMediaRequest(request) || IsAnonymousBootstrapRequest(request))
         {
             return PlatformAuthenticationDefaults.AnonymousScheme;
         }
@@ -55,6 +68,11 @@ public static class PlatformAuthenticationSelector
             ? PlatformAuthenticationDefaults.CookieScheme
             : PlatformAuthenticationDefaults.AnonymousScheme;
     }
+
+    internal static bool IsAnonymousBootstrapRequest(HttpRequest request) =>
+        HttpMethods.IsPost(request.Method) &&
+        AnonymousBootstrapPaths.Any(path =>
+            request.Path.Equals(path, StringComparison.OrdinalIgnoreCase));
 
     private static bool IsPublicMediaRequest(HttpRequest request) =>
         (HttpMethods.IsGet(request.Method) || HttpMethods.IsHead(request.Method)) &&
