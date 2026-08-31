@@ -90,3 +90,14 @@
   --shadow-overlay: 0 1.25rem 3.5rem rgb(50 48 42 / 22%);
   --shadow-panel: 0 1.5rem 4rem rgb(50 48 42 / 14%);
 }
+
+:root[data-density="compact"] {
+  --space-3: 0.5rem;
+  --space-4: 0.75rem;
+  --space-5: 0.9rem;
+  --space-6: 1.1rem;
+  --space-7: 1.25rem;
+  --space-8: 1.4rem;
+  --space-9: 1.75rem;
+  --space-10: 2rem;
+}

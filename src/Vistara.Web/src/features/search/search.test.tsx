@@ -1,7 +1,8 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resetPreferences, setPreferences } from '../../app/preferences';
 import { VistaraApiError } from '../../api/generated/client';
 import type { AssetSummary, CursorPage } from '../../api/generated';
 import { SearchView, type SearchClient } from './SearchView';
@@ -64,6 +65,11 @@ function renderSearch(listAssets: ListAssets, entry = '/search?q=harbour') {
   render(<RouterProvider router={router} />);
   return router;
 }
+
+afterEach(() => {
+  resetPreferences();
+  localStorage.clear();
+});
 
 describe('search', () => {
   it('invites a first search without calling the API', () => {
@@ -189,5 +195,50 @@ describe('search', () => {
     renderSearch(listAssets, '/search?q=harbour');
 
     expect(await screen.findByRole('status')).toHaveTextContent('Searching');
+  });
+
+  it('pages through results instead of appending in paged reading mode', async () => {
+    const user = userEvent.setup();
+    setPreferences({ screenReaderPagedMode: true });
+    const listAssets = vi
+      .fn<ListAssets>()
+      .mockResolvedValueOnce(page([asset('a1', 'Harbour lights')], 'cursor-2'))
+      .mockResolvedValueOnce(page([asset('a2', 'Harbour dawn')]))
+      .mockResolvedValueOnce(page([asset('a1', 'Harbour lights')], 'cursor-2'));
+    renderSearch(listAssets, '/search?q=harbour');
+
+    expect(
+      await screen.findByRole('link', { name: /Harbour lights/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Show more results' }),
+    ).not.toBeInTheDocument();
+
+    const pages = screen.getByRole('navigation', { name: 'Result pages' });
+    expect(
+      within(pages).getByRole('button', { name: 'Previous page' }),
+    ).toBeDisabled();
+
+    await user.click(within(pages).getByRole('button', { name: 'Next page' }));
+
+    expect(
+      await screen.findByRole('link', { name: /Harbour dawn/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('link', { name: /Harbour lights/ }),
+    ).not.toBeInTheDocument();
+    expect(listAssets).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cursor: 'cursor-2' }),
+    );
+    expect(screen.getByRole('status')).toHaveTextContent('Page 2');
+
+    await user.click(
+      within(pages).getByRole('button', { name: 'Previous page' }),
+    );
+
+    expect(
+      await screen.findByRole('link', { name: /Harbour lights/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Page 1');
   });
 });

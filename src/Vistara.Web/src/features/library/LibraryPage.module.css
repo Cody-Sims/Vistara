@@ -313,3 +313,16 @@
     min-inline-size: 2.75rem;
   }
 }
+
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin-block-start: var(--space-4);
+}
+
+.pager [role="status"] {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}

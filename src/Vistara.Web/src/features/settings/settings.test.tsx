@@ -1,30 +1,17 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { VistaraApiError } from '../../api/generated/client';
-import type { SessionSnapshot } from '../../api/platform';
+import type {
+  ApiKeyCollection,
+  CreatedApiKey,
+  TenantCollection,
+} from '../../api/platform';
+import { resetPreferences } from '../../app/preferences';
 import { SessionProvider } from '../session';
+import { currentUser } from '../session/sessionTestData';
 import { SettingsPage } from './SettingsPage';
-
-const session: SessionSnapshot = {
-  user: {
-    id: 'user-1',
-    displayName: 'Ada Lovelace',
-    email: 'ada@example.test',
-    platformAdmin: false,
-  },
-  memberships: [
-    {
-      tenantId: 'tenant-1',
-      tenantName: 'Studio',
-      role: 'TenantAdmin',
-      status: 'active',
-    },
-  ],
-  activeTenantId: 'tenant-1',
-  preferences: { theme: 'system', density: 'comfortable', locale: 'en-US' },
-};
 
 function apiError(status: number) {
   return new VistaraApiError(status, {
@@ -36,23 +23,86 @@ function apiError(status: number) {
   });
 }
 
+const tenants: TenantCollection = {
+  items: [
+    {
+      id: 'tenant-a',
+      slug: 'studio',
+      name: 'Studio',
+      status: 'Active',
+      role: 'TenantAdmin',
+      membershipStatus: 'Active',
+      joinedAt: '2026-01-01T00:00:00Z',
+    },
+    {
+      id: 'tenant-b',
+      slug: 'annex',
+      name: 'Annex',
+      status: 'Active',
+      role: 'Viewer',
+      membershipStatus: 'Active',
+    },
+  ],
+};
+
+const keys: ApiKeyCollection = {
+  items: [
+    {
+      id: 'key-1',
+      prefix: 'vst_abc',
+      ownerId: 'user-1',
+      scopes: ['assets.read'],
+      status: 'Active',
+      createdAt: '2026-01-01T00:00:00Z',
+    },
+  ],
+};
+
+const created: CreatedApiKey = {
+  key: {
+    id: 'key-2',
+    prefix: 'vst_def',
+    ownerId: 'user-1',
+    scopes: ['assets.read'],
+    status: 'Active',
+    createdAt: '2026-02-01T00:00:00Z',
+  },
+  secret: 'vst_def_secret-value',
+};
+
 afterEach(() => {
+  resetPreferences();
   localStorage.clear();
   document.documentElement.removeAttribute('data-theme');
+  for (const attribute of ['density', 'reducedMotion', 'pagedMode']) {
+    delete document.documentElement.dataset[attribute];
+  }
 });
 
 function renderSettings(
-  updatePreferences: () => Promise<SessionSnapshot> = async () => session,
+  overrides: {
+    listTenants?: () => Promise<TenantCollection>;
+    listApiKeys?: () => Promise<ApiKeyCollection>;
+    createApiKey?: () => Promise<CreatedApiKey>;
+    revokeApiKey?: () => Promise<void>;
+    role?: 'Member' | 'TenantAdmin';
+  } = {},
 ) {
   const client = {
-    getSession: vi.fn(async () => session),
-    login: vi.fn(async () => session),
+    getSession: vi.fn(async () =>
+      currentUser({}, overrides.role ?? 'TenantAdmin'),
+    ),
+    login: vi.fn(),
     logout: vi.fn(async () => undefined),
-    updatePreferences: vi.fn(updatePreferences),
+    listTenants: vi.fn(overrides.listTenants ?? (async () => tenants)),
+    listApiKeys: vi.fn(overrides.listApiKeys ?? (async () => keys)),
+    createApiKey: vi.fn(overrides.createApiKey ?? (async () => created)),
+    revokeApiKey: vi.fn(overrides.revokeApiKey ?? (async () => undefined)),
   };
-  const router = createMemoryRouter([{ path: '*', element: <SettingsPage /> }], {
-    initialEntries: ['/settings'],
-  });
+  const router = createMemoryRouter(
+    [{ path: '*', element: <SettingsPage client={client} /> }],
+    { initialEntries: ['/settings'] },
+  );
 
   render(
     <SessionProvider client={client}>
@@ -63,83 +113,15 @@ function renderSettings(
   return client;
 }
 
-describe('settings', () => {
-  it('describes the signed-in account and workspace role', async () => {
+describe('settings: account', () => {
+  it('describes the signed-in account and its workspace role', async () => {
     renderSettings();
 
     expect(
       await screen.findByRole('heading', { name: 'Settings' }),
     ).toBeInTheDocument();
     expect(screen.getByText('ada@example.test')).toBeInTheDocument();
-    expect(screen.getByText('Studio')).toBeInTheDocument();
     expect(screen.getByText('Administrator')).toBeInTheDocument();
-  });
-
-  it('applies and remembers the chosen appearance', async () => {
-    const user = userEvent.setup();
-    renderSettings();
-
-    await user.click(await screen.findByRole('radio', { name: 'Light' }));
-
-    expect(document.documentElement).toHaveAttribute('data-theme', 'light');
-    expect(localStorage.getItem('vistara:theme')).toBe('light');
-    expect(screen.getByRole('radio', { name: 'Light' })).toBeChecked();
-  });
-
-  it('saves reading preferences and confirms the result', async () => {
-    const user = userEvent.setup();
-    const client = renderSettings();
-
-    await user.click(await screen.findByRole('radio', { name: 'Compact' }));
-    await user.click(screen.getByLabelText('Reduce motion'));
-    await user.click(screen.getByRole('button', { name: 'Save preferences' }));
-
-    await waitFor(() =>
-      expect(client.updatePreferences).toHaveBeenCalledWith({
-        density: 'compact',
-        locale: 'en-US',
-        reducedMotion: true,
-        screenReaderPagedMode: false,
-      }),
-    );
-    expect(
-      await screen.findByText('Preferences saved.'),
-    ).toBeInTheDocument();
-  });
-
-  it('keeps the edits and offers another attempt when saving fails', async () => {
-    const user = userEvent.setup();
-    renderSettings(async () => {
-      throw apiError(503);
-    });
-
-    await user.click(await screen.findByRole('radio', { name: 'Compact' }));
-    await user.click(screen.getByRole('button', { name: 'Save preferences' }));
-
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Preferences could not be saved',
-    );
-    expect(screen.getByRole('radio', { name: 'Compact' })).toBeChecked();
-    expect(
-      screen.getByRole('button', { name: 'Save preferences' }),
-    ).toBeEnabled();
-  });
-
-  it('explains a conflicting update from another device', async () => {
-    const user = userEvent.setup();
-    renderSettings(async () => {
-      throw apiError(409);
-    });
-
-    await user.click(await screen.findByRole('radio', { name: 'Compact' }));
-    await user.click(screen.getByRole('button', { name: 'Save preferences' }));
-
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'changed somewhere else',
-    );
-    expect(
-      screen.getByRole('button', { name: 'Reload preferences' }),
-    ).toBeInTheDocument();
   });
 
   it('signs out from the account section', async () => {
@@ -149,5 +131,124 @@ describe('settings', () => {
     await user.click(await screen.findByRole('button', { name: 'Sign out' }));
 
     expect(client.logout).toHaveBeenCalledTimes(1);
+  });
+
+  it('lists the workspaces the account belongs to', async () => {
+    renderSettings();
+
+    const workspaces = await screen.findByRole('list', { name: 'Workspaces' });
+    expect(within(workspaces).getByText('Studio')).toBeInTheDocument();
+    expect(within(workspaces).getByText('Annex')).toBeInTheDocument();
+    expect(within(workspaces).getByText('Signed in here')).toBeInTheDocument();
+  });
+});
+
+describe('settings: device preferences', () => {
+  it('applies and remembers the chosen appearance', async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole('radio', { name: 'Light' }));
+
+    expect(document.documentElement).toHaveAttribute('data-theme', 'light');
+    expect(localStorage.getItem('vistara:theme')).toBe('light');
+  });
+
+  it('applies density to the document immediately', async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole('radio', { name: 'Compact' }));
+
+    expect(document.documentElement.dataset.density).toBe('compact');
+    expect(localStorage.getItem('vistara:preferences')).toContain('compact');
+  });
+
+  it('applies reduced motion and paged reading mode to the document', async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByLabelText('Reduce motion'));
+    await user.click(screen.getByLabelText('Paged library and search'));
+
+    expect(document.documentElement.dataset.reducedMotion).toBe('true');
+    expect(document.documentElement.dataset.pagedMode).toBe('true');
+  });
+
+  it('says where the preferences are stored', async () => {
+    renderSettings();
+
+    expect(
+      await screen.findAllByText(/stored on this device/i),
+    ).not.toHaveLength(0);
+  });
+});
+
+describe('settings: API keys', () => {
+  it('lists existing keys without ever showing a secret', async () => {
+    renderSettings();
+
+    const list = await screen.findByRole('list', { name: 'API keys' });
+    expect(within(list).getByText('vst_abc')).toBeInTheDocument();
+    expect(within(list).queryByText(/secret/i)).not.toBeInTheDocument();
+  });
+
+  it('creates a key and reveals the secret exactly once', async () => {
+    const user = userEvent.setup();
+    const client = renderSettings();
+
+    await screen.findByRole('list', { name: 'API keys' });
+    await user.type(screen.getByLabelText('Scopes'), 'assets.read');
+    await user.click(screen.getByRole('button', { name: 'Create API key' }));
+
+    expect(await screen.findByText('vst_def_secret-value')).toBeInTheDocument();
+    expect(client.createApiKey).toHaveBeenCalledWith({
+      scopes: ['assets.read'],
+    });
+
+    await user.click(screen.getByRole('button', { name: 'I saved the secret' }));
+
+    expect(screen.queryByText('vst_def_secret-value')).not.toBeInTheDocument();
+  });
+
+  it('revokes a key after the change is confirmed', async () => {
+    const user = userEvent.setup();
+    const client = renderSettings();
+
+    await screen.findByRole('list', { name: 'API keys' });
+    await user.click(screen.getByRole('button', { name: 'Revoke vst_abc' }));
+    await user.click(screen.getByRole('button', { name: 'Revoke key' }));
+
+    await waitFor(() => expect(client.revokeApiKey).toHaveBeenCalledWith('key-1'));
+    expect(client.listApiKeys).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the list when a key cannot be created', async () => {
+    const user = userEvent.setup();
+    renderSettings({
+      createApiKey: async () => {
+        throw apiError(403);
+      },
+    });
+
+    await screen.findByRole('list', { name: 'API keys' });
+    await user.click(screen.getByRole('button', { name: 'Create API key' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'could not be created',
+    );
+    expect(screen.getByText('vst_abc')).toBeInTheDocument();
+  });
+
+  it('explains when keys cannot be read', async () => {
+    renderSettings({
+      listApiKeys: async () => {
+        throw apiError(403);
+      },
+    });
+
+    expect(
+      await screen.findByText(/API keys could not be read/i),
+    ).toBeInTheDocument();
   });
 });

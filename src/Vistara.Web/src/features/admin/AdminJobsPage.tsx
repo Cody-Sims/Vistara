@@ -1,205 +1,162 @@
-import { useCallback, useState } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import type {
-  AdminJob,
-  AdminJobPage,
-  JobState,
-  PlatformApiClient,
-} from '../../api/platform';
-import {
-  AdminEmpty,
-  AdminFailure,
-  AdminLoading,
-  AdminPage,
-} from './AdminPage';
+import { VistaraApiError } from '../../api/generated/client';
+import type { JobStatus, PlatformApiClient } from '../../api/platform';
+import { AdminPage, AdminPendingContract } from './AdminPage';
 import { formatMoment } from './format';
-import { useAdminResource } from './useAdminResource';
 import styles from './admin.module.css';
 
-export type AdminJobsClient = Pick<
-  PlatformApiClient,
-  'listAdminJobs' | 'retryJob' | 'cancelJob'
->;
+export type AdminJobsClient = Pick<PlatformApiClient, 'getJob'>;
 
 interface AdminJobsPageProps {
   readonly client: AdminJobsClient;
 }
 
-const filters: readonly { value: string; label: string }[] = [
-  { value: '', label: 'All jobs' },
-  { value: 'queued', label: 'Queued' },
-  { value: 'running', label: 'Running' },
-  { value: 'failed', label: 'Failed' },
-  { value: 'dead', label: 'Needs attention' },
-];
+type LookupState =
+  | { readonly kind: 'idle' }
+  | { readonly kind: 'loading' }
+  | { readonly kind: 'ready'; readonly job: JobStatus }
+  | { readonly kind: 'failed'; readonly message: string };
 
-const jobStates = new Set<JobState>([
-  'queued',
-  'running',
-  'succeeded',
-  'failed',
-  'dead',
-  'cancelled',
-]);
-
-const stateLabels: Record<JobState, string> = {
-  queued: 'Queued',
-  running: 'Running',
-  succeeded: 'Succeeded',
-  failed: 'Failed',
-  dead: 'Needs attention',
-  cancelled: 'Cancelled',
-};
+async function runLookup(
+  client: AdminJobsClient,
+  jobId: string,
+): Promise<LookupState> {
+  try {
+    return { kind: 'ready', job: await client.getJob(jobId) };
+  } catch (error) {
+    return {
+      kind: 'failed',
+      message:
+        error instanceof VistaraApiError && error.status === 404
+          ? 'No job with that identifier is visible to this workspace.'
+          : 'The job could not be read. Background work continues on the server.',
+    };
+  }
+}
 
 export function AdminJobsPage({ client }: AdminJobsPageProps) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const rawState = searchParams.get('state') ?? '';
-  const selected = jobStates.has(rawState as JobState)
-    ? (rawState as JobState)
-    : '';
-
-  const load = useCallback(
-    () =>
-      client.listAdminJobs({
-        limit: 50,
-        ...(selected ? { states: [selected] } : {}),
-      }),
-    [client, selected],
+  const requested = (searchParams.get('job') ?? '').trim();
+  const [draft, setDraft] = useState(requested);
+  const [tracked, setTracked] = useState(requested);
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState<LookupState>(() =>
+    requested ? { kind: 'loading' } : { kind: 'idle' },
   );
-  const { state, reload, refresh } = useAdminResource<AdminJobPage>(load);
-  const [pending, setPending] = useState<string>();
-  const [failure, setFailure] = useState('');
-  const [confirmation, setConfirmation] = useState('');
 
-  async function act(job: AdminJob, action: 'retry' | 'cancel') {
-    setPending(job.id);
-    setFailure('');
-    setConfirmation('');
+  if (tracked !== requested) {
+    setTracked(requested);
+    setDraft(requested);
+    setState(requested ? { kind: 'loading' } : { kind: 'idle' });
+  }
 
-    try {
-      if (action === 'retry') {
-        await client.retryJob(job.id);
-        setConfirmation(`The ${job.kind} job was queued again.`);
-      } else {
-        await client.cancelJob(job.id);
-        setConfirmation(`The ${job.kind} job was cancelled.`);
+  useEffect(() => {
+    if (!requested) {
+      return;
+    }
+
+    let active = true;
+    void runLookup(client, requested).then((next) => {
+      if (active) {
+        setState(next);
       }
+    });
 
-      await refresh();
-    } catch {
-      setFailure(
-        action === 'retry'
-          ? `The ${job.kind} job could not be retried. The queue is unchanged.`
-          : `The ${job.kind} job could not be cancelled. The queue is unchanged.`,
-      );
-    } finally {
-      setPending(undefined);
+    return () => {
+      active = false;
+    };
+  }, [attempt, client, requested]);
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const jobId = draft.trim();
+    const next = new URLSearchParams(searchParams);
+    if (jobId) {
+      next.set('job', jobId);
+    } else {
+      next.delete('job');
+    }
+
+    setSearchParams(next);
+    if (jobId && jobId === requested) {
+      setState({ kind: 'loading' });
+      setAttempt((value) => value + 1);
     }
   }
 
   return (
     <AdminPage
       title="Jobs"
-      description="Background work for derivatives, purges, and maintenance. Failures stay listed until they are retried or cancelled."
-      toolbar={
-        <div className={styles.filterField}>
-          <label htmlFor="jobs-state">Show jobs</label>
-          <select
-            className={styles.control}
-            id="jobs-state"
-            value={selected}
-            onChange={(event) => {
-              const next = new URLSearchParams(searchParams);
-              if (event.target.value) {
-                next.set('state', event.target.value);
-              } else {
-                next.delete('state');
-              }
-              setSearchParams(next);
-            }}
-          >
-            {filters.map((filter) => (
-              <option key={filter.value} value={filter.value}>
-                {filter.label}
-              </option>
-            ))}
-          </select>
-        </div>
-      }
+      description="Read the state of a background job by its identifier. Job identifiers appear in upload results, share operations, and problem details."
     >
+      <form className={styles.form} onSubmit={submit}>
+        <fieldset className={styles.fieldset}>
+          <legend>Job lookup</legend>
+          <div className={styles.field}>
+            <label htmlFor="job-id">Job identifier</label>
+            <input
+              autoComplete="off"
+              className={styles.control}
+              id="job-id"
+              name="job"
+              type="search"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+            />
+          </div>
+          <div className={styles.formActions}>
+            <button className={styles.primaryButton} type="submit">
+              Look up job
+            </button>
+          </div>
+        </fieldset>
+      </form>
+
       <p className={styles.announce} role="status" aria-live="polite">
-        {state.kind === 'loading' ? 'Loading jobs…' : confirmation}
+        {state.kind === 'loading' ? 'Reading the job…' : ''}
       </p>
 
-      {state.kind === 'loading' ? <AdminLoading label="Loading jobs…" /> : null}
-
       {state.kind === 'failed' ? (
-        <AdminFailure
-          title="Jobs are unavailable"
-          description="The queue could not be read. Background work continues on the server."
-          onRetry={reload}
-        />
-      ) : null}
-
-      {failure ? (
         <p className={styles.alert} role="alert">
-          {failure}
+          {state.message}
         </p>
       ) : null}
 
-      {state.kind === 'ready' && state.value.items.length === 0 ? (
-        <AdminEmpty>No jobs match this filter right now.</AdminEmpty>
+      {state.kind === 'ready' ? (
+        <div className={styles.row}>
+          <div className={styles.rowMain}>
+            <span className={styles.primaryCell}>{state.job.type}</span>
+            <span className={styles.badge} data-status={state.job.state}>
+              {state.job.state}
+            </span>
+            <span className={styles.secondaryCell}>
+              Created {formatMoment(state.job.createdAt)} · attempt{' '}
+              {state.job.attempts} of {state.job.maxAttempts} · next attempt{' '}
+              {formatMoment(state.job.availableAt)}
+            </span>
+            {state.job.completedAt ? (
+              <span className={styles.secondaryCell}>
+                Completed {formatMoment(state.job.completedAt)}
+              </span>
+            ) : null}
+            {state.job.failure ? (
+              <span className={styles.rowError}>
+                <code>{state.job.failure.code}</code>
+                <span>{state.job.failure.summary}</span>
+              </span>
+            ) : null}
+          </div>
+        </div>
       ) : null}
 
-      {state.kind === 'ready' && state.value.items.length > 0 ? (
-        <ul className={styles.rows} aria-label="Background jobs">
-          {state.value.items.map((job) => (
-            <li className={styles.row} key={job.id}>
-              <div className={styles.rowMain}>
-                <span className={styles.primaryCell}>{job.kind}</span>
-                <span className={styles.badge} data-status={job.state}>
-                  {stateLabels[job.state]}
-                </span>
-                <span className={styles.secondaryCell}>
-                  Queued {formatMoment(job.queuedAt)}
-                  {job.attempts === undefined
-                    ? ''
-                    : ` · attempt ${job.attempts}${
-                        job.maxAttempts ? ` of ${job.maxAttempts}` : ''
-                      }`}
-                </span>
-                {job.lastError ? (
-                  <span className={styles.rowError}>{job.lastError}</span>
-                ) : null}
-              </div>
-              <div className={styles.rowActions}>
-                {job.state === 'failed' || job.state === 'dead' ? (
-                  <button
-                    aria-label={`Retry ${job.kind} job`}
-                    className={styles.secondaryButton}
-                    disabled={pending === job.id}
-                    type="button"
-                    onClick={() => void act(job, 'retry')}
-                  >
-                    {pending === job.id ? 'Working…' : 'Retry'}
-                  </button>
-                ) : null}
-                {job.state === 'queued' || job.state === 'running' ? (
-                  <button
-                    aria-label={`Cancel ${job.kind} job`}
-                    className={styles.secondaryButton}
-                    disabled={pending === job.id}
-                    type="button"
-                    onClick={() => void act(job, 'cancel')}
-                  >
-                    {pending === job.id ? 'Working…' : 'Cancel'}
-                  </button>
-                ) : null}
-              </div>
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      <AdminPendingContract
+        title="Queue view, retry, and cancel"
+        description="One job can be read by identifier. Listing the queue and acting on a job need a collection and two versioned operator routes."
+        contract={
+          'GET /api/v1/jobs?states=Failed&states=Dead&type=…&limit=…&cursor=… → { items: JobStatus[], nextCursor? }; POST /api/v1/jobs/{jobId}/retry and /cancel with If-Match: "v{version}"'
+        }
+      />
     </AdminPage>
   );
 }

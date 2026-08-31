@@ -1,4 +1,4 @@
-export { AdminAuditPage, type AdminAuditClient } from './AdminAuditPage';
+export { AdminAuditPage } from './AdminAuditPage';
 export { AdminJobsPage, type AdminJobsClient } from './AdminJobsPage';
 export {
   AdminPoliciesPage,

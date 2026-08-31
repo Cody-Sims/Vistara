@@ -1,42 +1,32 @@
 import { useCallback } from 'react';
-import type { PlatformApiClient, StorageOverview } from '../../api/platform';
+import type { Capabilities, PlatformApiClient } from '../../api/platform';
+import { useRemoteResource } from '../../app/useRemoteResource';
 import {
-  AdminEmpty,
   AdminFailure,
   AdminLoading,
   AdminPage,
+  AdminPendingContract,
 } from './AdminPage';
-import { formatBytes, formatMoment } from './format';
-import { useAdminResource } from './useAdminResource';
+import { formatBytes } from './format';
 import styles from './admin.module.css';
 
-export type AdminStorageClient = Pick<PlatformApiClient, 'getStorageOverview'>;
+export type AdminStorageClient = Pick<PlatformApiClient, 'getCapabilities'>;
 
 interface AdminStoragePageProps {
   readonly client: AdminStorageClient;
 }
 
-const statusLabels = {
-  healthy: 'Healthy',
-  degraded: 'Degraded',
-  unavailable: 'Unavailable',
-} as const;
-
-const kindLabels = {
-  filesystem: 'Local filesystem',
-  s3: 'S3-compatible',
-  azure: 'Azure Blob Storage',
-  gcs: 'Google Cloud Storage',
-} as const;
-
 export function AdminStoragePage({ client }: AdminStoragePageProps) {
-  const load = useCallback(() => client.getStorageOverview(), [client]);
-  const { state, reload } = useAdminResource<StorageOverview>(load);
+  const load = useCallback(
+    () => client.getCapabilities(),
+    [client],
+  );
+  const { state, reload } = useRemoteResource<Capabilities>(load);
 
   return (
     <AdminPage
       title="Storage"
-      description="Where originals, derivatives, and in-flight uploads live, and how much room is left."
+      description="How this deployment stores originals and derivatives, and the limits it enforces on every upload."
       toolbar={
         <button
           className={styles.secondaryButton}
@@ -48,17 +38,17 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
       }
     >
       <p className={styles.announce} role="status" aria-live="polite">
-        {state.kind === 'loading' ? 'Loading storage usage…' : ''}
+        {state.kind === 'loading' ? 'Loading storage configuration…' : ''}
       </p>
 
       {state.kind === 'loading' ? (
-        <AdminLoading label="Loading storage usage…" shape="card" />
+        <AdminLoading label="Loading storage configuration…" shape="card" />
       ) : null}
 
       {state.kind === 'failed' ? (
         <AdminFailure
           title="Storage is unavailable"
-          description="Usage could not be read. Stored images are unaffected."
+          description="The capability document could not be read. Stored images are unaffected."
           onRetry={reload}
         />
       ) : null}
@@ -67,84 +57,86 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
         <>
           <dl className={styles.summary}>
             <div>
-              <dt>Originals</dt>
-              <dd>{formatBytes(state.value.originalBytes)}</dd>
+              <dt>Storage provider</dt>
+              <dd>{state.value.storage.provider}</dd>
             </div>
             <div>
-              <dt>Derivatives</dt>
-              <dd>{formatBytes(state.value.derivativeBytes)}</dd>
+              <dt>Database</dt>
+              <dd>{state.value.database.provider}</dd>
             </div>
             <div>
-              <dt>Staging</dt>
-              <dd>{formatBytes(state.value.stagingBytes)}</dd>
+              <dt>Largest object</dt>
+              <dd>{formatBytes(state.value.storage.maxObjectBytes)}</dd>
             </div>
-            {state.value.quotaBytes ? (
-              <div>
-                <dt>Quota</dt>
-                <dd>{formatBytes(state.value.quotaBytes)}</dd>
-              </div>
-            ) : null}
+            <div>
+              <dt>Largest upload</dt>
+              <dd>{formatBytes(state.value.upload.maxBytes)}</dd>
+            </div>
           </dl>
 
-          {state.value.buckets.length === 0 ? (
-            <AdminEmpty>No storage buckets are configured yet.</AdminEmpty>
-          ) : (
-            <ul className={styles.cards} aria-label="Storage buckets">
-              {state.value.buckets.map((bucket) => {
-                const share = bucket.quotaBytes
-                  ? Math.min(
-                      100,
-                      Math.round((bucket.usedBytes / bucket.quotaBytes) * 100),
-                    )
-                  : undefined;
-
-                return (
-                  <li className={styles.card} key={bucket.id}>
-                    <div className={styles.cardHeader}>
-                      <h2>{bucket.id}</h2>
-                      <span
-                        className={styles.badge}
-                        data-status={bucket.status}
-                      >
-                        {statusLabels[bucket.status]}
-                      </span>
-                    </div>
-                    <p className={styles.cardMeta}>{kindLabels[bucket.kind]}</p>
-                    <p className={styles.cardFigure}>
-                      {formatBytes(bucket.usedBytes)}
-                      {bucket.quotaBytes ? (
-                        <span className={styles.cardMeta}>
-                          {' '}
-                          of {formatBytes(bucket.quotaBytes)}
-                        </span>
-                      ) : null}
-                    </p>
-                    {share === undefined ? null : (
-                      <div
-                        className={styles.meter}
-                        role="meter"
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                        aria-valuenow={share}
-                        aria-label={`${bucket.id} quota used`}
-                      >
-                        <span style={{ inlineSize: `${share}%` }} />
-                      </div>
-                    )}
-                    <p className={styles.cardMeta}>
-                      {new Intl.NumberFormat().format(bucket.objectCount)}{' '}
-                      objects · checked {formatMoment(bucket.lastCheckedAt)}
-                    </p>
-                    {bucket.message ? (
-                      <p className={styles.cardNotice}>{bucket.message}</p>
-                    ) : null}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
+          <ul className={styles.cards} aria-label="Storage behaviour">
+            <li className={styles.card}>
+              <div className={styles.cardHeader}>
+                <h2>Transfer</h2>
+              </div>
+              <p className={styles.cardMeta}>
+                Direct uploads {state.value.storage.directUpload ? 'on' : 'off'}{' '}
+                · multipart{' '}
+                {state.value.storage.multipartUpload ? 'on' : 'off'} · range
+                reads {state.value.storage.rangeReads ? 'on' : 'off'}
+              </p>
+              <p className={styles.cardMeta}>
+                Multipart parts between{' '}
+                {formatBytes(state.value.storage.minMultipartPartBytes)} and{' '}
+                {formatBytes(state.value.storage.maxMultipartPartBytes)}, up to{' '}
+                {new Intl.NumberFormat().format(
+                  state.value.storage.maxMultipartParts,
+                )}{' '}
+                parts
+              </p>
+            </li>
+            <li className={styles.card}>
+              <div className={styles.cardHeader}>
+                <h2>Imaging</h2>
+              </div>
+              <p className={styles.cardMeta}>
+                {state.value.imaging.provider} · accepts{' '}
+                {state.value.imaging.inputFormats.join(', ')} · writes{' '}
+                {state.value.imaging.outputFormats.join(', ')}
+              </p>
+              <p className={styles.cardMeta}>
+                Up to {state.value.imaging.maxWidth}×
+                {state.value.imaging.maxHeight} and{' '}
+                {formatBytes(state.value.imaging.maxEncodedBytes)} encoded
+              </p>
+            </li>
+            <li className={styles.card}>
+              <div className={styles.cardHeader}>
+                <h2>Concurrency</h2>
+              </div>
+              <p className={styles.cardMeta}>
+                {state.value.upload.concurrencyUnlimited
+                  ? 'Unlimited concurrent uploads'
+                  : `${state.value.upload.maxConcurrentUploads} concurrent uploads`}{' '}
+                · {state.value.imaging.maxConcurrentTransforms} concurrent
+                transforms
+              </p>
+              <p className={styles.cardMeta}>
+                Multipart above{' '}
+                {formatBytes(state.value.upload.multipartThresholdBytes)}
+              </p>
+            </li>
+          </ul>
         </>
       ) : null}
+
+      <AdminPendingContract
+        title="Consumption and bucket health"
+        description="The capability document describes configured limits, not how much room is left. Usage, object counts, and bucket health need their own route."
+        contract={
+          'GET /api/v1/admin/storage → { buckets: [{ id, kind, status, usedBytes, quotaBytes, objectCount, lastCheckedAt, message }], originalBytes, derivativeBytes, stagingBytes, quotaBytes, pendingUploadBytes }'
+        }
+      />
     </AdminPage>
   );
 }

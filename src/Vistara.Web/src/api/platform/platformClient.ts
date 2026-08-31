@@ -1,39 +1,34 @@
 import {
   VistaraApiError,
   type ApiClientOptions,
-  type ApiResponse,
 } from '../generated/client';
-import type { ApiProblemDetails, EntityTag } from '../generated/models';
+import type { ApiProblemDetails } from '../generated/models';
 import type {
-  AdminJob,
-  AdminJobPage,
-  AdminJobQuery,
-  AdminUser,
-  AdminUserPage,
-  AdminUserQuery,
-  AuditEventPage,
-  AuditQuery,
+  ApiKeyCollection,
   Capabilities,
+  CreateApiKeyRequest,
+  CreatedApiKey,
+  CurrentUser,
+  InviteTenantMemberRequest,
+  JobStatus,
   LoginRequest,
-  PolicySettings,
-  SessionSnapshot,
-  StorageOverview,
-  UpdateAdminUserRequest,
-  UpdatePolicySettingsRequest,
-  UpdatePreferencesRequest,
+  LoginResponse,
+  TenantCollection,
+  TenantMember,
+  TenantMemberCollection,
 } from './models';
 
-export interface VersionedRequestOptions {
-  readonly ifMatch: EntityTag;
-}
+/** Header the platform uses until `GET /api/v1/me` names another one. */
+const defaultAntiforgeryHeader = 'X-Vistara-CSRF';
 
 /**
- * Typed boundary for the session, account, and platform administration routes
- * described in the specification. Gallery resources use the generated client.
+ * Typed boundary for the account, tenant, API key, capability, and job routes
+ * published by the API. Gallery resources use the generated client.
  */
 export class PlatformApiClient {
   readonly #baseUrl: string;
   readonly #fetch: typeof fetch;
+  #antiforgeryHeader = defaultAntiforgeryHeader;
   #antiforgeryToken = '';
 
   public constructor(options: ApiClientOptions = {}) {
@@ -41,135 +36,97 @@ export class PlatformApiClient {
     this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
   }
 
-  public get antiforgeryToken(): string {
-    return this.#antiforgeryToken;
+  public get antiforgeryHeaderName(): string {
+    return this.#antiforgeryHeader;
   }
 
-  public async getSession(): Promise<SessionSnapshot> {
-    const response = await this.#request<SessionSnapshot>('GET', '/api/v1/me');
-    return this.#adoptSession(response.data);
+  public async getSession(): Promise<CurrentUser> {
+    const user = await this.#request<CurrentUser>('GET', '/api/v1/me');
+    this.#adoptHeaderName(user.csrfHeaderName);
+    return user;
   }
 
-  public async login(request: LoginRequest): Promise<SessionSnapshot> {
-    const response = await this.#request<SessionSnapshot>(
+  public async login(request: LoginRequest): Promise<LoginResponse> {
+    const session = await this.#request<LoginResponse>(
       'POST',
       '/api/v1/auth/login',
       { body: request },
     );
-    return this.#adoptSession(response.data);
+
+    this.#adoptHeaderName(session.user.csrfHeaderName);
+    this.#antiforgeryToken = session.csrfToken;
+    return session;
   }
 
   public async logout(): Promise<void> {
-    await this.#request<void>('POST', '/api/v1/auth/logout');
-    this.#antiforgeryToken = '';
+    try {
+      await this.#request<void>('POST', '/api/v1/auth/logout');
+    } finally {
+      this.#antiforgeryToken = '';
+    }
   }
 
-  public async getCapabilities(): Promise<Capabilities> {
-    const response = await this.#request<Capabilities>(
+  public getCapabilities(): Promise<Capabilities> {
+    return this.#request<Capabilities>('GET', '/api/v1/capabilities');
+  }
+
+  public listTenants(): Promise<TenantCollection> {
+    return this.#request<TenantCollection>('GET', '/api/v1/tenants');
+  }
+
+  public listTenantMembers(tenantId: string): Promise<TenantMemberCollection> {
+    return this.#request<TenantMemberCollection>(
       'GET',
-      '/api/v1/capabilities',
+      `/api/v1/tenants/${segment(tenantId)}/members`,
     );
-    return response.data;
   }
 
-  public async updatePreferences(
-    request: UpdatePreferencesRequest,
-  ): Promise<SessionSnapshot> {
-    const response = await this.#request<SessionSnapshot>(
-      'PATCH',
-      '/api/v1/me/preferences',
+  public inviteTenantMember(
+    tenantId: string,
+    request: InviteTenantMemberRequest,
+  ): Promise<TenantMember> {
+    return this.#request<TenantMember>(
+      'POST',
+      `/api/v1/tenants/${segment(tenantId)}/members`,
       { body: request },
     );
-    return this.#adoptSession(response.data);
   }
 
-  public listAdminUsers(query: AdminUserQuery = {}) {
-    return this.#request<AdminUserPage>(
-      'GET',
-      appendQuery('/api/v1/admin/users', query),
-    );
+  public listApiKeys(): Promise<ApiKeyCollection> {
+    return this.#request<ApiKeyCollection>('GET', '/api/v1/api-keys');
   }
 
-  public updateAdminUser(
-    id: string,
-    request: UpdateAdminUserRequest,
-    options: VersionedRequestOptions,
-  ) {
-    return this.#request<AdminUser>(
-      'PATCH',
-      `/api/v1/admin/users/${segment(id)}`,
-      { body: request, ifMatch: options.ifMatch },
-    );
-  }
-
-  public getStorageOverview() {
-    return this.#request<StorageOverview>('GET', '/api/v1/admin/storage');
-  }
-
-  public listAdminJobs(query: AdminJobQuery = {}) {
-    return this.#request<AdminJobPage>(
-      'GET',
-      appendQuery('/api/v1/admin/jobs', query),
-    );
-  }
-
-  public retryJob(id: string) {
-    return this.#request<AdminJob>(
-      'POST',
-      `/api/v1/admin/jobs/${segment(id)}/retry`,
-    );
-  }
-
-  public cancelJob(id: string) {
-    return this.#request<AdminJob>(
-      'POST',
-      `/api/v1/admin/jobs/${segment(id)}/cancel`,
-    );
-  }
-
-  public getPolicies() {
-    return this.#request<PolicySettings>('GET', '/api/v1/admin/policies');
-  }
-
-  public updatePolicies(
-    request: UpdatePolicySettingsRequest,
-    options: VersionedRequestOptions,
-  ) {
-    return this.#request<PolicySettings>('PATCH', '/api/v1/admin/policies', {
+  public createApiKey(request: CreateApiKeyRequest): Promise<CreatedApiKey> {
+    return this.#request<CreatedApiKey>('POST', '/api/v1/api-keys', {
       body: request,
-      ifMatch: options.ifMatch,
     });
   }
 
-  public listAuditEvents(query: AuditQuery = {}) {
-    return this.#request<AuditEventPage>(
-      'GET',
-      appendQuery('/api/v1/admin/audit', query),
+  public revokeApiKey(keyId: string): Promise<void> {
+    return this.#request<void>(
+      'DELETE',
+      `/api/v1/api-keys/${segment(keyId)}`,
     );
   }
 
-  #adoptSession(session: SessionSnapshot): SessionSnapshot {
-    if (session.antiforgeryToken) {
-      this.#antiforgeryToken = session.antiforgeryToken;
-    }
+  public getJob(jobId: string): Promise<JobStatus> {
+    return this.#request<JobStatus>('GET', `/api/v1/jobs/${segment(jobId)}`);
+  }
 
-    return session;
+  #adoptHeaderName(name: string | undefined) {
+    if (name && /^[\w-]+$/.test(name)) {
+      this.#antiforgeryHeader = name;
+    }
   }
 
   async #request<T>(
     method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
     path: string,
-    options: { body?: unknown; ifMatch?: EntityTag } = {},
-  ): Promise<ApiResponse<T>> {
-    const headers = new Headers();
-    if (method !== 'GET') {
-      headers.set('Accept', 'application/json');
-      if (this.#antiforgeryToken) {
-        headers.set('X-CSRF-TOKEN', this.#antiforgeryToken);
-      }
-    }
-    if (options.ifMatch) {
-      headers.set('If-Match', options.ifMatch);
+    options: { body?: unknown } = {},
+  ): Promise<T> {
+    const headers = new Headers({ Accept: 'application/json' });
+    if (method !== 'GET' && this.#antiforgeryToken) {
+      headers.set(this.#antiforgeryHeader, this.#antiforgeryToken);
     }
     if (options.body !== undefined) {
       headers.set('Content-Type', 'application/json');
@@ -187,12 +144,9 @@ export class PlatformApiClient {
       throw new VistaraApiError(response.status, await readProblem(response));
     }
 
-    const etag = response.headers.get('ETag') as EntityTag | null;
-    const data =
-      response.status === 204
-        ? (undefined as T)
-        : ((await response.json()) as T);
-    return etag === null ? { data } : { data, etag };
+    return response.status === 204
+      ? (undefined as T)
+      : ((await response.json()) as T);
   }
 }
 
@@ -208,27 +162,6 @@ async function readProblem(response: Response): Promise<ApiProblemDetails> {
       errors: {},
     };
   }
-}
-
-function appendQuery(path: string, query: object): string {
-  const parameters = new URLSearchParams();
-  for (const [name, value] of Object.entries(query)) {
-    if (value === undefined || value === null || value === '') {
-      continue;
-    }
-
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        parameters.append(name, String(item));
-      }
-      continue;
-    }
-
-    parameters.set(name, String(value));
-  }
-
-  const encoded = parameters.toString();
-  return encoded.length === 0 ? path : `${path}?${encoded}`;
 }
 
 function segment(value: string): string {

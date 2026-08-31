@@ -8,35 +8,14 @@ import {
 } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import { VistaraApiError } from '../../api/generated/client';
-import type { SessionSnapshot, TenantRole } from '../../api/platform';
+import type { CurrentUser } from '../../api/platform';
 import {
   RequireAdministration,
   RequireSession,
   SessionProvider,
   useSession,
 } from './index';
-
-function snapshot(role: TenantRole, platformAdmin = false): SessionSnapshot {
-  return {
-    user: {
-      id: 'user-1',
-      displayName: 'Ada Lovelace',
-      email: 'ada@example.test',
-      platformAdmin,
-    },
-    memberships: [
-      {
-        tenantId: 'tenant-1',
-        tenantName: 'Studio',
-        role,
-        status: 'active',
-      },
-    ],
-    activeTenantId: 'tenant-1',
-    preferences: { theme: 'system' },
-    antiforgeryToken: 'token-1',
-  };
-}
+import { currentUser } from './sessionTestData';
 
 function apiError(status: number) {
   return new VistaraApiError(status, {
@@ -48,24 +27,24 @@ function apiError(status: number) {
   });
 }
 
-function fakeClient(overrides: Partial<SessionClientDouble> = {}) {
-  return {
-    getSession: vi.fn(async () => snapshot('Member')),
-    login: vi.fn(async () => snapshot('Member')),
-    logout: vi.fn(async () => undefined),
-    updatePreferences: vi.fn(async () => snapshot('Member')),
-    ...overrides,
-  };
+interface SessionClientDouble {
+  getSession: () => Promise<CurrentUser>;
+  login: (request: {
+    login: string;
+    password: string;
+  }) => Promise<{ user: CurrentUser; csrfToken: string }>;
+  logout: () => Promise<void>;
 }
 
-interface SessionClientDouble {
-  getSession: () => Promise<SessionSnapshot>;
-  login: (request: {
-    email: string;
-    password: string;
-  }) => Promise<SessionSnapshot>;
-  logout: () => Promise<void>;
-  updatePreferences: (request: object) => Promise<SessionSnapshot>;
+function fakeClient(
+  overrides: Partial<SessionClientDouble> = {},
+): SessionClientDouble & { logout: ReturnType<typeof vi.fn> } {
+  return {
+    getSession: vi.fn(async () => currentUser()),
+    login: vi.fn(async () => ({ user: currentUser(), csrfToken: 'token-1' })),
+    logout: vi.fn(async () => undefined),
+    ...overrides,
+  } as SessionClientDouble & { logout: ReturnType<typeof vi.fn> };
 }
 
 function SessionProbe() {
@@ -84,26 +63,6 @@ function SessionProbe() {
   );
 }
 
-function renderWithSession(
-  ui: React.ReactNode,
-  client: SessionClientDouble,
-  initialEntries = ['/settings'],
-) {
-  const router = createMemoryRouter(
-    [
-      { path: '/login', element: <LoginProbe /> },
-      { path: '*', element: ui },
-    ],
-    { initialEntries },
-  );
-
-  return render(
-    <SessionProvider client={client}>
-      <RouterProvider router={router} />
-    </SessionProvider>,
-  );
-}
-
 function LoginProbe() {
   const location = useLocation();
   return (
@@ -114,11 +73,30 @@ function LoginProbe() {
   );
 }
 
+function renderWithSession(
+  ui: React.ReactNode,
+  client: SessionClientDouble,
+  initialEntries = ['/settings'],
+  onSessionEnd?: () => void | Promise<void>,
+) {
+  const router = createMemoryRouter(
+    [
+      { path: '/login', element: <LoginProbe /> },
+      { path: '*', element: ui },
+    ],
+    { initialEntries },
+  );
+
+  return render(
+    <SessionProvider client={client} onSessionEnd={onSessionEnd}>
+      <RouterProvider router={router} />
+    </SessionProvider>,
+  );
+}
+
 describe('session provider', () => {
   it('resolves the signed-in account from the session route', async () => {
-    const client = fakeClient();
-
-    renderWithSession(<SessionProbe />, client);
+    renderWithSession(<SessionProbe />, fakeClient());
 
     expect(screen.getByTestId('status')).toHaveTextContent('loading');
     await waitFor(() =>
@@ -128,13 +106,14 @@ describe('session provider', () => {
   });
 
   it('treats an unauthenticated session as anonymous rather than an error', async () => {
-    const client = fakeClient({
-      getSession: vi.fn(async () => {
-        throw apiError(401);
+    renderWithSession(
+      <SessionProbe />,
+      fakeClient({
+        getSession: vi.fn(async () => {
+          throw apiError(401);
+        }),
       }),
-    });
-
-    renderWithSession(<SessionProbe />, client);
+    );
 
     await waitFor(() =>
       expect(screen.getByTestId('status')).toHaveTextContent('anonymous'),
@@ -143,13 +122,12 @@ describe('session provider', () => {
 
   it('reports an unavailable session and recovers when retried', async () => {
     const getSession = vi
-      .fn<() => Promise<SessionSnapshot>>()
+      .fn<() => Promise<CurrentUser>>()
       .mockRejectedValueOnce(apiError(503))
-      .mockResolvedValueOnce(snapshot('Member'));
-    const client = fakeClient({ getSession });
+      .mockResolvedValueOnce(currentUser());
     const user = userEvent.setup();
 
-    renderWithSession(<SessionProbe />, client);
+    renderWithSession(<SessionProbe />, fakeClient({ getSession }));
 
     await waitFor(() =>
       expect(screen.getByTestId('status')).toHaveTextContent('error'),
@@ -178,21 +156,45 @@ describe('session provider', () => {
     );
     expect(client.logout).toHaveBeenCalledTimes(1);
   });
+
+  it('clears account data even when the sign-out request fails', async () => {
+    const cleared = vi.fn();
+    const user = userEvent.setup();
+
+    renderWithSession(
+      <SessionProbe />,
+      fakeClient({
+        logout: vi.fn(async () => {
+          throw apiError(503);
+        }),
+      }),
+      ['/settings'],
+      cleared,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('authenticated'),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('anonymous'),
+    );
+    expect(cleared).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('session guards', () => {
   it('sends anonymous visitors to sign in and remembers the destination', async () => {
-    const client = fakeClient({
-      getSession: vi.fn(async () => {
-        throw apiError(401);
-      }),
-    });
-
     renderWithSession(
       <RequireSession>
         <h1>Settings</h1>
       </RequireSession>,
-      client,
+      fakeClient({
+        getSession: vi.fn(async () => {
+          throw apiError(401);
+        }),
+      }),
       ['/settings?tab=account'],
     );
 
@@ -205,15 +207,13 @@ describe('session guards', () => {
   });
 
   it('shows an accessible pending state while the session resolves', () => {
-    const client = fakeClient({
-      getSession: vi.fn(() => new Promise<SessionSnapshot>(() => {})),
-    });
-
     renderWithSession(
       <RequireSession>
         <h1>Settings</h1>
       </RequireSession>,
-      client,
+      fakeClient({
+        getSession: vi.fn(() => new Promise<CurrentUser>(() => {})),
+      }),
     );
 
     expect(screen.getByRole('status')).toHaveTextContent(
@@ -223,9 +223,9 @@ describe('session guards', () => {
 
   it('offers a retry when the session cannot be checked', async () => {
     const getSession = vi
-      .fn<() => Promise<SessionSnapshot>>()
+      .fn<() => Promise<CurrentUser>>()
       .mockRejectedValueOnce(apiError(500))
-      .mockResolvedValueOnce(snapshot('Member'));
+      .mockResolvedValueOnce(currentUser());
     const user = userEvent.setup();
 
     renderWithSession(
@@ -263,17 +263,56 @@ describe('session guards', () => {
     ).toHaveAttribute('href', '/library');
   });
 
-  it('admits tenant administrators and platform administrators', async () => {
+  it('admits an administrator of the active tenant', async () => {
     renderWithSession(
       <RequireAdministration>
         <h1>People</h1>
       </RequireAdministration>,
-      fakeClient({ getSession: vi.fn(async () => snapshot('TenantAdmin')) }),
+      fakeClient({
+        getSession: vi.fn(async () => currentUser({}, 'TenantAdmin')),
+      }),
       ['/admin/users'],
     );
 
     expect(
       await screen.findByRole('heading', { name: 'People' }),
+    ).toBeInTheDocument();
+  });
+
+  it('refuses administration borrowed from another tenant', async () => {
+    renderWithSession(
+      <RequireAdministration>
+        <h1>People</h1>
+      </RequireAdministration>,
+      fakeClient({
+        getSession: vi.fn(async () =>
+          currentUser({
+            tenantId: 'tenant-b',
+            role: 'Member',
+            tenants: [
+              {
+                id: 'tenant-a',
+                slug: 'studio',
+                name: 'Studio',
+                role: 'TenantOwner',
+                membershipStatus: 'Active',
+              },
+              {
+                id: 'tenant-b',
+                slug: 'annex',
+                name: 'Annex',
+                role: 'Member',
+                membershipStatus: 'Active',
+              },
+            ],
+          }),
+        ),
+      }),
+      ['/admin/users'],
+    );
+
+    expect(
+      await screen.findByRole('heading', { name: 'Administration unavailable' }),
     ).toBeInTheDocument();
   });
 

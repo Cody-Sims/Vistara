@@ -1,7 +1,13 @@
+export {
+  accountScopedDatabases,
+  accountScopedStoragePrefix,
+  clearAccountScopedData,
+  type AccountDataStores,
+} from './accountData';
 export { RequireAdministration, RequireSession } from './guards';
-export { LoginPage, type CapabilitiesClient } from './LoginPage';
-export { safeDestination } from './safeDestination';
+export { LoginPage } from './LoginPage';
 export { activeMembership, canAdminister, describeRole } from './roles';
+export { safeDestination } from './safeDestination';
 export { SessionProvider, type SessionClient } from './SessionProvider';
 export {
   SessionContext,

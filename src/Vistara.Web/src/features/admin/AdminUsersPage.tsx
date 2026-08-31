@@ -1,98 +1,90 @@
-import { useCallback, useState } from 'react';
-import { VistaraApiError } from '../../api/generated/client';
+import { useCallback, useState, type FormEvent } from 'react';
+import { isStateConflict } from '../../api/versionTag';
 import type {
-  AdminUser,
-  AdminUserPage,
-  MembershipStatus,
   PlatformApiClient,
+  TenantMemberCollection,
   TenantRole,
 } from '../../api/platform';
+import { describeRole } from '../session';
 import {
   AdminEmpty,
   AdminFailure,
   AdminLoading,
   AdminPage,
+  AdminPendingContract,
 } from './AdminPage';
 import { formatMoment } from './format';
-import { useAdminResource } from './useAdminResource';
 import styles from './admin.module.css';
+import { useRemoteResource } from '../../app/useRemoteResource';
 
 export type AdminUsersClient = Pick<
   PlatformApiClient,
-  'listAdminUsers' | 'updateAdminUser'
+  'listTenantMembers' | 'inviteTenantMember'
 >;
 
 interface AdminUsersPageProps {
   readonly client: AdminUsersClient;
+  /** The tenant the session is scoped to; members are never read across tenants. */
+  readonly tenantId: string;
 }
 
-const roles: readonly { value: TenantRole; label: string }[] = [
-  { value: 'TenantOwner', label: 'Owner' },
-  { value: 'TenantAdmin', label: 'Administrator' },
-  { value: 'Member', label: 'Member' },
-  { value: 'Viewer', label: 'Viewer' },
+const invitableRoles: readonly TenantRole[] = [
+  'TenantAdmin',
+  'Member',
+  'Viewer',
 ];
 
-const statusLabels: Record<MembershipStatus, string> = {
-  active: 'Active',
-  invited: 'Invited',
-  suspended: 'Suspended',
+const statusLabels: Record<string, string> = {
+  Active: 'Active',
+  Invited: 'Invited',
+  Suspended: 'Suspended',
+  Removed: 'Removed',
 };
 
-const roleArticles: Record<TenantRole, string> = {
-  TenantOwner: 'an owner',
-  TenantAdmin: 'an administrator',
-  Member: 'a member',
-  Viewer: 'a viewer',
-};
-
-export function AdminUsersPage({ client }: AdminUsersPageProps) {
+export function AdminUsersPage({ client, tenantId }: AdminUsersPageProps) {
   const load = useCallback(
-    () => client.listAdminUsers({ limit: 100 }),
-    [client],
+    () => client.listTenantMembers(tenantId),
+    [client, tenantId],
   );
-  const { state, reload, refresh } = useAdminResource<AdminUserPage>(load);
-  const [drafts, setDrafts] = useState<Record<string, TenantRole>>({});
-  const [saving, setSaving] = useState<string>();
+  const { state, reload, refresh } =
+    useRemoteResource<TenantMemberCollection>(load);
+  const [email, setEmail] = useState('');
+  const [role, setRole] = useState<TenantRole>('Member');
+  const [inviting, setInviting] = useState(false);
   const [confirmation, setConfirmation] = useState('');
   const [failure, setFailure] = useState('');
 
-  async function save(person: AdminUser) {
-    const role = drafts[person.id] ?? person.role;
-    setSaving(person.id);
+  async function invite(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const address = email.trim();
     setConfirmation('');
     setFailure('');
+    if (!address) {
+      setFailure('Enter the email address to invite.');
+      return;
+    }
 
+    setInviting(true);
     try {
-      await client.updateAdminUser(
-        person.id,
-        { role },
-        { ifMatch: `"${person.version}"` },
-      );
-      setDrafts((current) => {
-        const next = { ...current };
-        delete next[person.id];
-        return next;
-      });
-      setConfirmation(
-        `${person.displayName} is now ${roleArticles[role]} of this workspace.`,
-      );
+      await client.inviteTenantMember(tenantId, { email: address, role });
+      setEmail('');
+      setConfirmation(`Invitation sent to ${address}.`);
       await refresh();
     } catch (error) {
       setFailure(
-        error instanceof VistaraApiError && error.status === 409
-          ? `${person.displayName} changed somewhere else. Reload people before saving so nothing is overwritten.`
-          : `${person.displayName} could not be updated. Try again in a moment.`,
+        isStateConflict(error)
+          ? `${address} is already a member of this workspace.`
+          : `The invitation for ${address} could not be sent. Nothing changed.`,
       );
     } finally {
-      setSaving(undefined);
+      setInviting(false);
     }
   }
 
   return (
     <AdminPage
       title="People"
-      description="Review who can reach this workspace and adjust what each person may do. Changes apply the next time they act."
+      description="Everyone who can reach this workspace, and the invitations waiting to be accepted."
     >
       <p className={styles.announce} role="status" aria-live="polite">
         {state.kind === 'loading' ? 'Loading people…' : confirmation}
@@ -132,72 +124,90 @@ export function AdminUsersPage({ client }: AdminUsersPageProps) {
             <thead>
               <tr>
                 <th scope="col">Person</th>
-                <th scope="col">Membership</th>
-                <th scope="col">Last seen</th>
                 <th scope="col">Role</th>
+                <th scope="col">Membership</th>
+                <th scope="col">Joined</th>
               </tr>
             </thead>
             <tbody>
-              {state.value.items.map((person) => {
-                const role = drafts[person.id] ?? person.role;
-                const changed = role !== person.role;
-
-                return (
-                  <tr key={person.id}>
-                    <th scope="row">
-                      <span className={styles.primaryCell}>
-                        {person.displayName}
-                      </span>
-                      <span className={styles.secondaryCell}>
-                        {person.email}
-                      </span>
-                    </th>
-                    <td>
-                      <span
-                        className={styles.badge}
-                        data-status={person.status}
-                      >
-                        {statusLabels[person.status]}
-                      </span>
-                    </td>
-                    <td>{formatMoment(person.lastSeenAt)}</td>
-                    <td>
-                      <div className={styles.rowActions}>
-                        <select
-                          aria-label={`Role for ${person.displayName}`}
-                          className={styles.control}
-                          value={role}
-                          onChange={(event) =>
-                            setDrafts((current) => ({
-                              ...current,
-                              [person.id]: event.target.value as TenantRole,
-                            }))
-                          }
-                        >
-                          {roles.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                        <button
-                          aria-label={`Save role for ${person.displayName}`}
-                          className={styles.secondaryButton}
-                          disabled={!changed || saving === person.id}
-                          type="button"
-                          onClick={() => void save(person)}
-                        >
-                          {saving === person.id ? 'Saving…' : 'Save'}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
+              {state.value.items.map((person) => (
+                <tr key={person.userId}>
+                  <th scope="row">
+                    <span className={styles.primaryCell}>
+                      {person.displayName}
+                    </span>
+                    <span className={styles.secondaryCell}>{person.email}</span>
+                  </th>
+                  <td>{describeRole(person.role)}</td>
+                  <td>
+                    <span className={styles.badge} data-status={person.status}>
+                      {statusLabels[person.status] ?? person.status}
+                    </span>
+                  </td>
+                  <td>{formatMoment(person.joinedAt)}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
       ) : null}
+
+      {state.kind === 'ready' ? (
+        <form className={styles.form} onSubmit={(event) => void invite(event)}>
+          <fieldset className={styles.fieldset}>
+            <legend>Invite someone</legend>
+            <div className={styles.field}>
+              <label htmlFor="invite-email">Email address</label>
+              <input
+                autoComplete="off"
+                className={styles.control}
+                id="invite-email"
+                name="email"
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+              />
+              <p className={styles.fieldHint}>
+                The invitation is listed here until it is accepted.
+              </p>
+            </div>
+            <div className={styles.field}>
+              <label htmlFor="invite-role">Role</label>
+              <select
+                className={styles.control}
+                id="invite-role"
+                value={role}
+                onChange={(event) =>
+                  setRole(event.target.value as TenantRole)
+                }
+              >
+                {invitableRoles.map((value) => (
+                  <option key={value} value={value}>
+                    {describeRole(value)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className={styles.formActions}>
+              <button
+                className={styles.primaryButton}
+                disabled={inviting}
+                type="submit"
+              >
+                {inviting ? 'Sending…' : 'Send invitation'}
+              </button>
+            </div>
+          </fieldset>
+        </form>
+      ) : null}
+
+      <AdminPendingContract
+        title="Role and membership changes"
+        description="Roles are set when an invitation is sent. Changing a role or suspending a member needs a versioned member route."
+        contract={
+          'PATCH /api/v1/tenants/{tenantId}/members/{userId} — If-Match: "v{version}", body { role?, status? } → 200 TenantMember, 412 stale, 409 conflict'
+        }
+      />
     </AdminPage>
   );
 }

@@ -1,223 +1,181 @@
-import type {
-  CursorPage,
-  EntityTag,
-  ResourceVersion,
-  UtcDateTime,
-  Uuid,
-} from '../generated/models';
+import type { ResourceVersion, UtcDateTime, Uuid } from '../generated/models';
 
 export type TenantRole = 'TenantOwner' | 'TenantAdmin' | 'Member' | 'Viewer';
 
-export type MembershipStatus = 'active' | 'invited' | 'suspended';
+export type MembershipStatus = 'Invited' | 'Active' | 'Suspended' | 'Removed';
 
-export type ThemePreference = 'system' | 'light' | 'dark';
-
+/** A tenant the signed-in user belongs to, as published by `GET /api/v1/me`. */
 export interface TenantMembership {
-  readonly tenantId: Uuid;
-  readonly tenantName: string;
-  readonly role: TenantRole;
-  readonly status: MembershipStatus;
-  readonly joinedAt?: UtcDateTime;
-}
-
-export interface SessionUser {
   readonly id: Uuid;
-  readonly displayName: string;
+  readonly slug: string;
+  readonly name: string;
+  readonly role: TenantRole;
+  readonly membershipStatus: MembershipStatus;
+}
+
+/** Response of `GET /api/v1/me`, and the `user` of a successful login. */
+export interface CurrentUser {
+  readonly userId: Uuid;
   readonly email: string;
-  readonly platformAdmin: boolean;
-}
-
-export interface SessionPreferences {
-  readonly theme?: ThemePreference;
-  readonly locale?: string;
-  readonly timeZone?: string;
-  readonly density?: 'comfortable' | 'compact';
-  readonly reducedMotion?: boolean;
-  readonly screenReaderPagedMode?: boolean;
-}
-
-/** Response of `GET /api/v1/me`; also returned by a successful login. */
-export interface SessionSnapshot {
-  readonly user: SessionUser;
-  readonly memberships: readonly TenantMembership[];
-  readonly activeTenantId?: Uuid;
-  readonly preferences: SessionPreferences;
-  /** Antiforgery token bootstrapped for unsafe cookie-authenticated requests. */
-  readonly antiforgeryToken?: string;
+  readonly displayName: string;
+  /** The tenant this session is scoped to. */
+  readonly tenantId?: Uuid;
+  readonly role?: TenantRole;
+  readonly tenants: readonly TenantMembership[];
+  /** Header the deployment expects the antiforgery token in. */
+  readonly csrfHeaderName: string;
 }
 
 export interface LoginRequest {
-  readonly email: string;
+  /** The email address or user name accepted by the deployment. */
+  readonly login: string;
   readonly password: string;
-  readonly rememberMe?: boolean;
+  readonly tenantId?: Uuid;
 }
 
-export interface OidcProvider {
-  readonly displayName: string;
-  readonly startPath: string;
+export interface LoginResponse {
+  readonly user: CurrentUser;
+  readonly csrfToken: string;
 }
 
-export interface AuthenticationCapabilities {
-  readonly localAccounts: boolean;
-  readonly oidc?: OidcProvider;
+export interface DatabaseCapabilities {
+  readonly provider: string;
+}
+
+export interface StorageCapabilities {
+  readonly provider: string;
+  readonly directUpload: boolean;
+  readonly multipartUpload: boolean;
+  readonly rangeReads: boolean;
+  readonly maxObjectBytes: number;
+  readonly maxMultipartParts: number;
+  readonly minMultipartPartBytes: number;
+  readonly maxMultipartPartBytes: number;
+}
+
+export interface ImagingCapabilities {
+  readonly provider: string;
+  readonly inputFormats: readonly string[];
+  readonly outputFormats: readonly string[];
+  readonly maxEncodedBytes: number;
+  readonly maxWidth: number;
+  readonly maxHeight: number;
+  readonly maxAggregatePixels: number;
+  readonly maxFrames: number;
+  readonly maxEstimatedDecodedBytes: number;
+  readonly processingDeadlineSeconds: number;
+  readonly maxConcurrentTransforms: number;
 }
 
 export interface UploadCapabilities {
-  readonly maxUploadBytes?: number;
-  readonly allowedContentTypes?: readonly string[];
-  readonly multipart?: boolean;
+  readonly maxBytes: number;
+  readonly maxConcurrentUploads: number;
+  readonly concurrencyUnlimited: boolean;
+  readonly multipartThresholdBytes: number;
+  readonly proxyUpload: boolean;
+  readonly directUpload: boolean;
+  readonly multipartUpload: boolean;
 }
 
+export interface SearchCapabilities {
+  readonly text: boolean;
+  readonly facets: boolean;
+  readonly timeline: boolean;
+  readonly providerNativeFullText: boolean;
+}
+
+export interface ApiCapabilities {
+  readonly defaultPageSize: number;
+  readonly maxPageSize: number;
+  readonly maxProxyUploadBytes: number;
+}
+
+/** Response of `GET /api/v1/capabilities`. */
 export interface Capabilities {
-  readonly database?: 'sqlite' | 'postgres';
-  readonly storage?: string;
-  readonly search?: string;
-  readonly authentication?: AuthenticationCapabilities;
-  readonly uploads?: UploadCapabilities;
+  readonly schemaVersion: number;
+  readonly database: DatabaseCapabilities;
+  readonly storage: StorageCapabilities;
+  readonly imaging: ImagingCapabilities;
+  readonly upload: UploadCapabilities;
+  readonly search: SearchCapabilities;
+  readonly api: ApiCapabilities;
 }
 
-export interface UpdatePreferencesRequest {
-  readonly theme?: ThemePreference;
-  readonly locale?: string;
-  readonly timeZone?: string;
-  readonly density?: 'comfortable' | 'compact';
-  readonly reducedMotion?: boolean;
-  readonly screenReaderPagedMode?: boolean;
-}
-
-export interface AdminUserQuery {
-  readonly limit?: number;
-  readonly cursor?: string;
-  readonly search?: string;
-  readonly role?: TenantRole;
-  readonly status?: MembershipStatus;
-}
-
-export interface AdminUser {
+export interface TenantSummary {
   readonly id: Uuid;
-  readonly displayName: string;
+  readonly slug: string;
+  readonly name: string;
+  readonly status: string;
+  readonly role: TenantRole;
+  readonly membershipStatus: MembershipStatus;
+  readonly joinedAt?: UtcDateTime;
+}
+
+export interface TenantCollection {
+  readonly items: readonly TenantSummary[];
+}
+
+export interface TenantMember {
+  readonly userId: Uuid;
   readonly email: string;
+  readonly displayName: string;
   readonly role: TenantRole;
   readonly status: MembershipStatus;
+  readonly invitedAt: UtcDateTime;
+  readonly joinedAt?: UtcDateTime;
+  readonly version: ResourceVersion;
+}
+
+export interface TenantMemberCollection {
+  readonly items: readonly TenantMember[];
+}
+
+export interface InviteTenantMemberRequest {
+  readonly email: string;
+  readonly role: TenantRole;
+}
+
+export interface ApiKeySummary {
+  readonly id: Uuid;
+  readonly prefix: string;
+  readonly ownerId: Uuid;
+  readonly scopes: readonly string[];
+  readonly status: string;
   readonly createdAt: UtcDateTime;
-  readonly lastSeenAt?: UtcDateTime;
-  readonly version: ResourceVersion;
+  readonly expiresAt?: UtcDateTime;
+  readonly lastUsedAt?: UtcDateTime;
+  readonly revokedAt?: UtcDateTime;
 }
 
-export interface UpdateAdminUserRequest {
-  readonly role?: TenantRole;
-  readonly status?: MembershipStatus;
+export interface ApiKeyCollection {
+  readonly items: readonly ApiKeySummary[];
 }
 
-export interface StorageBucket {
-  readonly id: string;
-  readonly kind: 'filesystem' | 's3' | 'azure' | 'gcs';
-  readonly status: 'healthy' | 'degraded' | 'unavailable';
-  readonly usedBytes: number;
-  readonly quotaBytes?: number;
-  readonly objectCount: number;
-  readonly lastCheckedAt?: UtcDateTime;
-  readonly message?: string;
+export interface CreateApiKeyRequest {
+  readonly scopes?: readonly string[];
+  readonly expiresAt?: UtcDateTime;
 }
 
-export interface StorageOverview {
-  readonly buckets: readonly StorageBucket[];
-  readonly originalBytes: number;
-  readonly derivativeBytes: number;
-  readonly stagingBytes: number;
-  readonly quotaBytes?: number;
-  readonly pendingUploadBytes?: number;
+export interface CreatedApiKey {
+  readonly key: ApiKeySummary;
+  /** Returned once; never stored by the browser. */
+  readonly secret: string;
 }
 
-export type JobState =
-  | 'queued'
-  | 'running'
-  | 'succeeded'
-  | 'failed'
-  | 'dead'
-  | 'cancelled';
-
-export interface AdminJobQuery {
-  readonly limit?: number;
-  readonly cursor?: string;
-  readonly states?: readonly JobState[];
-  readonly kind?: string;
+export interface JobFailure {
+  readonly code: string;
+  readonly summary: string;
 }
 
-export interface AdminJob {
-  readonly id: string;
-  readonly kind: string;
-  readonly state: JobState;
-  readonly attempts?: number;
-  readonly maxAttempts?: number;
-  readonly queuedAt?: UtcDateTime;
-  readonly startedAt?: UtcDateTime;
+export interface JobStatus {
+  readonly id: Uuid;
+  readonly type: string;
+  readonly state: string;
+  readonly attempts: number;
+  readonly maxAttempts: number;
+  readonly createdAt: UtcDateTime;
+  readonly availableAt: UtcDateTime;
   readonly completedAt?: UtcDateTime;
-  readonly nextAttemptAt?: UtcDateTime;
-  readonly lastError?: string;
-}
-
-export interface RetentionPolicies {
-  readonly trashRetentionDays?: number;
-  readonly purgeGraceDays?: number;
-}
-
-export interface SharingPolicies {
-  readonly publicLinksEnabled?: boolean;
-  readonly maxLinkLifetimeDays?: number;
-  readonly requirePasswordForPublicLinks?: boolean;
-}
-
-export interface QuotaPolicies {
-  readonly storageBytes?: number;
-  readonly dailyTransformPixels?: number;
-  readonly concurrentUploads?: number;
-}
-
-export interface PolicySettings {
-  readonly retention: RetentionPolicies;
-  readonly sharing: SharingPolicies;
-  readonly quotas: QuotaPolicies;
+  readonly failure?: JobFailure;
   readonly version: ResourceVersion;
 }
-
-export interface UpdatePolicySettingsRequest {
-  readonly retention?: RetentionPolicies;
-  readonly sharing?: SharingPolicies;
-  readonly quotas?: QuotaPolicies;
-}
-
-export interface AuditQuery {
-  readonly limit?: number;
-  readonly cursor?: string;
-  readonly action?: string;
-  readonly actorId?: Uuid;
-  readonly outcome?: AuditOutcome;
-  readonly occurredFrom?: UtcDateTime;
-  readonly occurredTo?: UtcDateTime;
-}
-
-export type AuditOutcome = 'succeeded' | 'denied' | 'failed';
-
-export interface AuditActor {
-  readonly kind: 'user' | 'apiKey' | 'system';
-  readonly id?: Uuid;
-  readonly displayName: string;
-}
-
-export interface AuditEvent {
-  readonly id: string;
-  readonly occurredAt: UtcDateTime;
-  readonly actor: AuditActor;
-  readonly action: string;
-  readonly outcome: AuditOutcome;
-  readonly resourceType?: string;
-  readonly resourceId?: string;
-  readonly requestId?: string;
-}
-
-export type AdminUserPage = CursorPage<AdminUser>;
-export type AdminJobPage = CursorPage<AdminJob>;
-export type AuditEventPage = CursorPage<AuditEvent>;
-
-export type { EntityTag };

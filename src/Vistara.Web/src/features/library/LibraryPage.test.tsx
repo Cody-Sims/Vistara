@@ -1,8 +1,12 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  resetPreferences,
+  setPreferences,
+} from '../../app/preferences';
 import type {
   AssetSummary,
   TimelinePage,
@@ -93,6 +97,11 @@ function renderLibrary(
     </QueryClientProvider>,
   );
 }
+
+afterEach(() => {
+  resetPreferences();
+  localStorage.clear();
+});
 
 describe('library page', () => {
   it('renders a semantic virtualized timeline within DOM and image priority budgets', async () => {
@@ -325,5 +334,38 @@ describe('library page', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Could not load the library',
     );
+  });
+
+  it('replaces endless scrolling with pages in screen-reader paged mode', async () => {
+    const user = userEvent.setup();
+    setPreferences({ screenReaderPagedMode: true });
+    const dataSource = {
+      getTimeline: vi.fn(async () => ({
+        data: page(Array.from({ length: 200 }, (_, index) => asset(index))),
+      })),
+    };
+
+    renderLibrary(dataSource);
+
+    await screen.findByRole('heading', { name: 'June 10, 2026' });
+
+    const pages = screen.getByRole('navigation', { name: 'Library pages' });
+    expect(
+      within(pages).getByRole('button', { name: 'Previous page' }),
+    ).toBeDisabled();
+    expect(within(pages).getByRole('status')).toHaveTextContent('Page 1 of');
+    expect(
+      screen.queryByRole('button', { name: 'Load more images' }),
+    ).not.toBeInTheDocument();
+
+    const firstPageImages = document.querySelectorAll('img').length;
+    expect(firstPageImages).toBeGreaterThan(0);
+
+    await user.click(within(pages).getByRole('button', { name: 'Next page' }));
+
+    expect(within(pages).getByRole('status')).toHaveTextContent('Page 2 of');
+    expect(
+      within(pages).getByRole('button', { name: 'Previous page' }),
+    ).toBeEnabled();
   });
 });

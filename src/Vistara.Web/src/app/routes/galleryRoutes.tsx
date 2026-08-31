@@ -5,8 +5,6 @@ import {
   RequireAdministration,
   RequireSession,
 } from '../../features/session';
-import { SettingsPage } from '../../features/settings';
-import { platformClient } from '../apiClients';
 import { ApplicationFrame } from '../ApplicationFrame';
 import {
   InitialLoadingPage,
@@ -26,6 +24,7 @@ import {
   PublicShareRoute,
   RoutePlaceholderPage,
   SearchRoute,
+  SettingsRoute,
   SharesRoute,
   TagsRoute,
   TrashRoute,
@@ -39,12 +38,6 @@ export function galleryRoutes(
   liveFeatures = true,
 ): RouteObject[] {
   const preview = !liveFeatures || staticPreview;
-  const feature = (title: string, element: ReactNode) =>
-    preview ? (
-      <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
-    ) : (
-      element
-    );
   const administrative = (title: string, element: ReactNode) =>
     preview ? (
       <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
@@ -71,11 +64,11 @@ export function galleryRoutes(
         },
         {
           path: 'library',
-          element: feature('Library', <LibraryRoute />),
+          element: guarded('Library', <LibraryRoute />),
         },
         {
           path: 'library/recent',
-          element: feature('Recent uploads', <LibraryRoute />),
+          element: guarded('Recent uploads', <LibraryRoute />),
         },
         {
           path: 'search',
@@ -83,35 +76,35 @@ export function galleryRoutes(
         },
         {
           path: 'assets/:assetId',
-          element: feature('Asset viewer', <ViewerRoute />),
+          element: guarded('Asset viewer', <ViewerRoute />),
         },
         {
           path: 'uploads',
-          element: feature('Upload images', <UploadsRoute />),
+          element: guarded('Upload images', <UploadsRoute />),
         },
         {
           path: 'albums',
-          element: feature('Albums', <AlbumsRoute />),
+          element: guarded('Albums', <AlbumsRoute />),
         },
         {
           path: 'albums/new',
-          element: feature('New album', <AlbumsRoute />),
+          element: guarded('New album', <AlbumsRoute />),
         },
         {
           path: 'albums/:albumId',
-          element: feature('Album', <AlbumRoute />),
+          element: guarded('Album', <AlbumRoute />),
         },
         {
           path: 'tags',
-          element: feature('Tags', <TagsRoute />),
+          element: guarded('Tags', <TagsRoute />),
         },
         {
           path: 'tags/:tagId',
-          element: feature('Tag', <TagsRoute />),
+          element: guarded('Tag', <TagsRoute />),
         },
         {
           path: 'favorites',
-          element: feature('Favorites', <FavoritesRoute />),
+          element: guarded('Favorites', <FavoritesRoute />),
         },
         {
           path: 'shared/with-me',
@@ -119,15 +112,15 @@ export function galleryRoutes(
         },
         {
           path: 'shared/links',
-          element: feature('Share links', <SharesRoute />),
+          element: guarded('Share links', <SharesRoute />),
         },
         {
           path: 'trash',
-          element: feature('Trash', <TrashRoute />),
+          element: guarded('Trash', <TrashRoute />),
         },
         {
           path: 'settings',
-          element: guarded('Settings', <SettingsPage />),
+          element: guarded('Settings', <SettingsRoute />),
         },
         {
           path: 'admin',
@@ -167,7 +160,7 @@ export function galleryRoutes(
         staticPreview || !liveFeatures ? (
           <RoutePlaceholderPage title="Sign in" staticPreview={staticPreview} />
         ) : (
-          <LoginPage capabilities={platformClient} />
+          <LoginPage />
         ),
     },
     {

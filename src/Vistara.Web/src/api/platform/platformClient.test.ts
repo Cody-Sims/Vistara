@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { VistaraApiError } from '../generated/client';
+import { isStaleVersion, isStateConflict, versionTag } from '../versionTag';
 import { PlatformApiClient } from './platformClient';
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
@@ -19,116 +20,116 @@ function problemResponse(status: number, code: string) {
       code,
       errors: {},
     }),
-    {
-      status,
-      headers: { 'Content-Type': 'application/problem+json' },
-    },
+    { status, headers: { 'Content-Type': 'application/problem+json' } },
   );
 }
 
-const sessionBody = {
-  user: {
-    id: 'user-1',
-    displayName: 'Ada',
-    email: 'ada@example.test',
-    platformAdmin: false,
-  },
-  memberships: [
+const currentUser = {
+  userId: '0195f0d4-0000-7000-8000-000000000001',
+  email: 'ada@example.test',
+  displayName: 'Ada Lovelace',
+  tenantId: '0195f0d4-0000-7000-8000-0000000000a1',
+  role: 'TenantAdmin',
+  tenants: [
     {
-      tenantId: 'tenant-1',
-      tenantName: 'Studio',
+      id: '0195f0d4-0000-7000-8000-0000000000a1',
+      slug: 'studio',
+      name: 'Studio',
       role: 'TenantAdmin',
-      status: 'active',
+      membershipStatus: 'Active',
     },
   ],
-  activeTenantId: 'tenant-1',
-  preferences: { theme: 'system', locale: 'en-US' },
-  antiforgeryToken: 'token-1',
+  csrfHeaderName: 'X-Vistara-CSRF',
 };
 
 describe('platform session client', () => {
-  it('reads the current session without sending cross-origin credentials', async () => {
+  it('reads the current user from the session route', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () =>
-      jsonResponse(sessionBody),
+      jsonResponse(currentUser),
     );
     const client = new PlatformApiClient({ fetch });
 
-    const session = await client.getSession();
+    const user = await client.getSession();
 
-    expect(fetch).toHaveBeenCalledTimes(1);
     const [url, init] = fetch.mock.calls[0]!;
     expect(url).toBe('/api/v1/me');
     expect(init?.method).toBe('GET');
     expect(init?.credentials).toBe('same-origin');
-    expect(session.user.displayName).toBe('Ada');
-    expect(session.memberships[0]?.role).toBe('TenantAdmin');
+    expect(user.displayName).toBe('Ada Lovelace');
+    expect(user.tenants[0]?.membershipStatus).toBe('Active');
   });
 
-  it('signs in and rotates the antiforgery token used by later mutations', async () => {
+  it('signs in with the login field the API accepts', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      jsonResponse({ user: currentUser, csrfToken: 'token-2' }),
+    );
+    const client = new PlatformApiClient({ fetch });
+
+    const session = await client.login({
+      login: 'ada@example.test',
+      password: 'correct horse',
+    });
+
+    const [url, init] = fetch.mock.calls[0]!;
+    expect(url).toBe('/api/v1/auth/login');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(String(init?.body))).toEqual({
+      login: 'ada@example.test',
+      password: 'correct horse',
+    });
+    expect(session.user.email).toBe('ada@example.test');
+  });
+
+  it('sends the antiforgery token under the header the API published', async () => {
     const fetch = vi
       .fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(
-        jsonResponse({ ...sessionBody, antiforgeryToken: 'token-2' }),
+        jsonResponse({
+          user: { ...currentUser, csrfHeaderName: 'X-Deployment-CSRF' },
+          csrfToken: 'token-3',
+        }),
       )
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
     const client = new PlatformApiClient({ fetch });
 
-    await client.login({
-      email: 'ada@example.test',
-      password: 'correct horse',
-      rememberMe: true,
-    });
+    await client.login({ login: 'ada@example.test', password: 'pw' });
     await client.logout();
 
-    const [loginUrl, loginInit] = fetch.mock.calls[0]!;
-    expect(loginUrl).toBe('/api/v1/auth/login');
-    expect(loginInit?.method).toBe('POST');
-    expect(JSON.parse(String(loginInit?.body))).toEqual({
-      email: 'ada@example.test',
-      password: 'correct horse',
-      rememberMe: true,
-    });
-
-    const [logoutUrl, logoutInit] = fetch.mock.calls[1]!;
-    expect(logoutUrl).toBe('/api/v1/auth/logout');
-    expect(new Headers(logoutInit?.headers).get('X-CSRF-TOKEN')).toBe(
-      'token-2',
-    );
+    const headers = new Headers(fetch.mock.calls[1]![1]?.headers);
+    expect(fetch.mock.calls[1]![0]).toBe('/api/v1/auth/logout');
+    expect(headers.get('X-Deployment-CSRF')).toBe('token-3');
+    expect(headers.get('X-Vistara-CSRF')).toBeNull();
   });
 
-  it('never retains the submitted password after a sign-in attempt', async () => {
-    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
-      problemResponse(401, 'invalid_credentials'),
-    );
+  it('forgets the antiforgery token after signing out', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ user: currentUser, csrfToken: 'token-4' }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
     const client = new PlatformApiClient({ fetch });
 
-    await expect(
-      client.login({ email: 'ada@example.test', password: 'wrong' }),
-    ).rejects.toMatchObject({ status: 401 });
-    expect(JSON.stringify(client)).not.toContain('wrong');
+    await client.login({ login: 'ada@example.test', password: 'pw' });
+    await client.logout();
+    await client.logout();
+
+    expect(
+      new Headers(fetch.mock.calls[2]![1]?.headers).get('X-Vistara-CSRF'),
+    ).toBeNull();
   });
 
-  it('maps problem details onto the shared API error type', async () => {
-    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
-      problemResponse(403, 'forbidden'),
-    );
-    const client = new PlatformApiClient({ fetch });
-
-    const error = await client.getSession().catch((thrown: unknown) => thrown);
-
-    expect(error).toBeInstanceOf(VistaraApiError);
-    expect((error as VistaraApiError).status).toBe(403);
-    expect((error as VistaraApiError).problem.code).toBe('forbidden');
-  });
-
-  it('reads deployment capabilities including configured sign-in providers', async () => {
+  it('reads the deployment capability document', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () =>
       jsonResponse({
-        database: 'postgres',
-        authentication: {
-          localAccounts: true,
-          oidc: { displayName: 'Corp SSO', startPath: '/api/v1/auth/oidc' },
-        },
+        schemaVersion: 1,
+        database: { provider: 'postgres' },
+        storage: { provider: 's3', maxObjectBytes: 100 },
+        imaging: { provider: 'skia', outputFormats: ['webp'] },
+        upload: { maxBytes: 100, multipartUpload: true },
+        search: { text: true, timeline: true },
+        api: { defaultPageSize: 50, maxPageSize: 200 },
       }),
     );
     const client = new PlatformApiClient({ fetch });
@@ -136,95 +137,163 @@ describe('platform session client', () => {
     const capabilities = await client.getCapabilities();
 
     expect(fetch.mock.calls[0]![0]).toBe('/api/v1/capabilities');
-    expect(capabilities.authentication?.oidc?.displayName).toBe('Corp SSO');
+    expect(capabilities.schemaVersion).toBe(1);
+    expect(capabilities.storage.provider).toBe('s3');
+  });
+
+  it('maps problem details onto the shared API error type', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      problemResponse(403, 'auth.forbidden'),
+    );
+    const client = new PlatformApiClient({ fetch });
+
+    const error = await client.getSession().catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(VistaraApiError);
+    expect((error as VistaraApiError).status).toBe(403);
+    expect((error as VistaraApiError).problem.code).toBe('auth.forbidden');
   });
 });
 
-describe('platform administration client', () => {
-  it('encodes list queries for users, jobs, and audit records', async () => {
+describe('platform tenant administration client', () => {
+  it('lists tenants and members from the tenant routes', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () =>
       jsonResponse({ items: [] }),
     );
     const client = new PlatformApiClient({ fetch });
 
-    await client.listAdminUsers({ limit: 25, search: 'ada k' });
-    await client.listAdminJobs({ states: ['failed', 'dead'] });
-    await client.listAuditEvents({ cursor: 'c1', action: 'share.created' });
+    await client.listTenants();
+    await client.listTenantMembers('0195f0d4-0000-7000-8000-0000000000a1');
 
-    expect(fetch.mock.calls[0]![0]).toBe(
-      '/api/v1/admin/users?limit=25&search=ada+k',
-    );
+    expect(fetch.mock.calls[0]![0]).toBe('/api/v1/tenants');
     expect(fetch.mock.calls[1]![0]).toBe(
-      '/api/v1/admin/jobs?states=failed&states=dead',
-    );
-    expect(fetch.mock.calls[2]![0]).toBe(
-      '/api/v1/admin/audit?cursor=c1&action=share.created',
+      '/api/v1/tenants/0195f0d4-0000-7000-8000-0000000000a1/members',
     );
   });
 
-  it('sends concurrency and antiforgery headers for administrative changes', async () => {
+  it('invites a member with the antiforgery header and encoded identifier', async () => {
     const fetch = vi
       .fn<typeof globalThis.fetch>()
-      .mockResolvedValueOnce(jsonResponse(sessionBody))
+      .mockResolvedValueOnce(
+        jsonResponse({ user: currentUser, csrfToken: 'token-5' }),
+      )
       .mockResolvedValueOnce(
         jsonResponse(
           {
-            id: 'user-2',
-            displayName: 'Grace',
+            userId: 'user-2',
             email: 'grace@example.test',
+            displayName: 'Grace Hopper',
             role: 'Member',
-            status: 'active',
-            createdAt: '2026-01-01T00:00:00Z',
-            version: 4,
+            status: 'Invited',
+            invitedAt: '2026-02-01T00:00:00Z',
+            version: 1,
           },
-          { headers: { ETag: '"4"', 'Content-Type': 'application/json' } },
+          { status: 201 },
         ),
       );
     const client = new PlatformApiClient({ fetch });
 
-    await client.getSession();
-    const updated = await client.updateAdminUser(
-      'user-2',
-      { role: 'Member' },
-      { ifMatch: '"3"' },
-    );
+    await client.login({ login: 'ada@example.test', password: 'pw' });
+    await client.inviteTenantMember('tenant/1', {
+      email: 'grace@example.test',
+      role: 'Member',
+    });
 
     const [url, init] = fetch.mock.calls[1]!;
-    expect(url).toBe('/api/v1/admin/users/user-2');
-    expect(init?.method).toBe('PATCH');
+    expect(url).toBe('/api/v1/tenants/tenant%2F1/members');
+    expect(init?.method).toBe('POST');
     const headers = new Headers(init?.headers);
-    expect(headers.get('If-Match')).toBe('"3"');
-    expect(headers.get('X-CSRF-TOKEN')).toBe('token-1');
+    expect(headers.get('X-Vistara-CSRF')).toBe('token-5');
     expect(headers.get('Content-Type')).toBe('application/json');
-    expect(updated.etag).toBe('"4"');
-    expect(updated.data.role).toBe('Member');
   });
 
-  it('surfaces policy edit conflicts as a versioned failure', async () => {
+  it('manages API keys through the published routes', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () =>
-      problemResponse(409, 'version_conflict'),
+      jsonResponse({ items: [] }),
     );
     const client = new PlatformApiClient({ fetch });
 
-    const error = await client
-      .updatePolicies(
-        { retention: { trashRetentionDays: 30 } },
-        { ifMatch: '"7"' },
-      )
-      .catch((thrown: unknown) => thrown);
+    await client.listApiKeys();
+    await client.createApiKey({ scopes: ['assets.read'] });
+    await client.revokeApiKey('key 1');
 
-    expect(error).toBeInstanceOf(VistaraApiError);
-    expect((error as VistaraApiError).status).toBe(409);
+    expect(fetch.mock.calls[0]![0]).toBe('/api/v1/api-keys');
+    expect(fetch.mock.calls[1]![1]?.method).toBe('POST');
+    expect(fetch.mock.calls[2]![0]).toBe('/api/v1/api-keys/key%201');
+    expect(fetch.mock.calls[2]![1]?.method).toBe('DELETE');
   });
 
-  it('escapes identifiers in administrative paths', async () => {
+  it('reads a single job by identifier', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () =>
-      jsonResponse({ id: 'job/1', kind: 'derivatives', state: 'queued' }),
+      jsonResponse({
+        id: 'job-1',
+        type: 'derivatives',
+        state: 'Failed',
+        attempts: 3,
+        maxAttempts: 5,
+        createdAt: '2026-02-01T00:00:00Z',
+        availableAt: '2026-02-01T00:05:00Z',
+        version: 4,
+      }),
     );
     const client = new PlatformApiClient({ fetch });
 
-    await client.retryJob('job/1');
+    const job = await client.getJob('job/1');
 
-    expect(fetch.mock.calls[0]![0]).toBe('/api/v1/admin/jobs/job%2F1/retry');
+    expect(fetch.mock.calls[0]![0]).toBe('/api/v1/jobs/job%2F1');
+    expect(job.state).toBe('Failed');
+  });
+
+  it('exposes only the routes the API branch publishes', () => {
+    const client = new PlatformApiClient();
+    const methods = Object.getOwnPropertyNames(
+      Object.getPrototypeOf(client) as object,
+    ).filter((name) => name !== 'constructor');
+
+    expect(methods.sort()).toEqual(
+      [
+        'antiforgeryHeaderName',
+        'createApiKey',
+        'getCapabilities',
+        'getJob',
+        'getSession',
+        'inviteTenantMember',
+        'listApiKeys',
+        'listTenantMembers',
+        'listTenants',
+        'login',
+        'logout',
+        'revokeApiKey',
+      ].sort(),
+    );
+  });
+});
+
+describe('optimistic concurrency helpers', () => {
+  it('formats entity tags the way every Vistara route emits them', () => {
+    expect(versionTag(7)).toBe('"v7"');
+  });
+
+  it('separates a stale precondition from a state conflict', () => {
+    const stale = new VistaraApiError(412, {
+      type: 'about:blank',
+      title: 'Precondition Failed',
+      status: 412,
+      code: 'precondition_failed',
+      errors: {},
+    });
+    const conflict = new VistaraApiError(409, {
+      type: 'about:blank',
+      title: 'Conflict',
+      status: 409,
+      code: 'conflict',
+      errors: {},
+    });
+
+    expect(isStaleVersion(stale)).toBe(true);
+    expect(isStaleVersion(conflict)).toBe(false);
+    expect(isStateConflict(conflict)).toBe(true);
+    expect(isStateConflict(stale)).toBe(false);
+    expect(isStaleVersion(new Error('network'))).toBe(false);
   });
 });

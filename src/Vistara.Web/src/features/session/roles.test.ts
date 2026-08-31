@@ -1,0 +1,122 @@
+import { describe, expect, it } from 'vitest';
+import type { CurrentUser, TenantMembership } from '../../api/platform';
+import { activeMembership, canAdminister, describeRole } from './roles';
+
+function membership(
+  id: string,
+  role: TenantMembership['role'],
+  membershipStatus: TenantMembership['membershipStatus'] = 'Active',
+): TenantMembership {
+  return { id, slug: id, name: id, role, membershipStatus };
+}
+
+function user(overrides: Partial<CurrentUser> = {}): CurrentUser {
+  return {
+    userId: 'user-1',
+    email: 'ada@example.test',
+    displayName: 'Ada Lovelace',
+    tenantId: 'tenant-a',
+    role: 'TenantAdmin',
+    tenants: [membership('tenant-a', 'TenantAdmin')],
+    csrfHeaderName: 'X-Vistara-CSRF',
+    ...overrides,
+  };
+}
+
+describe('active membership', () => {
+  it('selects the membership for the tenant the session is scoped to', () => {
+    const resolved = activeMembership(
+      user({
+        tenantId: 'tenant-b',
+        role: 'Viewer',
+        tenants: [
+          membership('tenant-a', 'TenantOwner'),
+          membership('tenant-b', 'Viewer'),
+        ],
+      }),
+    );
+
+    expect(resolved?.id).toBe('tenant-b');
+    expect(resolved?.role).toBe('Viewer');
+  });
+
+  it('has no membership when the active tenant is absent from the list', () => {
+    expect(
+      activeMembership(
+        user({
+          tenantId: 'tenant-z',
+          tenants: [membership('tenant-a', 'TenantOwner')],
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('has no membership when the session carries no tenant', () => {
+    expect(
+      activeMembership(
+        user({
+          tenantId: undefined,
+          role: undefined,
+          tenants: [membership('tenant-a', 'TenantOwner')],
+        }),
+      ),
+    ).toBeUndefined();
+  });
+});
+
+describe('administration', () => {
+  it('admits an administrator of the active tenant', () => {
+    expect(canAdminister(user())).toBe(true);
+  });
+
+  it('never borrows administration from another tenant', () => {
+    expect(
+      canAdminister(
+        user({
+          tenantId: 'tenant-b',
+          role: 'Member',
+          tenants: [
+            membership('tenant-a', 'TenantOwner'),
+            membership('tenant-b', 'Member'),
+          ],
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('refuses when the session role disagrees with the membership role', () => {
+    expect(
+      canAdminister(
+        user({
+          role: 'Member',
+          tenants: [membership('tenant-a', 'TenantAdmin')],
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('refuses a membership that is not active', () => {
+    expect(
+      canAdminister(
+        user({ tenants: [membership('tenant-a', 'TenantAdmin', 'Suspended')] }),
+      ),
+    ).toBe(false);
+  });
+
+  it('refuses an unmatched or missing tenant', () => {
+    expect(
+      canAdminister(
+        user({ tenantId: 'tenant-z', tenants: [membership('tenant-a', 'TenantOwner')] }),
+      ),
+    ).toBe(false);
+    expect(canAdminister(undefined)).toBe(false);
+  });
+
+  it('names each role for the interface', () => {
+    expect(describeRole('TenantOwner')).toBe('Owner');
+    expect(describeRole('TenantAdmin')).toBe('Administrator');
+    expect(describeRole('Member')).toBe('Member');
+    expect(describeRole('Viewer')).toBe('Viewer');
+    expect(describeRole(undefined)).toBe('Guest');
+  });
+});

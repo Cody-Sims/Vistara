@@ -9,6 +9,7 @@ import type {
   CursorPage,
   SortDirection,
 } from '../../api/generated';
+import { useAppPreferences } from '../../app/preferences';
 import { Skeleton } from '../../components';
 import { buildResponsiveImage } from '../viewer/responsiveImage';
 import {
@@ -61,19 +62,25 @@ export function SearchView({ client }: SearchViewProps) {
   const [draftAddress, setDraftAddress] = useState(address);
   const [items, setItems] = useState<readonly AssetSummary[]>([]);
   const [cursor, setCursor] = useState<string>();
+  const [pageCursors, setPageCursors] = useState<readonly string[]>([]);
+  const [pageIndex, setPageIndex] = useState(0);
   const [state, setState] = useState<ResultState>(() =>
     isEmptySearch(applied) ? { kind: 'idle' } : { kind: 'searching' },
   );
   const [attempt, setAttempt] = useState(0);
   const request = useRef(0);
   const resultsHeading = useRef<HTMLHeadingElement>(null);
+  const paged = useAppPreferences().screenReaderPagedMode;
   const empty = isEmptySearch(applied);
+  const pageCursor = pageIndex === 0 ? undefined : pageCursors[pageIndex - 1];
 
   if (draftAddress !== address) {
     setDraftAddress(address);
     setDraft(applied);
     setItems([]);
     setCursor(undefined);
+    setPageCursors([]);
+    setPageIndex(0);
     setState(empty ? { kind: 'idle' } : { kind: 'searching' });
   }
 
@@ -85,6 +92,7 @@ export function SearchView({ client }: SearchViewProps) {
     const id = ++request.current;
     const query = toAssetListQuery(
       parseSearchState(new URLSearchParams(address)),
+      paged ? pageCursor : undefined,
     );
 
     void client.listAssets(query).then(
@@ -107,7 +115,7 @@ export function SearchView({ client }: SearchViewProps) {
     return () => {
       request.current += 1;
     };
-  }, [address, attempt, client, empty]);
+  }, [address, attempt, client, empty, pageCursor, paged]);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -116,7 +124,7 @@ export function SearchView({ client }: SearchViewProps) {
   }
 
   function extend() {
-    if (!cursor) {
+    if (!cursor || paged) {
       return;
     }
 
@@ -316,7 +324,9 @@ export function SearchView({ client }: SearchViewProps) {
           {state.kind === 'searching'
             ? 'Searching your library…'
             : state.kind === 'ready' || state.kind === 'extending'
-              ? `${items.length}${cursor ? '+' : ''} results`
+              ? paged
+                ? `Page ${pageIndex + 1} · ${items.length} results on this page`
+                : `${items.length}${cursor ? '+' : ''} results`
               : ''}
         </p>
 
@@ -402,7 +412,40 @@ export function SearchView({ client }: SearchViewProps) {
           </ul>
         ) : null}
 
-        {cursor ? (
+        {paged && !empty ? (
+          <nav className={styles.pager} aria-label="Result pages">
+            <button
+              className={styles.clear}
+              disabled={pageIndex === 0 || state.kind === 'searching'}
+              type="button"
+              onClick={() => setPageIndex((value) => Math.max(0, value - 1))}
+            >
+              Previous page
+            </button>
+            <button
+              className={styles.more}
+              disabled={!cursor || state.kind === 'searching'}
+              type="button"
+              onClick={() => {
+                if (!cursor) {
+                  return;
+                }
+
+                setPageCursors((current) => {
+                  const next = current.slice(0, pageIndex);
+                  next.push(cursor);
+                  return next;
+                });
+                setPageIndex((value) => value + 1);
+                setState({ kind: 'searching' });
+              }}
+            >
+              Next page
+            </button>
+          </nav>
+        ) : null}
+
+        {!paged && cursor ? (
           <button
             className={styles.more}
             disabled={state.kind === 'extending'}

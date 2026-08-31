@@ -17,6 +17,7 @@ import type {
   TimelinePage,
   TimelineQuery,
 } from '../../api/generated';
+import { useAppPreferences } from '../../app/preferences';
 import { Skeleton } from '../../components';
 import { buildResponsiveImage } from '../viewer/responsiveImage';
 import {
@@ -40,6 +41,7 @@ import {
 } from './selection';
 import {
   buildTimelineRows,
+  pageTimelineRows,
   virtualizeTimelineRows,
 } from './virtualTimeline';
 import styles from './LibraryPage.module.css';
@@ -64,6 +66,7 @@ const statuses: ReadonlyArray<{ value: AssetStatus; label: string }> = [
   { value: 'processing', label: 'Processing' },
   { value: 'failed', label: 'Failed' },
 ];
+const pagedRowsPerPage = 6;
 const assetDateFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: 'medium',
 });
@@ -238,7 +241,10 @@ export function LibraryPage({
     () => buildTimelineRows(page?.groups ?? [], state.view, layout.columns),
     [layout.columns, page?.groups, state.view],
   );
-  const virtual = useMemo(
+  const preferences = useAppPreferences();
+  const paged = preferences.screenReaderPagedMode;
+  const [pageNumber, setPageNumber] = useState(1);
+  const continuous = useMemo(
     () =>
       virtualizeTimelineRows(rows, {
         scrollTop,
@@ -248,15 +254,22 @@ export function LibraryPage({
       }),
     [focusedAssetId, layout.viewportHeight, rows, scrollTop],
   );
+  const pagedTimeline = useMemo(
+    () => pageTimelineRows(rows, pageNumber, pagedRowsPerPage),
+    [pageNumber, rows],
+  );
+  const virtual = paged ? pagedTimeline : continuous;
   const allAssets = useMemo(
     () => page?.groups.flatMap((group) => group.items) ?? [],
     [page?.groups],
   );
-  const viewportRows = virtual.rows.filter(
-    ({ offset, size }) =>
-      offset + size > scrollTop &&
-      offset < scrollTop + layout.viewportHeight,
-  );
+  const viewportRows = paged
+    ? virtual.rows
+    : virtual.rows.filter(
+        ({ offset, size }) =>
+          offset + size > scrollTop &&
+          offset < scrollTop + layout.viewportHeight,
+      );
   const visibleIds = viewportRows.flatMap(({ row }) =>
     row.type === 'assets' ? row.assets.map((asset) => asset.id) : [],
   );
@@ -510,6 +523,7 @@ export function LibraryPage({
               const scroller = event.currentTarget;
               setScrollTop(scroller.scrollTop);
               if (
+                !paged &&
                 query.hasNextPage &&
                 !query.isFetchingNextPage &&
                 scroller.scrollHeight -
@@ -646,7 +660,40 @@ export function LibraryPage({
               })}
             </ol>
           </div>
-          {query.hasNextPage ? (
+          {paged ? (
+            <nav className={styles.pager} aria-label="Library pages">
+              <button
+                className={styles.controlButton}
+                disabled={pagedTimeline.page <= 1}
+                onClick={() => setPageNumber(pagedTimeline.page - 1)}
+                type="button"
+              >
+                Previous page
+              </button>
+              <span aria-live="polite" role="status">
+                Page {pagedTimeline.page} of {pagedTimeline.pageCount}
+                {query.hasNextPage ? ' so far' : ''}
+              </span>
+              <button
+                className={styles.controlButton}
+                disabled={
+                  pagedTimeline.page >= pagedTimeline.pageCount &&
+                  !query.hasNextPage
+                }
+                onClick={() => {
+                  if (pagedTimeline.page >= pagedTimeline.pageCount) {
+                    void query.fetchNextPage();
+                  }
+
+                  setPageNumber(pagedTimeline.page + 1);
+                }}
+                type="button"
+              >
+                Next page
+              </button>
+            </nav>
+          ) : null}
+          {!paged && query.hasNextPage ? (
             <button
               className={styles.loadMore}
               disabled={query.isFetchingNextPage}

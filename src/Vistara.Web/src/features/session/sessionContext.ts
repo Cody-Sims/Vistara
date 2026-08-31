@@ -1,11 +1,9 @@
 import { createContext, useContext } from 'react';
 import type {
+  CurrentUser,
   LoginRequest,
-  SessionSnapshot,
-  SessionUser,
   TenantMembership,
   TenantRole,
-  UpdatePreferencesRequest,
 } from '../../api/platform';
 
 export type SessionStatus =
@@ -18,16 +16,14 @@ export type SessionStatus =
 
 export interface SessionContextValue {
   readonly status: SessionStatus;
-  readonly session?: SessionSnapshot;
-  readonly user?: SessionUser;
+  readonly user?: CurrentUser;
   readonly membership?: TenantMembership;
   readonly role?: TenantRole;
   readonly canAdminister: boolean;
   readonly error?: unknown;
-  signIn(request: LoginRequest): Promise<SessionSnapshot>;
+  signIn(request: LoginRequest): Promise<CurrentUser>;
   signOut(): Promise<void>;
   reload(): Promise<void>;
-  savePreferences(request: UpdatePreferencesRequest): Promise<void>;
 }
 
 const anonymousSession: SessionContextValue = {
@@ -36,8 +32,6 @@ const anonymousSession: SessionContextValue = {
   signIn: () => Promise.reject(new Error('No session provider is mounted.')),
   signOut: () => Promise.resolve(),
   reload: () => Promise.resolve(),
-  savePreferences: () =>
-    Promise.reject(new Error('No session provider is mounted.')),
 };
 
 export const SessionContext =

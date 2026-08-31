@@ -2,9 +2,12 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createAppQueryClient } from './api/queryClient';
 import { ApplicationProviders } from './app/ApplicationProviders';
+import { applyDocumentPreferences, getPreferences } from './app/preferences';
 import { createAppRouter } from './app/router';
 import './styles/tokens.css';
 import './styles/base.css';
+
+applyDocumentPreferences(getPreferences());
 
 const rootElement = document.getElementById('root');
 

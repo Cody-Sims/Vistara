@@ -67,3 +67,37 @@ export function AdminFailure({
 export function AdminEmpty({ children }: { readonly children: ReactNode }) {
   return <p className={styles.empty}>{children}</p>;
 }
+
+interface PendingContractProps {
+  readonly title: string;
+  readonly description: string;
+  /** The exact request the API must publish before this can be built. */
+  readonly contract: string;
+}
+
+/**
+ * States plainly that a specified screen has no route yet and names the
+ * contract it will consume, so nothing here pretends to read data.
+ */
+export function AdminPendingContract({
+  contract,
+  description,
+  title,
+}: PendingContractProps) {
+  return (
+    <section className={styles.pending} aria-labelledby={`pending-${slug(title)}`}>
+      <h2 className={styles.pendingTitle} id={`pending-${slug(title)}`}>
+        {title}
+      </h2>
+      <p>{description}</p>
+      <p className={styles.contract}>
+        <span className={styles.contractLabel}>Required contract</span>
+        <code>{contract}</code>
+      </p>
+    </section>
+  );
+}
+
+function slug(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+}

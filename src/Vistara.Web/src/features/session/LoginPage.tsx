@@ -1,92 +1,54 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { VistaraApiError } from '../../api/generated/client';
-import type { Capabilities } from '../../api/platform';
 import { BrandMark } from '../../brand';
-import { Skeleton } from '../../components';
 import { safeDestination } from './safeDestination';
 import { useSession } from './sessionContext';
 import styles from './LoginPage.module.css';
 
-export interface CapabilitiesClient {
-  getCapabilities(): Promise<Capabilities>;
-}
-
-interface LoginPageProps {
-  readonly capabilities: CapabilitiesClient;
-}
-
 interface FieldErrors {
-  readonly email?: string;
+  readonly login?: string;
   readonly password?: string;
 }
 
-export function LoginPage({ capabilities }: LoginPageProps) {
+export function LoginPage() {
   const session = useSession();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const destination = safeDestination(searchParams.get('returnTo'));
 
-  const [deployment, setDeployment] = useState<Capabilities>();
-  const [capabilitiesFailed, setCapabilitiesFailed] = useState(false);
-  const [email, setEmail] = useState('');
+  const [login, setLogin] = useState('');
   const [password, setPassword] = useState('');
-  const [rememberMe, setRememberMe] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [failure, setFailure] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const emailField = useRef<HTMLInputElement>(null);
+  const loginField = useRef<HTMLInputElement>(null);
   const passwordField = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    let active = true;
-    void capabilities.getCapabilities().then(
-      (value) => {
-        if (active) {
-          setDeployment(value);
-        }
-      },
-      () => {
-        if (active) {
-          setCapabilitiesFailed(true);
-        }
-      },
-    );
-
-    return () => {
-      active = false;
-    };
-  }, [capabilities]);
 
   if (session.status === 'authenticated') {
     return <Navigate replace to={destination} />;
   }
 
-  const authentication = deployment?.authentication;
-  const localAccounts = authentication?.localAccounts !== false;
-  const oidc = authentication?.oidc;
-  const pending = deployment === undefined && !capabilitiesFailed;
-
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const trimmedEmail = email.trim();
+    const trimmedLogin = login.trim();
     const errors: FieldErrors = {
-      ...(trimmedEmail
+      ...(trimmedLogin
         ? {}
-        : { email: 'Enter the email address for your account.' }),
+        : { login: 'Enter the email address or user name for your account.' }),
       ...(password ? {} : { password: 'Enter your password.' }),
     };
 
     setFieldErrors(errors);
     setFailure('');
-    if (errors.email || errors.password) {
-      (errors.email ? emailField : passwordField).current?.focus();
+    if (errors.login || errors.password) {
+      (errors.login ? loginField : passwordField).current?.focus();
       return;
     }
 
     setSubmitting(true);
     try {
-      await session.signIn({ email: trimmedEmail, password, rememberMe });
+      await session.signIn({ login: trimmedLogin, password });
       setPassword('');
       await navigate(destination, { replace: true });
     } catch (error) {
@@ -115,99 +77,68 @@ export function LoginPage({ capabilities }: LoginPageProps) {
           </p>
         ) : null}
 
-        {localAccounts ? (
-          <form className={styles.form} noValidate onSubmit={(event) => void submit(event)}>
-            <div className={styles.field}>
-              <label htmlFor="login-email">Email address</label>
-              <input
-                autoComplete="username"
-                aria-describedby={
-                  fieldErrors.email ? 'login-email-error' : undefined
-                }
-                aria-invalid={fieldErrors.email ? true : undefined}
-                id="login-email"
-                inputMode="email"
-                name="email"
-                ref={emailField}
-                type="email"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-              />
-              {fieldErrors.email ? (
-                <p className={styles.fieldError} id="login-email-error">
-                  {fieldErrors.email}
-                </p>
-              ) : null}
-            </div>
+        <form
+          className={styles.form}
+          noValidate
+          onSubmit={(event) => void submit(event)}
+        >
+          <div className={styles.field}>
+            <label htmlFor="login-name">Email address or user name</label>
+            <input
+              autoComplete="username"
+              aria-describedby={
+                fieldErrors.login ? 'login-name-error' : undefined
+              }
+              aria-invalid={fieldErrors.login ? true : undefined}
+              id="login-name"
+              name="login"
+              ref={loginField}
+              type="text"
+              value={login}
+              onChange={(event) => setLogin(event.target.value)}
+            />
+            {fieldErrors.login ? (
+              <p className={styles.fieldError} id="login-name-error">
+                {fieldErrors.login}
+              </p>
+            ) : null}
+          </div>
 
-            <div className={styles.field}>
-              <label htmlFor="login-password">Password</label>
-              <input
-                autoComplete="current-password"
-                aria-describedby={
-                  fieldErrors.password ? 'login-password-error' : undefined
-                }
-                aria-invalid={fieldErrors.password ? true : undefined}
-                id="login-password"
-                name="password"
-                ref={passwordField}
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-              />
-              {fieldErrors.password ? (
-                <p className={styles.fieldError} id="login-password-error">
-                  {fieldErrors.password}
-                </p>
-              ) : null}
-            </div>
+          <div className={styles.field}>
+            <label htmlFor="login-password">Password</label>
+            <input
+              autoComplete="current-password"
+              aria-describedby={
+                fieldErrors.password ? 'login-password-error' : undefined
+              }
+              aria-invalid={fieldErrors.password ? true : undefined}
+              id="login-password"
+              name="password"
+              ref={passwordField}
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+            {fieldErrors.password ? (
+              <p className={styles.fieldError} id="login-password-error">
+                {fieldErrors.password}
+              </p>
+            ) : null}
+          </div>
 
-            <label className={styles.remember}>
-              <input
-                checked={rememberMe}
-                name="rememberMe"
-                type="checkbox"
-                onChange={(event) => setRememberMe(event.target.checked)}
-              />
-              Keep me signed in
-            </label>
-
-            <button
-              className={styles.submit}
-              disabled={submitting}
-              type="submit"
-            >
-              {submitting ? 'Signing in…' : 'Sign in'}
-            </button>
-            <p className={styles.progress} role="status" aria-live="polite">
-              {submitting ? 'Checking your credentials…' : ''}
-            </p>
-          </form>
-        ) : null}
-
-        {pending ? (
-          <Skeleton count={1} shape="row" />
-        ) : null}
-
-        {oidc ? (
-          <a className={styles.federated} href={oidc.startPath} rel="nofollow">
-            Continue with {oidc.displayName}
-          </a>
-        ) : null}
-
-        {!pending && !localAccounts && !oidc ? (
-          <p className={styles.description}>
-            No sign-in method is configured for this deployment. Ask the
-            administrator to enable local accounts or a single sign-on provider.
+          <button className={styles.submit} disabled={submitting} type="submit">
+            {submitting ? 'Signing in…' : 'Sign in'}
+          </button>
+          <p className={styles.progress} role="status" aria-live="polite">
+            {submitting ? 'Checking your credentials…' : ''}
           </p>
-        ) : null}
+        </form>
 
-        {capabilitiesFailed ? (
-          <p className={styles.hint}>
-            Sign-in options could not be loaded, so only local accounts are
-            shown.
-          </p>
-        ) : null}
+        <p className={styles.hint}>
+          The session lives in a secure cookie on this server. Nothing about
+          your account is stored in the browser.
+        </p>
+
       </section>
     </main>
   );

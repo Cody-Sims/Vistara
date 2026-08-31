@@ -1,32 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-export type ResourceState<T> =
+export type RemoteState<T> =
   | { readonly kind: 'loading' }
-  | { readonly kind: 'ready'; readonly value: T; readonly etag?: string }
+  | { readonly kind: 'ready'; readonly value: T }
   | { readonly kind: 'failed'; readonly error: unknown };
 
-interface Loaded<T> {
-  readonly data: T;
-  readonly etag?: string;
-}
-
-type Setter<T> = (state: ResourceState<T>) => void;
-
 function runLoad<T>(
-  load: () => Promise<Loaded<T>>,
+  load: () => Promise<T>,
   request: { current: number },
-  apply: Setter<T>,
+  apply: (state: RemoteState<T>) => void,
 ): Promise<void> {
   const id = ++request.current;
 
   return load().then(
-    (response) => {
+    (value) => {
       if (request.current === id) {
-        apply({
-          kind: 'ready',
-          value: response.data,
-          ...(response.etag ? { etag: response.etag } : {}),
-        });
+        apply({ kind: 'ready', value });
       }
     },
     (error: unknown) => {
@@ -38,16 +27,16 @@ function runLoad<T>(
 }
 
 /**
- * Loads an administrative resource with a retry that repeats the same request.
- * Requests are ordered so a slow answer never replaces a newer one. Callers
- * pass a memoized loader; a new loader identity refetches.
+ * Reads a resource once per loader identity, with a retry that repeats the
+ * same request. Requests are ordered so a slow answer never replaces a newer
+ * one. Callers pass a memoized loader; a new identity refetches.
  */
-export function useAdminResource<T>(load: () => Promise<Loaded<T>>): {
-  state: ResourceState<T>;
+export function useRemoteResource<T>(load: () => Promise<T>): {
+  state: RemoteState<T>;
   reload: () => void;
   refresh: () => Promise<void>;
 } {
-  const [state, setState] = useState<ResourceState<T>>({ kind: 'loading' });
+  const [state, setState] = useState<RemoteState<T>>({ kind: 'loading' });
   const [attempt, setAttempt] = useState(0);
   const request = useRef(0);
 

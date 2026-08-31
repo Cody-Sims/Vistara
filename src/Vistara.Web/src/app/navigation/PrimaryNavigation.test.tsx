@@ -2,32 +2,23 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
-import type { SessionSnapshot, TenantRole } from '../../api/platform';
+import type { CurrentUser, TenantRole } from '../../api/platform';
 import { SessionProvider } from '../../features/session';
+import { currentUser } from '../../features/session/sessionTestData';
 import { PrimaryNavigation } from './PrimaryNavigation';
 
-function snapshot(role: TenantRole): SessionSnapshot {
-  return {
-    user: {
-      id: 'user-1',
-      displayName: 'Ada Lovelace',
-      email: 'ada@example.test',
-      platformAdmin: false,
-    },
-    memberships: [
-      { tenantId: 'tenant-1', tenantName: 'Studio', role, status: 'active' },
-    ],
-    activeTenantId: 'tenant-1',
-    preferences: {},
-  };
+function snapshot(role: TenantRole): CurrentUser {
+  return currentUser({}, role);
 }
 
 function client(role: TenantRole) {
   return {
     getSession: vi.fn(async () => snapshot(role)),
-    login: vi.fn(async () => snapshot(role)),
+    login: vi.fn(async () => ({
+      user: snapshot(role),
+      csrfToken: 'token-1',
+    })),
     logout: vi.fn(async () => undefined),
-    updatePreferences: vi.fn(async () => snapshot(role)),
   };
 }
 
@@ -167,10 +158,12 @@ describe('primary navigation', () => {
 
   it('waits for the session before offering sign-in or an account menu', () => {
     const pending = {
-      getSession: vi.fn(() => new Promise<SessionSnapshot>(() => {})),
-      login: vi.fn(async () => snapshot('Member')),
+      getSession: vi.fn(() => new Promise<CurrentUser>(() => {})),
+      login: vi.fn(async () => ({
+        user: snapshot('Member'),
+        csrfToken: 'token-1',
+      })),
       logout: vi.fn(async () => undefined),
-      updatePreferences: vi.fn(async () => snapshot('Member')),
     };
     renderNavigation('/library', pending);
 

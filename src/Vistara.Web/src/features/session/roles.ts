@@ -1,38 +1,39 @@
 import type {
-  SessionSnapshot,
+  CurrentUser,
   TenantMembership,
   TenantRole,
 } from '../../api/platform';
 
-const administrativeRoles: readonly TenantRole[] = ['TenantOwner', 'TenantAdmin'];
+const administrativeRoles: readonly TenantRole[] = [
+  'TenantOwner',
+  'TenantAdmin',
+];
 
+/**
+ * The membership the session is scoped to. A session without `tenantId`, or
+ * one whose tenant is not in the membership list, has no active membership:
+ * another tenant's role never stands in for it.
+ */
 export function activeMembership(
-  session: SessionSnapshot | undefined,
+  user: CurrentUser | undefined,
 ): TenantMembership | undefined {
-  if (!session) {
+  if (!user?.tenantId) {
     return undefined;
   }
 
-  return (
-    session.memberships.find(
-      (membership) => membership.tenantId === session.activeTenantId,
-    ) ?? session.memberships[0]
+  return user.tenants.find(
+    (membership) => membership.id === user.tenantId,
   );
 }
 
-export function canAdminister(session: SessionSnapshot | undefined): boolean {
-  if (!session) {
-    return false;
-  }
+export function canAdminister(user: CurrentUser | undefined): boolean {
+  const membership = activeMembership(user);
 
-  if (session.user.platformAdmin) {
-    return true;
-  }
-
-  const membership = activeMembership(session);
   return (
-    membership?.status === 'active' &&
-    administrativeRoles.includes(membership.role)
+    membership !== undefined &&
+    membership.membershipStatus === 'Active' &&
+    administrativeRoles.includes(membership.role) &&
+    (user?.role === undefined || administrativeRoles.includes(user.role))
   );
 }
 

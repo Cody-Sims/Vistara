@@ -19,6 +19,8 @@ import { AlbumDetailView, AlbumsView } from '../../features/albums';
 import { FavoritesView } from '../../features/favorites';
 import { LibraryPage } from '../../features/library';
 import { SearchView } from '../../features/search';
+import { useSession } from '../../features/session';
+import { SettingsPage } from '../../features/settings';
 import { PublicShareView, ShareManager } from '../../features/shares';
 import { TagsView } from '../../features/tags';
 import { TrashManager } from '../../features/trash';
@@ -145,7 +147,12 @@ export function LibraryRoute() {
 }
 
 export function AdminUsersRoute() {
-  return <AdminUsersPage client={platformClient} />;
+  const { user } = useSession();
+  return user?.tenantId ? (
+    <AdminUsersPage client={platformClient} tenantId={user.tenantId} />
+  ) : (
+    <p role="status">This session is not scoped to a workspace.</p>
+  );
 }
 
 export function AdminStorageRoute() {
@@ -161,7 +168,11 @@ export function AdminPoliciesRoute() {
 }
 
 export function AdminAuditRoute() {
-  return <AdminAuditPage client={platformClient} />;
+  return <AdminAuditPage />;
+}
+
+export function SettingsRoute() {
+  return <SettingsPage client={platformClient} />;
 }
 
 export function SearchRoute() {
