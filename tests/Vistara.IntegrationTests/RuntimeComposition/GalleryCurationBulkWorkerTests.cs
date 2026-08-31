@@ -2,15 +2,18 @@ using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Vistara.Application.Common.Imaging;
 using Vistara.Application.Common.Storage;
 using Vistara.Application.Gallery;
 using Vistara.Application.Gallery.Favorites;
+using Vistara.IntegrationTests.Persistence;
 using Vistara.Persistence;
 using Vistara.Persistence.Gallery.Curation;
 using Vistara.Persistence.Ingest;
+using Vistara.Persistence.Jobs;
 using Vistara.Persistence.Model;
 using Vistara.Worker.Composition.Platform;
 using Vistara.Worker.Features.Gallery;
@@ -25,6 +28,8 @@ namespace Vistara.IntegrationTests.RuntimeComposition;
 /// </summary>
 public sealed class GalleryCurationBulkWorkerTests
 {
+    private const string FavoriteInsert = "INSERT INTO \"asset_favorites\"";
+
     private static readonly DateTimeOffset Now =
         new(2026, 8, 31, 9, 0, 0, TimeSpan.Zero);
 
@@ -167,6 +172,59 @@ public sealed class GalleryCurationBulkWorkerTests
     }
 
     [Fact]
+    public async Task Worker_retries_a_provider_fault_and_applies_the_batch_once()
+    {
+        await using CurationWorkerDatabase database =
+            await CurationWorkerDatabase.CreateAsync();
+        Guid jobId = Guid.CreateVersion7();
+        _ = await database.QueueAsync(
+            jobId,
+            new BulkCurationRequest(
+                [new BulkCurationTarget(database.FirstAssetId, 1)],
+                new BulkCurationAction("setFavorite", null, null, true)),
+            "bulk-transient");
+        database.Faults.Arm(
+            FavoriteInsert,
+            new SqliteException("database is locked", 5));
+
+        await database.RunWorkerAsync();
+
+        JobRow retried = await database.ReadJobAsync(jobId);
+        Assert.True(database.Faults.Thrown > 0);
+        Assert.Equal("RetryScheduled", retried.State);
+        Assert.Equal(1, retried.Attempts);
+        Assert.Equal("jobs.provider_unavailable", retried.FailureCode);
+        Assert.True(retried.AvailableAtUtc > retried.CreatedAtUtc);
+        await using (VistaraDbContext failedRun = database.CreateContext())
+        {
+            Assert.Empty(await failedRun.AssetFavorites.ToListAsync());
+            AuditEventRow audit = Assert.Single(
+                await failedRun.AuditEvents
+                    .Where(row => row.Action == "gallery.curation.bulk")
+                    .ToListAsync());
+            Assert.Contains(
+                "failed:curation_store_unavailable",
+                audit.AfterJson,
+                StringComparison.Ordinal);
+        }
+
+        database.Faults.Disarm();
+        await database.MakeAvailableAsync(jobId);
+        await database.RunWorkerAsync();
+
+        JobRow completed = await database.ReadJobAsync(jobId);
+        Assert.Equal("Completed", completed.State);
+        await using VistaraDbContext context = database.CreateContext();
+        Assert.Equal(
+            database.FirstAssetId,
+            Assert.Single(await context.AssetFavorites.ToListAsync()).AssetId);
+        Assert.Equal(
+            2L,
+            (await context.Assets.SingleAsync(
+                asset => asset.Id == database.FirstAssetId)).Version);
+    }
+
+    [Fact]
     public void Worker_startup_validation_resolves_the_bulk_curation_handler()
     {
         ServiceCollection services = [];
@@ -205,6 +263,7 @@ public sealed class GalleryCurationBulkWorkerTests
             SqliteConnection anchor,
             string connectionString,
             ServiceProvider worker,
+            GalleryCurationFaultClassificationTests.FaultInjector faults,
             Guid tenantId,
             Guid ownerId,
             Guid firstAssetId,
@@ -214,12 +273,15 @@ public sealed class GalleryCurationBulkWorkerTests
             _anchor = anchor;
             _connectionString = connectionString;
             _worker = worker;
+            Faults = faults;
             TenantId = tenantId;
             OwnerId = ownerId;
             FirstAssetId = firstAssetId;
             SecondAssetId = secondAssetId;
             TagId = tagId;
         }
+
+        internal GalleryCurationFaultClassificationTests.FaultInjector Faults { get; }
 
         internal Guid TenantId { get; }
 
@@ -306,9 +368,15 @@ public sealed class GalleryCurationBulkWorkerTests
                      """);
             }
 
+            var faults = new GalleryCurationFaultClassificationTests.FaultInjector();
             ServiceCollection services = [];
             services.AddSingleton(NoInvocationProxy.Create<IBlobStore>());
             services.AddSingleton(NoInvocationProxy.Create<IImageProcessor>());
+            // Registered before the platform so the fault injector rides the
+            // worker's own VistaraDbContext options.
+            services.AddDbContext<VistaraDbContext>(options => options
+                .UseSqlite(connectionString)
+                .AddInterceptors(faults));
             services.AddVistaraWorkerPlatform(
                 new ConfigurationBuilder()
                     .AddInMemoryCollection(new Dictionary<string, string?>
@@ -324,6 +392,7 @@ public sealed class GalleryCurationBulkWorkerTests
                 anchor,
                 connectionString,
                 worker,
+                faults,
                 tenantId,
                 ownerId,
                 firstAssetId,
@@ -408,6 +477,25 @@ public sealed class GalleryCurationBulkWorkerTests
             _worker
                 .GetRequiredService<JobWorkerRuntime>()
                 .RunOnceAsync(CancellationToken.None);
+
+        internal async ValueTask<JobRow> ReadJobAsync(Guid jobId)
+        {
+            await using VistaraDbContext context = CreateContext();
+            return await context.Jobs
+                .AsNoTracking()
+                .SingleAsync(job => job.Id == jobId);
+        }
+
+        internal async ValueTask MakeAvailableAsync(Guid jobId)
+        {
+            await using VistaraDbContext context = CreateContext();
+            _ = await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                 UPDATE jobs
+                 SET available_at_utc = {Now}
+                 WHERE id = {jobId}
+                 """);
+        }
 
         internal async ValueTask<string?> ReadJobStateAsync(Guid jobId)
         {

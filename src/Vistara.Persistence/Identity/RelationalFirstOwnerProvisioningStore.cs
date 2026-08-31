@@ -1,9 +1,7 @@
 using System.Data;
 using System.Data.Common;
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
-using Npgsql;
 using Vistara.Application.Common.Auditing;
 using Vistara.Domain.Identity;
 using Vistara.Domain.Tenancy;
@@ -197,25 +195,8 @@ public sealed class RelationalFirstOwnerProvisioningStore(
     /// violation. Classification never converts an unrelated failure into a
     /// completed bootstrap; the caller always confirms against the marker.
     /// </summary>
-    public static bool IsContentionOrConstraint(Exception failure)
-    {
-        for (Exception? current = failure; current is not null; current = current.InnerException)
-        {
-            switch (current)
-            {
-                case SqliteException sqlite when sqlite.SqliteErrorCode is 5 or 6 or 19:
-                case SqliteException locked when locked.SqliteExtendedErrorCode is 261 or 262:
-                    return true;
-                case PostgresException postgres when postgres.SqlState is
-                    "23505" or "23514" or "40001" or "40P01" or "55P03":
-                    return true;
-                default:
-                    continue;
-            }
-        }
-
-        return false;
-    }
+    public static bool IsContentionOrConstraint(Exception failure) =>
+        RelationalFaultClassifier.IsContentionOrConstraint(failure);
 
     private static AuditEventRow ToRow(AuditRecord record) => new()
     {

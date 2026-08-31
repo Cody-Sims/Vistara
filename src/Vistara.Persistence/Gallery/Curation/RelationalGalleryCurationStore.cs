@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -21,6 +22,9 @@ public sealed class RelationalGalleryCurationStore :
     ITagCurationStore,
     IFavoriteCurationStore
 {
+    private const string AssetVersionConflictCode = "asset_version_conflict";
+    private const string StoreUnavailableCode = "curation_store_unavailable";
+
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
     private readonly VistaraDbContext _context;
@@ -1318,44 +1322,26 @@ public sealed class RelationalGalleryCurationStore :
             return await RollbackAsync<CuratedAssetSnapshot>(transaction, access);
         }
 
-        CurationFailure? operationFailure = action.Kind switch
+        CurationFailure? operationFailure;
+        try
         {
-            "addTag" => await ChangeBulkTagAsync(
+            operationFailure = await ApplyBulkActionAsync(
                 actor,
                 asset!,
-                action.TagId!.Value,
-                add: true,
+                action,
                 now,
-                cancellationToken),
-            "removeTag" => await ChangeBulkTagAsync(
-                actor,
-                asset!,
-                action.TagId!.Value,
-                add: false,
-                now,
-                cancellationToken),
-            "addToAlbum" => await ChangeBulkAlbumAsync(
-                actor,
-                asset!,
-                action.AlbumId!.Value,
-                add: true,
-                now,
-                cancellationToken),
-            "removeFromAlbum" => await ChangeBulkAlbumAsync(
-                actor,
-                asset!,
-                action.AlbumId!.Value,
-                add: false,
-                now,
-                cancellationToken),
-            "setFavorite" => await ChangeBulkFavoriteAsync(
-                actor,
-                asset!,
-                action.Favorite!.Value,
-                now,
-                cancellationToken),
-            _ => CurationFailure.Invalid("bulk_action_invalid"),
-        };
+                cancellationToken);
+        }
+        catch (DbUpdateException error)
+        {
+            // A statement that never reached the commit fence tells us nothing
+            // about the caller's precondition, so the batch reports the store
+            // fault instead of a settled conflict.
+            return await RollbackAsync<CuratedAssetSnapshot>(
+                transaction,
+                ClassifyWriteFailure(error, AssetVersionConflictCode));
+        }
+
         if (operationFailure is not null)
         {
             return await RollbackAsync<CuratedAssetSnapshot>(
@@ -1365,7 +1351,7 @@ public sealed class RelationalGalleryCurationStore :
 
         CurationFailure? saveFailure = await SaveAsync(
             transaction,
-            "asset_version_conflict",
+            AssetVersionConflictCode,
             cancellationToken);
         if (saveFailure is not null)
         {
@@ -1378,6 +1364,51 @@ public sealed class RelationalGalleryCurationStore :
             target.AssetId,
             cancellationToken))!);
     }
+
+    private async ValueTask<CurationFailure?> ApplyBulkActionAsync(
+        CurationActor actor,
+        AssetRow asset,
+        BulkCurationAction action,
+        DateTimeOffset now,
+        CancellationToken cancellationToken) =>
+        action.Kind switch
+        {
+            "addTag" => await ChangeBulkTagAsync(
+                actor,
+                asset,
+                action.TagId!.Value,
+                add: true,
+                now,
+                cancellationToken),
+            "removeTag" => await ChangeBulkTagAsync(
+                actor,
+                asset,
+                action.TagId!.Value,
+                add: false,
+                now,
+                cancellationToken),
+            "addToAlbum" => await ChangeBulkAlbumAsync(
+                actor,
+                asset,
+                action.AlbumId!.Value,
+                add: true,
+                now,
+                cancellationToken),
+            "removeFromAlbum" => await ChangeBulkAlbumAsync(
+                actor,
+                asset,
+                action.AlbumId!.Value,
+                add: false,
+                now,
+                cancellationToken),
+            "setFavorite" => await ChangeBulkFavoriteAsync(
+                actor,
+                asset,
+                action.Favorite!.Value,
+                now,
+                cancellationToken),
+            _ => CurationFailure.Invalid("bulk_action_invalid"),
+        };
 
     private async ValueTask<CurationFailure?> ChangeBulkTagAsync(
         CurationActor actor,
@@ -2016,16 +2047,50 @@ public sealed class RelationalGalleryCurationStore :
         }
         catch (DbUpdateConcurrencyException)
         {
-            await transaction.RollbackAsync(CancellationToken.None);
-            _context.ChangeTracker.Clear();
+            await AbandonAsync(transaction);
             return CurationFailure.Conflict(conflictCode);
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException error)
+        {
+            await AbandonAsync(transaction);
+            return ClassifyWriteFailure(error, conflictCode);
+        }
+    }
+
+    /// <summary>
+    /// Separates a precondition the caller must resolve from a database that
+    /// could not answer. Only a fence or a declared constraint is a conflict;
+    /// every other provider fault is retryable and must not be reported as a
+    /// settled outcome.
+    /// </summary>
+    private static CurationFailure ClassifyWriteFailure(
+        DbUpdateException error,
+        string conflictCode) =>
+        RelationalFaultClassifier.Classify(error) switch
+        {
+            RelationalFaultKind.Concurrency => CurationFailure.Conflict(conflictCode),
+            RelationalFaultKind.Precondition => CurationFailure.Conflict(conflictCode),
+            _ => CurationFailure.Unavailable(StoreUnavailableCode),
+        };
+
+    /// <summary>
+    /// Releases a failed transaction. A database that just refused a statement
+    /// may also refuse the rollback, and that must not mask the classified
+    /// failure the caller is about to receive.
+    /// </summary>
+    private async ValueTask AbandonAsync(IDbContextTransaction transaction)
+    {
+        try
         {
             await transaction.RollbackAsync(CancellationToken.None);
-            _context.ChangeTracker.Clear();
-            return CurationFailure.Conflict(conflictCode);
         }
+        catch (Exception failure) when (
+            failure is DbException or InvalidOperationException)
+        {
+            // The provider already abandoned the transaction.
+        }
+
+        _context.ChangeTracker.Clear();
     }
 
     private async ValueTask<CurationResult<T>> RollbackAsync<T>(
