@@ -302,6 +302,7 @@ directory rather than linking to external hosts.
 | [Release, migration, and rollback runbook](docs/operations/release-runbook.md) | You are publishing, migrating, or rolling back a release |
 | [Azure free credits](docs/operations/azure-free-credits.md) | You are evaluating Vistara on Microsoft Azure free-credit offers |
 | [Azure identity, RBAC, and secrets](docs/operations/azure-identity-and-secrets.md) | You are assigning managed identities, blob roles, or Key Vault secrets on Azure |
+| [Future plans](docs/future-plans/README.md) | You want the planned Entra sign-in and one-command Azure bootstrap direction |
 | [Future ideas](docs/future-ideas/README.md) | You want the uncommitted post-MVP research directions |
 
 ## Repository layout

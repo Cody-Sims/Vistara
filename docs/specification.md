@@ -9,11 +9,13 @@
 **Implementation status:** the version 0.1 scope in section 4 is implemented on
 `dev` and staged in pull request #2 for the 0.1.0 tag; it counts as released
 only once that pull request merges and the tag is published. Section 16 carries
-a per-wave status marker. Section 13 and the Wave 8 AI tasks describe a future
+a per-wave status marker. Section 13 and the Wave 9 AI tasks describe a future
 architecture; no AI capability exists in the codebase. Nothing in
 `docs/future-ideas/` — AI metadata and editing, a Model Context Protocol server,
-or cloud imports — is implemented or scheduled. The staged capabilities are
-summarized in `README.md` and `docs/release-notes.md`.
+or cloud imports — is implemented or scheduled. Wave 8 and
+`docs/future-plans/` describe planned hosted identity and Azure bootstrap work;
+that work is not implemented or committed to a release. The staged capabilities
+are summarized in `README.md` and `docs/release-notes.md`.
 
 ## 1. Executive product definition
 
@@ -1296,7 +1298,7 @@ Tasks may edit only their listed ownership paths. Shared root, composition, and 
 wave's outcomes are implemented on `dev`, staged in pull request #2 for the
 0.1.0 tag, and covered by verification commands that are part of the
 repository's checks. *Not started* means no code for that wave exists. Waves 0A
-through 7 are complete; Wave 8 is not started.
+through 7 are complete; Waves 8 and 9 are not started.
 
 ### Wave 0A — repository bootstrap
 
@@ -1454,7 +1456,25 @@ npm --prefix tests/Vistara.E2E run test
 | `OPS-07` | S | Provider live-test workflows | Scheduled AWS/Azure/R2/B2 workflow dry-run/config validation |
 | `OPS-08` | M | README, deployment, security, backup, API documentation | Validate documented starter install from a clean checkout |
 
-### Wave 8 — post-MVP AI
+### Wave 8 — hosted identity and Azure bootstrap
+
+**Status: not started.** This planned wave is not part of version 0.1.0 and has
+no release date. The detailed security, infrastructure, rollout, and acceptance
+plan is in
+[`future-plans/hosted-identity-and-azure-bootstrap.md`](future-plans/hosted-identity-and-azure-bootstrap.md).
+
+| ID | Size | Dependencies | Ownership | Verification |
+|---|---|---|---|---|
+| `CLOUD-01` | M | Current auth and deployment | Threat model and architecture decision | Security review covers OIDC and bootstrap threats |
+| `CLOUD-02` | M | CLOUD-01 | External identity contracts and persistence | Tenant/object identity migration and revocation tests |
+| `CLOUD-03` | M | CLOUD-02 | Entra OIDC/PKCE browser login and cookie handoff | Browser tests cover state, nonce, tenant, replay, and callback errors |
+| `CLOUD-04` | M | CLOUD-02 | Guarded first-login owner bootstrap | Concurrent eligible sign-ins create exactly one owner |
+| `CLOUD-05` | M | CLOUD-01 | Managed-identity PostgreSQL connections | Live token rotation tests for migration, API, and worker roles |
+| `CLOUD-06` | M | CLOUD-01, CLOUD-05 | Bicep Azure infrastructure modules | Bicep lint, what-if, policy, and ephemeral deployment tests |
+| `CLOUD-07` | M | CLOUD-03..06 | `azd` deployment, migration, health, and teardown hooks | Fresh `azd up` reaches healthy; `azd down` reports retained data |
+| `CLOUD-08` | S | CLOUD-07 | Operator, recovery, cost, and rollback docs | New-operator deployment drill |
+
+### Wave 9 — post-MVP AI
 
 **Status: not started.** No task in this wave has been implemented, and none is scheduled. Nothing in the codebase should be read as partial AI support.
 

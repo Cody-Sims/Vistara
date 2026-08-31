@@ -91,9 +91,14 @@ published, at which point the heading gains its release date.
 
 ### Not in this release
 
-AI metadata and editing, a Model Context Protocol server, and cloud imports are
-research notes in [`future-ideas/`](future-ideas/README.md). They are not
-implemented, not scheduled, and not a release promise.
+Hosted Microsoft Entra sign-in, guarded first-login owner provisioning, and
+one-command Azure `azd`/Bicep deployment are planned post-MVP work in
+[`future-plans/`](future-plans/README.md). They are not implemented, not part of
+0.1.0, and have no release date.
+
+AI metadata and editing, a Model Context Protocol server, and cloud imports
+remain unscheduled research notes in
+[`future-ideas/`](future-ideas/README.md).
 
 ### Upgrading
 
