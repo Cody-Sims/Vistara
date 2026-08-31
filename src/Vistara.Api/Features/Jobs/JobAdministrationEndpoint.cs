@@ -14,14 +14,26 @@ public static class JobAdministrationEndpoint
 {
     private const string CodePrefix = "jobs";
 
-    private static readonly string[] KnownStates =
-    [
-        nameof(JobState.Pending),
-        nameof(JobState.Leased),
-        nameof(JobState.RetryScheduled),
-        nameof(JobState.Completed),
-        nameof(JobState.DeadLettered),
-    ];
+    /// <summary>
+    /// The published state vocabulary is lower camel and matches the value a
+    /// job reports in <c>state</c>, so a client can feed a listed state
+    /// straight back into the filter. The stored representation is the enum
+    /// name, and the legacy spelling stays accepted.
+    /// </summary>
+    private static readonly Dictionary<string, string> StateVocabulary =
+        new(StringComparer.Ordinal)
+        {
+            ["pending"] = nameof(JobState.Pending),
+            ["leased"] = nameof(JobState.Leased),
+            ["retryScheduled"] = nameof(JobState.RetryScheduled),
+            ["completed"] = nameof(JobState.Completed),
+            ["deadLettered"] = nameof(JobState.DeadLettered),
+            [nameof(JobState.Pending)] = nameof(JobState.Pending),
+            [nameof(JobState.Leased)] = nameof(JobState.Leased),
+            [nameof(JobState.RetryScheduled)] = nameof(JobState.RetryScheduled),
+            [nameof(JobState.Completed)] = nameof(JobState.Completed),
+            [nameof(JobState.DeadLettered)] = nameof(JobState.DeadLettered),
+        };
 
     private static readonly JsonSerializerOptions ResponseJsonOptions =
         new(JsonSerializerDefaults.Web);
@@ -44,16 +56,22 @@ public static class JobAdministrationEndpoint
         }
 
         IQueryCollection query = context.Request.Query;
-        string[] states = query["states"]
+        string[] requestedStates = query["states"]
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Select(value => value!.Trim())
             .Distinct(StringComparer.Ordinal)
             .ToArray();
-        if (states.Any(state => !KnownStates.Contains(state, StringComparer.Ordinal)))
+        if (requestedStates.Any(state => !StateVocabulary.ContainsKey(state)))
         {
             await WriteValidationAsync(context, "states", cancellationToken);
             return;
         }
+
+        string[] states = requestedStates
+            .Select(state => StateVocabulary[state])
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
 
         string? type = query["type"].FirstOrDefault();
         if (type is not null &&

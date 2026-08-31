@@ -217,8 +217,8 @@ public sealed class AdminEndpointContractTests
         JsonElement item = Assert.Single(
             json.RootElement.GetProperty("items").EnumerateArray().ToArray());
         Assert.Equal("tenant.member.updated", item.GetProperty("action").GetString());
-        Assert.Equal("Succeeded", item.GetProperty("outcome").GetString());
-        Assert.Equal("User", item.GetProperty("actor").GetProperty("kind").GetString());
+        Assert.Equal("succeeded", item.GetProperty("outcome").GetString());
+        Assert.Equal("user", item.GetProperty("actor").GetProperty("kind").GetString());
         foreach (string leaked in new[] { "before", "after", "beforeJson", "afterJson" })
         {
             Assert.False(item.TryGetProperty(leaked, out _));
@@ -226,6 +226,25 @@ public sealed class AdminEndpointContractTests
 
         Assert.False(string.IsNullOrWhiteSpace(
             json.RootElement.GetProperty("nextCursor").GetString()));
+    }
+
+    [Theory]
+    [InlineData("succeeded", "Succeeded")]
+    [InlineData("Succeeded", "Succeeded")]
+    [InlineData("failed", "Failed")]
+    public async Task Audit_accepts_both_outcome_spellings(
+        string requested,
+        string stored)
+    {
+        var admin = new FakeAdminPort();
+
+        TestResponse response = await SendAsync(
+            "audit",
+            admin,
+            query: $"?outcome={requested}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(stored, admin.AuditQuery!.Outcome);
     }
 
     [Theory]

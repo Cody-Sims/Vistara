@@ -25,7 +25,29 @@ public static class AdminEndpoint
 
     private const string AuditPrefix = "audit";
 
-    private static readonly string[] AuditOutcomes = ["Succeeded", "Rejected", "Failed"];
+    /// <summary>
+    /// Audit outcomes and actor kinds are published in lower camel, matching
+    /// the job state vocabulary, while the stored representation stays the
+    /// domain enum name. The legacy spelling remains accepted on the filter.
+    /// </summary>
+    private static readonly Dictionary<string, string> AuditOutcomes =
+        new(StringComparer.Ordinal)
+        {
+            ["succeeded"] = "Succeeded",
+            ["rejected"] = "Rejected",
+            ["failed"] = "Failed",
+            ["Succeeded"] = "Succeeded",
+            ["Rejected"] = "Rejected",
+            ["Failed"] = "Failed",
+        };
+
+    private static readonly Dictionary<string, string> AuditActorKinds =
+        new(StringComparer.Ordinal)
+        {
+            ["User"] = "user",
+            ["ApiKey"] = "apiKey",
+            ["System"] = "system",
+        };
 
     private static readonly JsonSerializerOptions ResponseJsonOptions =
         new(JsonSerializerDefaults.Web);
@@ -243,13 +265,17 @@ public static class AdminEndpoint
             return;
         }
 
-        string? outcome = query["outcome"].FirstOrDefault();
-        if (outcome is not null &&
-            !AuditOutcomes.Contains(outcome, StringComparer.Ordinal))
+        string? requestedOutcome = query["outcome"].FirstOrDefault();
+        if (requestedOutcome is not null &&
+            !AuditOutcomes.ContainsKey(requestedOutcome))
         {
             await WriteValidationAsync(context, AuditPrefix, "outcome", cancellationToken);
             return;
         }
+
+        string? outcome = requestedOutcome is null
+            ? null
+            : AuditOutcomes[requestedOutcome];
 
         if (!AdminPaging.TryReadLimit(query["limit"].FirstOrDefault(), out int limit))
         {
@@ -304,11 +330,11 @@ public static class AdminEndpoint
                         item.Id,
                         item.OccurredAt,
                         new AuditActorResponse(
-                            item.ActorKind,
+                            DescribeActorKind(item.ActorKind),
                             item.ActorId,
                             null),
                         item.Action,
-                        item.Outcome,
+                        DescribeOutcome(item.Outcome),
                         item.ResourceType,
                         item.ResourceId))
                     .ToArray(),
@@ -337,6 +363,16 @@ public static class AdminEndpoint
             ? PatchValue.Of<long?>(null)
             : PatchValue.Of(parsed);
     }
+
+    internal static string DescribeActorKind(string stored) =>
+        AuditActorKinds.TryGetValue(stored, out string? published)
+            ? published
+            : stored;
+
+    internal static string DescribeOutcome(string stored) =>
+        stored.Length == 0
+            ? stored
+            : string.Concat(char.ToLowerInvariant(stored[0]), stored[1..]);
 
     private static async ValueTask<long> CurrentVersionAsync(
         IAdminPort admin,

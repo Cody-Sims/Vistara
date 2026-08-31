@@ -70,18 +70,56 @@ public sealed class JobAdministrationEndpointContractTests
     }
 
     [Fact]
-    public async Task Listing_forwards_filters_and_the_clamped_page_size()
+    public async Task Listing_accepts_the_published_lower_camel_states()
     {
         var administration = new FakeJobAdministrationPort();
 
         await SendAsync(
             "list",
             administration,
-            query: "?states=DeadLettered&states=RetryScheduled&type=asset.ingest&limit=25");
+            query: "?states=deadLettered&states=retryScheduled&type=asset.ingest&limit=25");
 
         Assert.Equal(ExpectedStates, administration.Query!.States);
         Assert.Equal("asset.ingest", administration.Query.Type);
         Assert.Equal(25, administration.Query.Limit);
+    }
+
+    [Fact]
+    public async Task Listing_still_accepts_the_legacy_pascal_case_states()
+    {
+        var administration = new FakeJobAdministrationPort();
+
+        await SendAsync(
+            "list",
+            administration,
+            query: "?states=DeadLettered&states=RetryScheduled");
+
+        Assert.Equal(ExpectedStates, administration.Query!.States);
+    }
+
+    [Fact]
+    public async Task A_listed_state_matches_the_filter_vocabulary()
+    {
+        var administration = new FakeJobAdministrationPort();
+
+        TestResponse response = await SendAsync(
+            "list",
+            administration,
+            query: "?states=deadLettered");
+
+        using JsonDocument json = JsonDocument.Parse(response.Body);
+        JsonElement item = Assert.Single(
+            json.RootElement.GetProperty("items").EnumerateArray().ToArray());
+        string state = item.GetProperty("state").GetString()!;
+        Assert.Equal("deadLettered", state);
+
+        var echo = new FakeJobAdministrationPort();
+        TestResponse round = await SendAsync(
+            "list",
+            echo,
+            query: $"?states={state}");
+        Assert.Equal(HttpStatusCode.OK, round.StatusCode);
+        Assert.Equal("DeadLettered", Assert.Single(echo.Query!.States));
     }
 
     [Theory]
