@@ -93,7 +93,7 @@ public sealed class AssetEndpointContractTests
             application,
             "GET",
             "/api/v1/assets",
-            query: "?limit=20&search=lake&statuses=Ready&contentTypes=image%2Fjpeg" +
+            query: "?limit=20&search=lake&statuses=ready&contentTypes=image%2Fjpeg" +
                 "&favorite=true&sort=title&direction=asc");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -103,11 +103,15 @@ public sealed class AssetEndpointContractTests
         Assert.Equal("lake", application.LastCriteria?.Search);
         Assert.Equal(AssetSort.Title, application.LastCriteria?.Sort);
         Assert.Equal(SortDirection.Ascending, application.LastCriteria?.Direction);
+        Assert.Equal(["Ready"], application.LastCriteria?.Statuses);
         Assert.Equal("no-store", response.Headers.CacheControl.ToString());
     }
 
     [Theory]
     [InlineData("?limit=201", "asset_query_invalid")]
+    [InlineData("?statuses=Ready", "asset_query_invalid")]
+    [InlineData("?statuses=trashed", "asset_query_invalid")]
+    [InlineData("?statuses=purged", "asset_query_invalid")]
     [InlineData("?sort=privateMetadata", "asset_query_invalid")]
     [InlineData("?filter=%7B%22gps%22%3Atrue%7D", "asset_query_invalid")]
     [InlineData("?cursor=not-a-valid-cursor", "asset_cursor_invalid")]
@@ -399,6 +403,35 @@ public sealed class AssetEndpointContractTests
         Assert.Equal("Tenant", forwarded);
         Assert.Equal(HttpStatusCode.BadRequest, stored.StatusCode);
         Assert.Equal("asset_update_invalid", stored.ProblemCode());
+    }
+
+    [Fact]
+    public async Task Documented_status_filters_reach_the_query_on_list_and_timeline()
+    {
+        var application = new FakeAssetQueryService
+        {
+            PageResult = AssetQueryPageResult.Success(
+                new AssetQueryPage([Item()], null)),
+        };
+
+        TestResponse list = await SendAsync(
+            new FakeAssetAuthorizationPort(),
+            application,
+            "GET",
+            "/api/v1/assets",
+            query: "?statuses=ready,processing");
+        IReadOnlyList<string>? listStatuses = application.LastCriteria?.Statuses;
+        TestResponse timeline = await SendAsync(
+            new FakeAssetAuthorizationPort(),
+            application,
+            "GET",
+            "/api/v1/timeline",
+            query: "?statuses=ready");
+
+        Assert.Equal(HttpStatusCode.OK, list.StatusCode);
+        Assert.Equal(["Processing", "Ready"], listStatuses);
+        Assert.Equal(HttpStatusCode.OK, timeline.StatusCode);
+        Assert.Equal(["Ready"], application.LastCriteria?.Statuses);
     }
 
     [Fact]

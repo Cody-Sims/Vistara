@@ -46,7 +46,6 @@ public static class GalleryServiceCollectionExtensions
                 policy => policy.RequireAuthenticatedUser());
         });
         services.AddHttpContextAccessor();
-        services.AddGalleryQueryNormalization();
         ServiceDescriptor? rateLimit = services.LastOrDefault(descriptor =>
             descriptor.ServiceType == typeof(IPlatformRateLimitHook));
         if (rateLimit?.ImplementationType ==

@@ -505,7 +505,7 @@ public static class AssetEndpoint
             criteria = AssetQueryCriteria.Create(
                 limit,
                 NullIfEmpty(context.Request.Query["search"].ToString()),
-                ReadStrings(context.Request.Query["statuses"]),
+                ReadQueryStatuses(context.Request.Query["statuses"]),
                 ReadStrings(context.Request.Query["contentTypes"]),
                 ReadGuid(context.Request.Query["albumId"]),
                 ReadGuids(context.Request.Query["tagIds"]),
@@ -544,6 +544,23 @@ public static class AssetEndpoint
         string? value = NullIfEmpty(values.ToString());
         return value is null ? null : Guid.Parse(value);
     }
+
+    /// <summary>
+    /// Mirrors the update seam: the filter accepts exactly the documented
+    /// <c>AssetQueryStatus</c> tokens and translates them to the stored enum
+    /// names, so no request-rewriting middleware has to guess at casing.
+    /// </summary>
+    private static string[]? ReadQueryStatuses(StringValues values) =>
+        ReadStrings(values)?
+            .Select(token =>
+                AssetContractVocabulary.TryReadQueryStatus(
+                    token,
+                    out string storedValue)
+                    ? storedValue
+                    : throw new ArgumentException(
+                        "The asset status filter is unsupported.",
+                        nameof(values)))
+            .ToArray();
 
     private static Guid[]? ReadGuids(StringValues values) =>
         ReadStrings(values)?.Select(Guid.Parse).ToArray();

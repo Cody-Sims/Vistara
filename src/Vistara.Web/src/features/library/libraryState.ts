@@ -1,6 +1,6 @@
 import type {
+  AssetQueryStatus,
   AssetSort,
-  AssetStatus,
   SortDirection,
   TimelineGrouping,
 } from '../../api/generated';
@@ -13,7 +13,7 @@ export interface LibraryState {
   direction: SortDirection;
   view: LibraryView;
   groupBy: TimelineGrouping;
-  statuses: AssetStatus[];
+  statuses: AssetQueryStatus[];
 }
 
 const assetSorts = new Set<AssetSort>([
@@ -25,13 +25,7 @@ const assetSorts = new Set<AssetSort>([
 const directions = new Set<SortDirection>(['asc', 'desc']);
 const views = new Set<LibraryView>(['grid', 'list']);
 const groupings = new Set<TimelineGrouping>(['day', 'month', 'year']);
-const statuses = new Set<AssetStatus>([
-  'processing',
-  'ready',
-  'failed',
-  'trashed',
-  'purged',
-]);
+const statuses = new Set<AssetQueryStatus>(['processing', 'ready', 'failed']);
 
 export const defaultLibraryState: LibraryState = {
   search: '',
@@ -53,7 +47,9 @@ function allowed<T extends string>(
 export function parseLibraryState(params: URLSearchParams): LibraryState {
   const selectedStatuses = (params.get('status') ?? '')
     .split(',')
-    .filter((status): status is AssetStatus => statuses.has(status as AssetStatus));
+    .filter((status): status is AssetQueryStatus =>
+      statuses.has(status as AssetQueryStatus),
+    );
 
   return {
     search: (params.get('q') ?? '').trim(),

@@ -4,7 +4,7 @@ import type {
   ApiResponse,
   AssetListQuery,
   AssetSort,
-  AssetStatus,
+  AssetQueryStatus,
   AssetSummary,
   CursorPage,
   SortDirection,
@@ -40,7 +40,7 @@ type ResultState =
   | { readonly kind: 'failed' }
   | { readonly kind: 'ready' };
 
-const statusChoices: readonly { value: AssetStatus; label: string }[] = [
+const statusChoices: readonly { value: AssetQueryStatus; label: string }[] = [
   { value: 'ready', label: 'Ready' },
   { value: 'processing', label: 'Processing' },
   { value: 'failed', label: 'Failed' },

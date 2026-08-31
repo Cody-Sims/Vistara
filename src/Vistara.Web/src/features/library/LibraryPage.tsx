@@ -12,7 +12,7 @@ import {
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import type {
   ApiResponse,
-  AssetStatus,
+  AssetQueryStatus,
   TimelineGroup,
   TimelinePage,
   TimelineQuery,
@@ -61,7 +61,7 @@ interface LibraryPageProps {
   restorationStore?: ReturnType<typeof createLibraryRestorationStore>;
 }
 
-const statuses: ReadonlyArray<{ value: AssetStatus; label: string }> = [
+const statuses: ReadonlyArray<{ value: AssetQueryStatus; label: string }> = [
   { value: 'ready', label: 'Ready' },
   { value: 'processing', label: 'Processing' },
   { value: 'failed', label: 'Failed' },
@@ -195,7 +195,7 @@ function useRestoration(
 
 function updateStatus(
   state: LibraryState,
-  status: AssetStatus,
+  status: AssetQueryStatus,
   checked: boolean,
 ) {
   return {

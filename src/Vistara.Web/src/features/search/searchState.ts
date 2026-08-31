@@ -1,7 +1,7 @@
 import type {
   AssetListQuery,
   AssetSort,
-  AssetStatus,
+  AssetQueryStatus,
   SortDirection,
 } from '../../api/generated';
 
@@ -9,7 +9,7 @@ export interface SearchState {
   readonly query: string;
   readonly sort: AssetSort;
   readonly direction: SortDirection;
-  readonly statuses: readonly AssetStatus[];
+  readonly statuses: readonly AssetQueryStatus[];
   readonly favorite: boolean;
   readonly capturedFrom: string;
   readonly capturedTo: string;
@@ -22,7 +22,7 @@ const assetSorts = new Set<AssetSort>([
   'title',
 ]);
 const directions = new Set<SortDirection>(['asc', 'desc']);
-const searchableStatuses = new Set<AssetStatus>([
+const searchableStatuses = new Set<AssetQueryStatus>([
   'ready',
   'processing',
   'failed',
@@ -56,8 +56,8 @@ function allowedDate(value: string | null): string {
 export function parseSearchState(params: URLSearchParams): SearchState {
   const statuses = (params.get('status') ?? '')
     .split(',')
-    .filter((status): status is AssetStatus =>
-      searchableStatuses.has(status as AssetStatus),
+    .filter((status): status is AssetQueryStatus =>
+      searchableStatuses.has(status as AssetQueryStatus),
     );
 
   return {

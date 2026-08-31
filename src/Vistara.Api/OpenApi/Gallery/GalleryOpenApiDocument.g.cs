@@ -6239,6 +6239,23 @@ public static class GalleryOpenApiDocument
           }
         ]
       },
+      "AssetQueryStatus": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "processing"
+          },
+          {
+            "type": "string",
+            "const": "ready"
+          },
+          {
+            "type": "string",
+            "const": "failed"
+          }
+        ],
+        "description": "Filterable asset status. Gallery queries never return trashed or purged assets, so those statuses are not accepted as a filter."
+      },
       "AssetVisibility": {
         "oneOf": [
           {
@@ -6319,7 +6336,7 @@ public static class GalleryOpenApiDocument
           "statuses": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/AssetStatus"
+              "$ref": "#/components/schemas/AssetQueryStatus"
             }
           },
           "contentTypes": {
@@ -6634,7 +6651,7 @@ public static class GalleryOpenApiDocument
           "statuses": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/AssetStatus"
+              "$ref": "#/components/schemas/AssetQueryStatus"
             }
           },
           "contentTypes": {

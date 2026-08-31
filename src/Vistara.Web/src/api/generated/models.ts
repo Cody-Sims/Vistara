@@ -41,6 +41,8 @@ export interface ApiProblemDetails {
 
 export type AssetStatus = "processing" | "ready" | "failed" | "trashed" | "purged";
 
+export type AssetQueryStatus = "processing" | "ready" | "failed";
+
 export type AssetVisibility = "private" | "tenant" | "public";
 
 export type AssetSort = "capturedAt" | "importedAt" | "updatedAt" | "title";
@@ -53,7 +55,7 @@ export interface AssetListQuery {
   readonly limit?: number;
   readonly cursor?: SignedCursor;
   readonly search?: string;
-  readonly statuses?: readonly AssetStatus[];
+  readonly statuses?: readonly AssetQueryStatus[];
   readonly contentTypes?: readonly string[];
   readonly albumId?: Uuid;
   readonly tagIds?: readonly Uuid[];
@@ -134,7 +136,7 @@ export interface TimelineQuery {
   readonly limit?: number;
   readonly cursor?: SignedCursor;
   readonly search?: string;
-  readonly statuses?: readonly AssetStatus[];
+  readonly statuses?: readonly AssetQueryStatus[];
   readonly contentTypes?: readonly string[];
   readonly albumId?: Uuid;
   readonly tagIds?: readonly Uuid[];
