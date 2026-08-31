@@ -1,4 +1,9 @@
+using System.Data;
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+using Vistara.Persistence;
+using Vistara.Persistence.Model;
 using Vistara.Api.Features.Tenants;
 using Vistara.Application.Common;
 using Vistara.Application.Common.Auditing;
@@ -17,6 +22,7 @@ namespace Vistara.Api.Composition.Platform;
 /// repositories, factories, directory reads, and audit writer.
 /// </summary>
 internal sealed class PlatformTenantDirectoryAdapter(
+    VistaraDbContext context,
     RelationalTenantDirectory directory,
     RelationalIdentityCatalog catalog,
     IUserRepository users,
@@ -182,122 +188,229 @@ internal sealed class PlatformTenantDirectoryAdapter(
                 "A membership change must set a role, a status, or both."));
         }
 
-        TenantRole? role = null;
-        if (update.Role is not null)
+        if (!TryReadRole(update.Role, out TenantRole? role))
         {
-            if (!Enum.TryParse(update.Role, ignoreCase: false, out TenantRole parsed) ||
-                !Enum.IsDefined(parsed))
-            {
-                return Result.Failure<TenantMemberView>(ResultError.Validation(
-                    "tenants.invalid_role",
-                    "The member role is not supported."));
-            }
-
-            role = parsed;
+            return Result.Failure<TenantMemberView>(ResultError.Validation(
+                "tenants.invalid_role",
+                "The member role is not supported."));
         }
 
-        MembershipStatus? status = null;
-        if (update.Status is not null)
+        if (!TryReadStatus(update.Status, out MembershipStatus? status))
         {
-            if (!Enum.TryParse(
-                    update.Status,
-                    ignoreCase: false,
-                    out MembershipStatus parsed) ||
-                !Enum.IsDefined(parsed) ||
-                parsed == MembershipStatus.Invited)
-            {
-                return Result.Failure<TenantMemberView>(ResultError.Validation(
-                    "tenants.invalid_status",
-                    "The member status must be Active, Suspended, or Removed."));
-            }
-
-            status = parsed;
+            return Result.Failure<TenantMemberView>(ResultError.Validation(
+                "tenants.invalid_status",
+                "The member status must be Active, Suspended, or Removed."));
         }
 
+        bool actorIsOwner = string.Equals(
+            update.ActorRole,
+            OwnerRoleName,
+            StringComparison.Ordinal);
         var tenantId = new TenantId(update.TenantId);
-        TenantMembership? membership = await memberships.FindAsync(
-            tenantId,
-            new UserId(update.MemberUserId),
-            cancellationToken);
-        if (membership is null)
-        {
-            return Result.Failure<TenantMemberView>(ResultError.NotFound(
-                "tenants.member_not_found",
-                "The requested member was not found."));
-        }
+        TenantKey tenantKey = update.TenantId;
 
-        if (membership.Version != expectedVersion)
+        IDbContextTransaction transaction = await context.Database
+            .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        await using (transaction.ConfigureAwait(false))
         {
-            return Result.Failure<TenantMemberView>(StaleMembership);
-        }
-
-        Result ownerGuard = await GuardLastOwnerAsync(
-            update,
-            membership,
-            role,
-            status,
-            cancellationToken);
-        if (ownerGuard.IsFailure)
-        {
-            return Result.Failure<TenantMemberView>(ownerGuard.Error!);
-        }
-
-        DateTimeOffset now = clock.UtcNow;
-        if (role is { } newRole && newRole != membership.Role)
-        {
-            Result changed = membership.ChangeRole(newRole, now);
-            if (changed.IsFailure)
+            try
             {
-                return Result.Failure<TenantMemberView>(changed.Error!);
+                await EstablishRowSecurityAsync(update.TenantId, cancellationToken);
+                TenantMembership? membership = await memberships.FindAsync(
+                    tenantId,
+                    new UserId(update.MemberUserId),
+                    cancellationToken);
+                if (membership is null)
+                {
+                    return Result.Failure<TenantMemberView>(ResultError.NotFound(
+                        "tenants.member_not_found",
+                        "The requested member was not found."));
+                }
+
+                // The hierarchy check reads the target's current role: an admin
+                // must never demote, suspend, or remove an owner, and must
+                // never create one.
+                if (!actorIsOwner &&
+                    (membership.Role == TenantRole.TenantOwner ||
+                        role == TenantRole.TenantOwner))
+                {
+                    return Result.Failure<TenantMemberView>(ResultError.Forbidden(
+                        "tenants.owner_requires_owner",
+                        "Only a tenant owner may change an owner or grant that role."));
+                }
+
+                if (membership.Version != expectedVersion)
+                {
+                    return Result.Failure<TenantMemberView>(StaleMembership);
+                }
+
+                DateTimeOffset now = clock.UtcNow;
+                if (role is { } newRole && newRole != membership.Role)
+                {
+                    Result changed = membership.ChangeRole(newRole, now);
+                    if (changed.IsFailure)
+                    {
+                        return Result.Failure<TenantMemberView>(changed.Error!);
+                    }
+                }
+
+                if (status is { } newStatus && newStatus != membership.Status)
+                {
+                    Result transitioned = newStatus switch
+                    {
+                        MembershipStatus.Active => membership.Activate(now),
+                        MembershipStatus.Suspended => membership.Suspend(now),
+                        MembershipStatus.Removed => membership.Remove(now),
+                        _ => Result.Failure(ResultError.Validation(
+                            "tenants.invalid_status",
+                            "The member status transition is not supported.")),
+                    };
+                    if (transitioned.IsFailure)
+                    {
+                        return Result.Failure<TenantMemberView>(transitioned.Error!);
+                    }
+                }
+
+                await memberships.UpdateAsync(
+                    membership,
+                    expectedVersion,
+                    cancellationToken);
+
+                // The invariant is evaluated after the write and inside the
+                // transaction, so two concurrent demotions of different owner
+                // rows cannot both observe a surviving owner.
+                int activeOwners = await context.TenantMemberships
+                    .AsNoTracking()
+                    .CountAsync(
+                        row =>
+                            row.TenantId == tenantKey &&
+                            row.Role == OwnerRoleName &&
+                            row.Status == ActiveStatusName,
+                        cancellationToken);
+                if (activeOwners == 0)
+                {
+                    await SafeRollbackAsync(transaction);
+                    context.ChangeTracker.Clear();
+                    return Result.Failure<TenantMemberView>(ResultError.Conflict(
+                        "tenants.last_owner",
+                        "A tenant must keep at least one active owner."));
+                }
+
+                await WriteMemberAuditAsync(
+                    update.TenantId,
+                    update.ActorUserId,
+                    update.MemberUserId,
+                    "tenant.member.updated",
+                    membership,
+                    now,
+                    cancellationToken);
+                TenantMemberView view = await DescribeAsync(
+                    update.TenantId,
+                    update.MemberUserId,
+                    membership,
+                    cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                return Result.Success(view);
+            }
+            catch (Exception failure) when (
+                failure is DbUpdateException or InvalidOperationException or DbException)
+            {
+                await SafeRollbackAsync(transaction);
+                context.ChangeTracker.Clear();
+                return Result.Failure<TenantMemberView>(
+                    RelationalFirstOwnerProvisioningStore.IsContentionOrConstraint(failure)
+                        ? ResultError.Conflict(
+                            "tenants.member_contended",
+                            "A concurrent membership change interrupted this one; retry the request.")
+                        : StaleMembership);
             }
         }
+    }
 
-        if (status is { } newStatus && newStatus != membership.Status)
+    private const string OwnerRoleName = nameof(TenantRole.TenantOwner);
+
+    private const string ActiveStatusName = nameof(MembershipStatus.Active);
+
+    private static bool TryReadRole(string? value, out TenantRole? role)
+    {
+        role = null;
+        if (value is null)
         {
-            Result transitioned = newStatus switch
-            {
-                MembershipStatus.Active => membership.Activate(now),
-                MembershipStatus.Suspended => membership.Suspend(now),
-                MembershipStatus.Removed => membership.Remove(now),
-                _ => Result.Failure(ResultError.Validation(
-                    "tenants.invalid_status",
-                    "The member status transition is not supported.")),
-            };
-            if (transitioned.IsFailure)
-            {
-                return Result.Failure<TenantMemberView>(transitioned.Error!);
-            }
+            return true;
         }
 
+        if (!Enum.TryParse(value, ignoreCase: false, out TenantRole parsed) ||
+            !Enum.IsDefined(parsed))
+        {
+            return false;
+        }
+
+        role = parsed;
+        return true;
+    }
+
+    private static bool TryReadStatus(string? value, out MembershipStatus? status)
+    {
+        status = null;
+        if (value is null)
+        {
+            return true;
+        }
+
+        if (!Enum.TryParse(value, ignoreCase: false, out MembershipStatus parsed) ||
+            !Enum.IsDefined(parsed) ||
+            parsed == MembershipStatus.Invited)
+        {
+            return false;
+        }
+
+        status = parsed;
+        return true;
+    }
+
+    private async ValueTask EstablishRowSecurityAsync(
+        Guid tenantId,
+        CancellationToken cancellationToken)
+    {
+        if (context.Database.ProviderName != "Npgsql.EntityFrameworkCore.PostgreSQL")
+        {
+            return;
+        }
+
+        _ = await context.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT set_config('vistara.tenant_id', {tenantId.ToString("D")}, true);",
+            cancellationToken);
+    }
+
+    private static async Task SafeRollbackAsync(IDbContextTransaction transaction)
+    {
         try
         {
-            await memberships.UpdateAsync(membership, expectedVersion, cancellationToken);
-        }
-        catch (DbUpdateException)
-        {
-            return Result.Failure<TenantMemberView>(StaleMembership);
+            await transaction.RollbackAsync(CancellationToken.None);
         }
         catch (InvalidOperationException)
         {
-            return Result.Failure<TenantMemberView>(StaleMembership);
+            // The transaction was already completed by the provider.
         }
+        catch (DbException)
+        {
+            // The connection is unusable; disposal releases it.
+        }
+    }
 
-        await WriteMemberAuditAsync(
-            update.TenantId,
-            update.ActorUserId,
-            update.MemberUserId,
-            "tenant.member.updated",
-            membership,
-            now,
-            cancellationToken);
-
+    private async ValueTask<TenantMemberView> DescribeAsync(
+        Guid tenantId,
+        Guid memberUserId,
+        TenantMembership membership,
+        CancellationToken cancellationToken)
+    {
         PersistedTenantMember? refreshed = (await directory.ListMembersAsync(
-                update.TenantId,
+                tenantId,
                 cancellationToken))
-            .SingleOrDefault(member => member.UserId == update.MemberUserId);
-        return Result.Success(refreshed is null
+            .SingleOrDefault(member => member.UserId == memberUserId);
+        return refreshed is null
             ? new TenantMemberView(
-                update.MemberUserId,
+                memberUserId,
                 string.Empty,
                 string.Empty,
                 membership.Role.ToString(),
@@ -313,36 +426,7 @@ internal sealed class PlatformTenantDirectoryAdapter(
                 refreshed.MembershipStatus,
                 refreshed.InvitedAtUtc,
                 refreshed.JoinedAtUtc,
-                refreshed.Version));
-    }
-
-    private async ValueTask<Result> GuardLastOwnerAsync(
-        TenantMemberUpdate update,
-        TenantMembership membership,
-        TenantRole? role,
-        MembershipStatus? status,
-        CancellationToken cancellationToken)
-    {
-        bool losesOwnership =
-            membership.Role == TenantRole.TenantOwner &&
-            membership.Status == MembershipStatus.Active &&
-            ((role is { } newRole && newRole != TenantRole.TenantOwner) ||
-                (status is { } newStatus && newStatus != MembershipStatus.Active));
-        if (!losesOwnership)
-        {
-            return Result.Success();
-        }
-
-        IReadOnlyList<PersistedTenantMember> members =
-            await directory.ListMembersAsync(update.TenantId, cancellationToken);
-        int activeOwners = members.Count(member =>
-            string.Equals(member.Role, nameof(TenantRole.TenantOwner), StringComparison.Ordinal) &&
-            string.Equals(member.MembershipStatus, nameof(MembershipStatus.Active), StringComparison.Ordinal));
-        return activeOwners > 1
-            ? Result.Success()
-            : Result.Failure(ResultError.Conflict(
-                "tenants.last_owner",
-                "A tenant must keep at least one active owner."));
+                refreshed.Version);
     }
 
     private async ValueTask WriteMemberAuditAsync(

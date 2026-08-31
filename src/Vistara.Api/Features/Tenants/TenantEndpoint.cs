@@ -286,18 +286,6 @@ public static class TenantEndpoint
             return;
         }
 
-        if (string.Equals(request.Role, nameof(TenantRole.TenantOwner), StringComparison.Ordinal) &&
-            actor.Role != TenantRole.TenantOwner)
-        {
-            await ApiProblemWriter.WriteAsync(
-                context,
-                StatusCodes.Status403Forbidden,
-                "tenants.owner_role_requires_owner",
-                "Only a tenant owner may grant the tenant owner role.",
-                cancellationToken);
-            return;
-        }
-
         long expected = condition.Kind == IfMatchKind.Wildcard
             ? await CurrentVersionAsync(directory, tenantId, memberUserId, cancellationToken)
             : condition.Version;
@@ -305,6 +293,7 @@ public static class TenantEndpoint
             new TenantMemberUpdate(
                 tenantId,
                 actor.UserId,
+                actor.Role.ToString(),
                 memberUserId,
                 request.Role,
                 request.Status),

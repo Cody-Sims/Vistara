@@ -400,9 +400,32 @@ public sealed class TenantEndpointContractTests
     }
 
     [Fact]
-    public async Task Only_an_owner_may_promote_a_member_to_owner()
+    public async Task The_actor_role_is_forwarded_so_the_adapter_can_check_hierarchy()
     {
         var directory = new FakeTenantDirectoryPort();
+
+        TestResponse response = await SendAsync(
+            "update",
+            directory,
+            routeTenantId: TenantId,
+            body: """{"role":"Viewer"}""",
+            principal: Principal("TenantAdmin", "members.manage"),
+            memberUserId: MemberId,
+            ifMatch: "\"v4\"");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("TenantAdmin", directory.MemberUpdate!.ActorRole);
+    }
+
+    [Fact]
+    public async Task An_admin_touching_an_owner_is_refused_by_the_adapter()
+    {
+        var directory = new FakeTenantDirectoryPort
+        {
+            UpdateResult = Result.Failure<TenantMemberView>(ResultError.Forbidden(
+                "tenants.owner_requires_owner",
+                "Only a tenant owner may change an owner or grant that role.")),
+        };
 
         TestResponse response = await SendAsync(
             "update",
@@ -414,7 +437,10 @@ public sealed class TenantEndpointContractTests
             ifMatch: "\"v4\"");
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
-        Assert.Null(directory.MemberUpdate);
+        using JsonDocument problem = JsonDocument.Parse(response.Body);
+        Assert.Equal(
+            "tenants_owner_requires_owner",
+            problem.RootElement.GetProperty("code").GetString());
     }
 
     private static ClaimsPrincipal Principal(string role, params string[] scopes)

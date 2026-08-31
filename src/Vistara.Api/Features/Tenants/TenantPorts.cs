@@ -25,6 +25,7 @@ public sealed record TenantMemberView(
 public sealed record TenantMemberUpdate(
     Guid TenantId,
     Guid ActorUserId,
+    string ActorRole,
     Guid MemberUserId,
     string? Role,
     string? Status);

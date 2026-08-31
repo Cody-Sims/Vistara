@@ -249,6 +249,7 @@ public sealed class TenantMemberAdministrationTests
                 new TenantMemberUpdate(
                     owner.TenantId,
                     owner.UserId,
+                    "TenantOwner",
                     memberUserId,
                     role,
                     status),
