@@ -84,6 +84,14 @@ describe('route access', () => {
     ).toBeInTheDocument();
   });
 
+  it('keeps first-run setup reachable without a session', async () => {
+    renderRoute('/setup');
+
+    expect(
+      await screen.findByRole('heading', { name: 'Set up Vistara' }),
+    ).toBeInTheDocument();
+  });
+
   it('keeps a public share reachable without a session', async () => {
     const client = anonymousClient();
     renderRoute('/s/public-token', client);

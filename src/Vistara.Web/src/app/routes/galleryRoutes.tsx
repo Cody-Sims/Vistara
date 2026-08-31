@@ -4,7 +4,9 @@ import {
   LoginPage,
   RequireAdministration,
   RequireSession,
+  SetupPage,
 } from '../../features/session';
+import { platformClient } from '../apiClients';
 import { ApplicationFrame } from '../ApplicationFrame';
 import {
   InitialLoadingPage,
@@ -160,7 +162,20 @@ export function galleryRoutes(
         staticPreview || !liveFeatures ? (
           <RoutePlaceholderPage title="Sign in" staticPreview={staticPreview} />
         ) : (
-          <LoginPage />
+          <LoginPage setup={platformClient} />
+        ),
+    },
+    {
+      path: '/setup',
+      errorElement: <RouteErrorBoundary />,
+      element:
+        staticPreview || !liveFeatures ? (
+          <RoutePlaceholderPage
+            title="Set up Vistara"
+            staticPreview={staticPreview}
+          />
+        ) : (
+          <SetupPage client={platformClient} />
         ),
     },
     {

@@ -226,3 +226,92 @@ export interface JobStatus {
   readonly failure?: JobFailure;
   readonly version: ResourceVersion;
 }
+
+/** Response of `GET /api/v1/setup`; tells the browser whether first run is open. */
+export interface SetupState {
+  readonly available: boolean;
+}
+
+export interface ProvisionFirstOwnerRequest {
+  readonly tenantSlug: string;
+  readonly tenantName: string;
+  readonly email: string;
+  readonly displayName: string;
+  readonly password: string;
+}
+
+export interface ProvisionedOwner {
+  readonly tenantId: Uuid;
+  readonly tenantSlug: string;
+  readonly tenantName: string;
+  readonly userId: Uuid;
+  readonly email: string;
+  readonly displayName: string;
+  readonly role: TenantRole;
+}
+
+/** Consumption and health only; provider topology is never published. */
+export interface StorageBucketSummary {
+  readonly id: string;
+  readonly kind: string;
+  readonly status: string;
+  readonly usedBytes: number;
+  readonly quotaBytes: number;
+  readonly objectCount: number;
+  readonly lastCheckedAt: UtcDateTime;
+  readonly message?: string;
+}
+
+export interface StorageSummary {
+  readonly buckets: readonly StorageBucketSummary[];
+  readonly originalBytes: number;
+  readonly derivativeBytes: number;
+  readonly stagingBytes: number;
+  readonly quotaBytes: number;
+  readonly pendingUploadBytes: number;
+}
+
+export type StorageProviderKind = 'filesystem' | 'azureBlob' | 's3';
+
+/**
+ * A candidate storage configuration. Secrets are only ever held in memory for
+ * the length of one validation request and are never persisted anywhere.
+ */
+export interface StorageValidationRequest {
+  readonly provider: StorageProviderKind;
+  readonly filesystem?: {
+    readonly rootPath: string;
+  };
+  readonly azureBlob?: {
+    readonly accountName: string;
+    readonly container: string;
+    readonly endpointSuffix?: string;
+    readonly credentialKind: 'accountKey' | 'sasToken';
+    readonly accountKey?: string;
+    readonly sasToken?: string;
+  };
+  readonly s3?: {
+    readonly endpoint: string;
+    readonly region: string;
+    readonly bucket: string;
+    readonly accessKeyId: string;
+    readonly secretAccessKey: string;
+    readonly forcePathStyle: boolean;
+  };
+}
+
+export type StorageCheckStatus = 'passed' | 'failed' | 'skipped';
+
+export interface StorageValidationCheck {
+  readonly id: 'reachable' | 'authenticated' | 'read' | 'write' | 'delete';
+  readonly status: StorageCheckStatus;
+  /** Redacted, human-readable outcome; never contains a submitted secret. */
+  readonly detail?: string;
+}
+
+export interface StorageValidationResponse {
+  readonly valid: boolean;
+  readonly provider: StorageProviderKind;
+  readonly checks: readonly StorageValidationCheck[];
+  readonly message?: string;
+}

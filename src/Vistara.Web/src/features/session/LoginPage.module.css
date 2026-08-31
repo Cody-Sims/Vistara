@@ -166,3 +166,47 @@
     transition: none;
   }
 }
+
+.fieldRow {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.fieldRow input {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+}
+
+.reveal {
+  min-block-size: var(--target-min);
+  padding-inline: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  font-weight: 680;
+  white-space: nowrap;
+}
+
+.reveal[aria-pressed="true"] {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.fieldHint {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+
+.inlineLink {
+  color: inherit;
+  font-weight: 700;
+}
+
+.failure p {
+  margin: 0 0 var(--space-2);
+}

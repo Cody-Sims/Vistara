@@ -18,6 +18,12 @@ import type {
   LoginResponse,
   TenantCollection,
   TenantMember,
+  ProvisionedOwner,
+  ProvisionFirstOwnerRequest,
+  SetupState,
+  StorageSummary,
+  StorageValidationRequest,
+  StorageValidationResponse,
   TenantMemberCollection,
   UpdateTenantMemberRequest,
   UpdateUserPreferencesRequest,
@@ -35,6 +41,9 @@ export interface VersionedResult<T> {
 
 /** Header the platform uses until `GET /api/v1/me` names another one. */
 const defaultAntiforgeryHeader = 'X-Vistara-CSRF';
+
+/** Routes the API accepts without a session, and therefore without a token. */
+const anonymousRoutes = new Set(['/api/v1/auth/login', '/api/v1/setup']);
 
 /**
  * Typed boundary for the account, tenant, API key, capability, and job routes
@@ -83,6 +92,41 @@ export class PlatformApiClient {
     } finally {
       this.#antiforgeryToken = '';
     }
+  }
+
+  /** Reads whether first-run provisioning is still open. */
+  public getSetupState(): Promise<SetupState> {
+    return this.#request<SetupState>('GET', '/api/v1/setup');
+  }
+
+  /**
+   * Creates the first workspace and owner. The password is sent once and is
+   * never held by the client afterwards.
+   */
+  public provisionFirstOwner(
+    request: ProvisionFirstOwnerRequest,
+  ): Promise<ProvisionedOwner> {
+    return this.#request<ProvisionedOwner>('POST', '/api/v1/setup', {
+      body: request,
+    });
+  }
+
+  public getStorageSummary(): Promise<StorageSummary> {
+    return this.#request<StorageSummary>('GET', '/api/v1/admin/storage');
+  }
+
+  /**
+   * Checks a candidate storage configuration. The request body is built for
+   * this call only; nothing about it is stored, cached, or logged.
+   */
+  public validateStorage(
+    request: StorageValidationRequest,
+  ): Promise<StorageValidationResponse> {
+    return this.#request<StorageValidationResponse>(
+      'POST',
+      '/api/v1/admin/storage/validate',
+      { body: request },
+    );
   }
 
   public getCapabilities(): Promise<Capabilities> {
@@ -242,7 +286,7 @@ export class PlatformApiClient {
     path: string,
     options: { body?: unknown; ifMatch?: EntityTag },
   ): Promise<Response> {
-    if (method !== 'GET' && path !== '/api/v1/auth/login') {
+    if (method !== 'GET' && !anonymousRoutes.has(path)) {
       await this.#ensureAntiforgeryToken();
     }
 

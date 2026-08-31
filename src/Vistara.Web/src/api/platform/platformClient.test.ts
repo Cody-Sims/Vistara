@@ -266,6 +266,10 @@ describe('platform tenant administration client', () => {
         'getJob',
         'getPreferences',
         'getSession',
+        'getSetupState',
+        'getStorageSummary',
+        'provisionFirstOwner',
+        'validateStorage',
         'inviteTenantMember',
         'listApiKeys',
         'listJobs',
@@ -403,6 +407,127 @@ describe('versioned platform edits', () => {
     expect(
       new Headers(fetch.mock.calls[2]![1]?.headers).get('If-Match'),
     ).toBe('"v2"');
+  });
+});
+
+describe('first-run provisioning client', () => {
+  it('reads whether setup is still open', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      jsonResponse({ available: true }),
+    );
+    const client = new PlatformApiClient({ fetch });
+
+    const state = await client.getSetupState();
+
+    expect(fetch.mock.calls[0]![0]).toBe('/api/v1/setup');
+    expect(fetch.mock.calls[0]![1]?.method).toBe('GET');
+    expect(state.available).toBe(true);
+  });
+
+  it('provisions the first owner without a session read first', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      jsonResponse(
+        {
+          tenantId: 'tenant-a',
+          tenantSlug: 'studio',
+          tenantName: 'Studio',
+          userId: 'user-1',
+          email: 'ada@example.test',
+          displayName: 'Ada Lovelace',
+          role: 'TenantOwner',
+        },
+        { status: 201 },
+      ),
+    );
+    const client = new PlatformApiClient({ fetch });
+
+    const owner = await client.provisionFirstOwner({
+      tenantSlug: 'studio',
+      tenantName: 'Studio',
+      email: 'ada@example.test',
+      displayName: 'Ada Lovelace',
+      password: 'a very long owner password',
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]![0]).toBe('/api/v1/setup');
+    expect(owner.role).toBe('TenantOwner');
+  });
+
+  it('reports an already provisioned platform as a conflict', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      problemResponse(409, 'setup.already_provisioned'),
+    );
+    const client = new PlatformApiClient({ fetch });
+
+    const error = await client
+      .provisionFirstOwner({
+        tenantSlug: 'studio',
+        tenantName: 'Studio',
+        email: 'ada@example.test',
+        displayName: 'Ada Lovelace',
+        password: 'a very long owner password',
+      })
+      .catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(VistaraApiError);
+    expect((error as VistaraApiError).problem.code).toBe(
+      'setup.already_provisioned',
+    );
+  });
+});
+
+describe('storage administration client', () => {
+  it('reads the published consumption summary', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      jsonResponse({
+        buckets: [],
+        originalBytes: 1,
+        derivativeBytes: 2,
+        stagingBytes: 3,
+        quotaBytes: 4,
+        pendingUploadBytes: 5,
+      }),
+    );
+    const client = new PlatformApiClient({ fetch });
+
+    const summary = await client.getStorageSummary();
+
+    expect(fetch.mock.calls[0]![0]).toBe('/api/v1/admin/storage');
+    expect(summary.pendingUploadBytes).toBe(5);
+  });
+
+  it('sends a candidate configuration for validation and keeps nothing', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(jsonResponse(currentUser))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          valid: true,
+          provider: 's3',
+          checks: [{ id: 'write', status: 'passed' }],
+        }),
+      );
+    const client = new PlatformApiClient({ fetch });
+
+    const result = await client.validateStorage({
+      provider: 's3',
+      s3: {
+        endpoint: 'https://s3.example',
+        region: 'eu-central-1',
+        bucket: 'vistara-media',
+        accessKeyId: 'AKIAEXAMPLE',
+        secretAccessKey: 'super-secret-value',
+        forcePathStyle: true,
+      },
+    });
+
+    const [url, init] = fetch.mock.calls[1]!;
+    expect(url).toBe('/api/v1/admin/storage/validate');
+    expect(init?.method).toBe('POST');
+    expect(String(init?.body)).toContain('super-secret-value');
+    expect(result.valid).toBe(true);
+    expect(JSON.stringify(client)).not.toContain('super-secret-value');
   });
 });
 

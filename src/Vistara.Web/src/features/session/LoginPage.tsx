@@ -1,6 +1,7 @@
-import { useRef, useState, type FormEvent } from 'react';
-import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { VistaraApiError } from '../../api/generated/client';
+import type { PlatformApiClient } from '../../api/platform';
 import { BrandMark } from '../../brand';
 import { safeDestination } from './safeDestination';
 import { useSession } from './sessionContext';
@@ -11,7 +12,14 @@ interface FieldErrors {
   readonly password?: string;
 }
 
-export function LoginPage() {
+export type LoginSetupClient = Pick<PlatformApiClient, 'getSetupState'>;
+
+interface LoginPageProps {
+  /** Reads whether first-run setup is still open; omitted when unavailable. */
+  readonly setup?: LoginSetupClient;
+}
+
+export function LoginPage({ setup }: LoginPageProps = {}) {
   const session = useSession();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -24,6 +32,30 @@ export function LoginPage() {
   const [submitting, setSubmitting] = useState(false);
   const loginField = useRef<HTMLInputElement>(null);
   const passwordField = useRef<HTMLInputElement>(null);
+  const [setupAvailable, setSetupAvailable] = useState(false);
+
+  useEffect(() => {
+    if (!setup) {
+      return;
+    }
+
+    let active = true;
+    void setup.getSetupState().then(
+      (state) => {
+        if (active) {
+          setSetupAvailable(state.available === true);
+        }
+      },
+      () => {
+        // A deployment that does not publish setup state is already set up as
+        // far as this page is concerned.
+      },
+    );
+
+    return () => {
+      active = false;
+    };
+  }, [setup]);
 
   if (session.status === 'authenticated') {
     return <Navigate replace to={destination} />;
@@ -141,6 +173,16 @@ export function LoginPage() {
             {submitting ? 'Checking your credentials…' : ''}
           </p>
         </form>
+
+        {setupAvailable ? (
+          <p className={styles.hint}>
+            This deployment has no owner yet.{' '}
+            <Link className={styles.inlineLink} to="/setup">
+              Set up Vistara
+            </Link>{' '}
+            to create the first workspace.
+          </p>
+        ) : null}
 
         <p className={styles.hint}>
           The session lives in a secure cookie on this server. Nothing about
