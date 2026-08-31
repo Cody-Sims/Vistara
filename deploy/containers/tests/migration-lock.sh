@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # Proves that concurrently started migration bundles serialize safely against
-# one PostgreSQL database, apply every migration exactly once, and stay
-# idempotent on a repeat run. Only containers and networks created here are
-# removed; no operator data is touched.
+# one PostgreSQL database, apply every migration exactly once, stay idempotent
+# on a repeat run, load every native library the bundle needs, and still fail
+# loudly on a genuine schema error. Only containers and networks created here
+# are removed; no operator data is touched.
 set -euo pipefail
 
 docker_cli="${DOCKER:-docker}"
 migration_image="${MIGRATION_IMAGE:-vistara-migrations:ci}"
 postgres_image="${POSTGRES_IMAGE:-postgres:18.0-bookworm@sha256:3f55f8895c4ed50603e2fbdfc72fffeeaba3173321fee5cb825bbbeb30d9d854}"
 log_directory="artifacts/migration-lock"
+concurrency="${MIGRATION_LOCK_CONCURRENCY:-3}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --log-directory) log_directory="${2:-}"; shift 2 ;;
+    --concurrency) concurrency="${2:-}"; shift 2 ;;
     --help|-h)
-      echo "Usage: migration-lock.sh [--log-directory DIR]"
+      echo "Usage: migration-lock.sh [--log-directory DIR] [--concurrency N]"
       exit 0
       ;;
     *)
@@ -23,6 +26,17 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+case "$concurrency" in
+  ''|*[!0-9]*)
+    echo "--concurrency must be a positive integer." >&2
+    exit 64
+    ;;
+esac
+if [ "$concurrency" -lt 2 ]; then
+  echo "--concurrency must be at least 2 to exercise the migration lock." >&2
+  exit 64
+fi
 
 suffix="$$-$(date +%s)"
 network="vistara-migration-lock-net-$suffix"
@@ -66,6 +80,18 @@ run_bundle() {
     > "$log_directory/$name.log" 2>&1
 }
 
+# The migration image must resolve every native library the bundle loads at
+# start-up; a missing one silently degrades authentication support.
+assert_no_missing_libraries() {
+  local name="$1"
+  local offenders
+  offenders="$(grep --extended-regexp \
+    'cannot open shared object file|Cannot load library' \
+    "$log_directory/$name.log" || true)"
+  [ -z "$offenders" ] ||
+    fail "The $name migration bundle log reports a missing native library: $offenders"
+}
+
 "$docker_cli" network create "$network" >/dev/null
 
 "$docker_cli" run --detach \
@@ -88,20 +114,34 @@ for attempt in $(seq 1 60); do
   sleep 1
 done
 
-run_bundle first &
-first_pid=$!
-run_bundle second &
-second_pid=$!
+concurrent_names=()
+concurrent_pids=()
+for index in $(seq 1 "$concurrency"); do
+  name="concurrent-$index"
+  run_bundle "$name" &
+  concurrent_names+=("$name")
+  concurrent_pids+=("$!")
+done
 
-first_status=0
-second_status=0
-wait "$first_pid" || first_status=$?
-wait "$second_pid" || second_status=$?
+concurrent_failures=""
+for position in "${!concurrent_pids[@]}"; do
+  status=0
+  wait "${concurrent_pids[$position]}" || status=$?
+  if [ "$status" -ne 0 ]; then
+    concurrent_failures="$concurrent_failures ${concurrent_names[$position]}=$status"
+  fi
+done
 
-if [ "$first_status" -ne 0 ] || [ "$second_status" -ne 0 ]; then
-  cat "$log_directory/first.log" "$log_directory/second.log" >&2 || true
-  fail "Concurrent migration bundles must both succeed; exits were $first_status and $second_status."
+if [ -n "$concurrent_failures" ]; then
+  for name in "${concurrent_names[@]}"; do
+    cat "$log_directory/$name.log" >&2 || true
+  done
+  fail "Concurrent migration bundles must all succeed; failures were:$concurrent_failures."
 fi
+
+for name in "${concurrent_names[@]}"; do
+  assert_no_missing_libraries "$name"
+done
 
 ledger_count="$(psql_query 'SELECT count(*) FROM "__EFMigrationsHistory";')"
 [ -n "$ledger_count" ] || fail "The migration ledger could not be read."
@@ -117,9 +157,23 @@ if [ "$repeat_status" -ne 0 ]; then
   cat "$log_directory/repeat.log" >&2 || true
   fail "The repeat migration bundle run failed with exit $repeat_status."
 fi
+assert_no_missing_libraries repeat
 
 repeat_ledger_count="$(psql_query 'SELECT count(*) FROM "__EFMigrationsHistory";')"
 [ "$repeat_ledger_count" = "$ledger_count" ] ||
   fail "The migration bundle is not idempotent: ledger moved from $ledger_count to $repeat_ledger_count."
 
-echo "Migration lock gate passed: $ledger_count migrations applied exactly once under concurrency."
+# Serialization must not be bought by swallowing errors: forcing the newest
+# migration to be replayed over its own objects has to fail the bundle.
+replayed_migration="$(psql_query 'SELECT "MigrationId" FROM "__EFMigrationsHistory" ORDER BY "MigrationId" DESC LIMIT 1;')"
+[ -n "$replayed_migration" ] || fail "The newest applied migration could not be read."
+psql_query "DELETE FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" = '$replayed_migration';" >/dev/null
+
+replay_status=0
+run_bundle replay || replay_status=$?
+[ "$replay_status" -ne 0 ] ||
+  fail "Replaying $replayed_migration over existing objects must fail the migration bundle."
+grep --quiet "already exists" "$log_directory/replay.log" ||
+  fail "Replaying $replayed_migration must surface the underlying PostgreSQL error."
+
+echo "Migration lock gate passed: $ledger_count migrations applied exactly once across $concurrency concurrent bundles."

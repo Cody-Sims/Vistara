@@ -41,6 +41,7 @@ jobs:
         run: >-
           ./deploy/containers/tests/migration-lock.sh
           --log-directory artifacts/migration-lock
+          --concurrency 3
 
       - name: Upload migration bundle logs
         if: failure()
