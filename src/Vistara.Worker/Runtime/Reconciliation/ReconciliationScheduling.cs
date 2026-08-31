@@ -50,6 +50,22 @@ public sealed record ReconciliationSchedule
 public sealed record ReconciliationSchedulePayload(string? Cursor, bool DryRun);
 
 /// <summary>
+/// A tenant whose sweep could not be scheduled. The reason code is drawn from
+/// the stable telemetry vocabulary so reporting stays low cardinality.
+/// </summary>
+public sealed record ReconciliationEnqueueFailure(
+    Guid TenantId,
+    string ReasonCode);
+
+public sealed record ReconciliationEnqueueReport(
+    int Created,
+    int Existing,
+    IReadOnlyList<ReconciliationEnqueueFailure> Failures)
+{
+    public int Attempted => Created + Existing + Failures.Count;
+}
+
+/// <summary>
 /// The repair sweeps the worker runs by default. Destructive sweeps start in
 /// dry-run so operators see a report before anything is deleted.
 /// </summary>
@@ -93,17 +109,27 @@ public sealed class ReconciliationScheduler
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
 
+    private static readonly Action<ILogger, string, Guid, string, Exception?>
+        LogTenantFailure = LoggerMessage.Define<string, Guid, string>(
+            LogLevel.Warning,
+            new EventId(1, "ReconciliationEnqueueFailed"),
+            "Reconciliation sweep {Sweep} could not be scheduled for tenant "
+                + "{TenantId} because of {Cause}; remaining tenants continue.");
+
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IClock _clock;
     private readonly IUuid7Generator _idGenerator;
     private readonly ReconciliationSchedule[] _schedules;
+    private readonly ILogger _logger;
 
     public ReconciliationScheduler(
         IServiceScopeFactory scopeFactory,
         IClock clock,
         IUuid7Generator idGenerator,
-        IEnumerable<ReconciliationSchedule> schedules)
+        IEnumerable<ReconciliationSchedule> schedules,
+        ILogger<ReconciliationScheduler> logger)
     {
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _scopeFactory = scopeFactory ??
             throw new ArgumentNullException(nameof(scopeFactory));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
@@ -132,7 +158,12 @@ public sealed class ReconciliationScheduler
         Task.WhenAll(_schedules.Select(
             schedule => RunScheduleAsync(schedule, stoppingToken)));
 
-    public async ValueTask<int> EnqueueWindowAsync(
+    /// <summary>
+    /// Schedules the sweep for every routed tenant. A tenant that cannot be
+    /// scheduled is recorded and skipped so the remaining tenants still get
+    /// their sweep; only caller cancellation stops the fan-out.
+    /// </summary>
+    public async ValueTask<ReconciliationEnqueueReport> EnqueueWindowAsync(
         ReconciliationSchedule schedule,
         CancellationToken cancellationToken)
     {
@@ -161,42 +192,96 @@ public sealed class ReconciliationScheduler
         }
 
         int created = 0;
+        int existing = 0;
+        List<ReconciliationEnqueueFailure> failures = [];
         foreach (Guid tenantId in tenantIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await using AsyncServiceScope scope =
-                _scopeFactory.CreateAsyncScope();
-            scope.ServiceProvider
-                .GetRequiredService<IMutableTenantScope>()
-                .Establish(tenantId);
-            DurableJob job = DurableJob.Create(
-                new JobId(_idGenerator.NewId()),
-                new JobTenantId(tenantId),
-                jobType,
-                payload,
-                schedule.PayloadVersion,
-                new JobDedupeKey(
-                    $"{schedule.DedupePrefix}:{schedule.PayloadVersion}:{window}"),
-                priority: 0,
-                maxAttempts: schedule.MaxAttempts,
-                availableAtUtc: now,
-                createdAtUtc: now);
-            Result<JobEnqueueResult> result = await scope.ServiceProvider
-                .GetRequiredService<IJobQueue>()
-                .EnqueueAsync(job, cancellationToken);
-            if (!result.TryGetValue(out JobEnqueueResult? enqueued))
+            try
             {
-                throw new InvalidOperationException(
-                    "A scheduled reconciliation job could not be enqueued.");
+                if (await EnqueueTenantAsync(
+                        tenantId,
+                        jobType,
+                        payload,
+                        schedule,
+                        window,
+                        now,
+                        cancellationToken))
+                {
+                    created++;
+                }
+                else
+                {
+                    existing++;
+                }
             }
-
-            if (enqueued.WasCreated)
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
             {
-                created++;
+                throw;
             }
+#pragma warning disable CA1031
+            catch (Exception error)
+            {
+                failures.Add(RecordFailure(schedule, tenantId, error.GetType().Name));
+            }
+#pragma warning restore CA1031
         }
 
-        return created;
+        return new ReconciliationEnqueueReport(created, existing, failures);
+    }
+
+    private async ValueTask<bool> EnqueueTenantAsync(
+        Guid tenantId,
+        JobType jobType,
+        string payload,
+        ReconciliationSchedule schedule,
+        long window,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        await using AsyncServiceScope scope = _scopeFactory.CreateAsyncScope();
+        scope.ServiceProvider
+            .GetRequiredService<IMutableTenantScope>()
+            .Establish(tenantId);
+        DurableJob job = DurableJob.Create(
+            new JobId(_idGenerator.NewId()),
+            new JobTenantId(tenantId),
+            jobType,
+            payload,
+            schedule.PayloadVersion,
+            new JobDedupeKey(
+                $"{schedule.DedupePrefix}:{schedule.PayloadVersion}:{window}"),
+            priority: 0,
+            maxAttempts: schedule.MaxAttempts,
+            availableAtUtc: now,
+            createdAtUtc: now);
+        Result<JobEnqueueResult> result = await scope.ServiceProvider
+            .GetRequiredService<IJobQueue>()
+            .EnqueueAsync(job, cancellationToken);
+        if (!result.TryGetValue(out JobEnqueueResult? enqueued))
+        {
+            throw new InvalidOperationException(
+                "A scheduled reconciliation job could not be enqueued.");
+        }
+
+        return enqueued.WasCreated;
+    }
+
+    private ReconciliationEnqueueFailure RecordFailure(
+        ReconciliationSchedule schedule,
+        Guid tenantId,
+        string cause)
+    {
+        const string ReasonCode = "reconciliation_failure";
+        using (TelemetryOperation operation =
+               VistaraTelemetry.Start(TelemetryOperationKind.Reconciliation))
+        {
+            operation.Fail(ReasonCode);
+        }
+
+        LogTenantFailure(_logger, schedule.DedupePrefix, tenantId, cause, null);
+        return new ReconciliationEnqueueFailure(tenantId, ReasonCode);
     }
 
     private async Task RunScheduleAsync(
@@ -217,7 +302,12 @@ public sealed class ReconciliationScheduler
                 {
                     try
                     {
-                        _ = await EnqueueWindowAsync(schedule, stoppingToken);
+                        ReconciliationEnqueueReport report =
+                            await EnqueueWindowAsync(schedule, stoppingToken);
+                        if (report.Failures.Count > 0)
+                        {
+                            operation.Fail("reconciliation_failure");
+                        }
                     }
                     catch (OperationCanceledException)
                         when (stoppingToken.IsCancellationRequested)

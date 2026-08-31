@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Vistara.Application.Common;
 using Vistara.Application.Jobs;
 using Vistara.Application.Lifecycle;
@@ -45,21 +46,26 @@ public sealed class ReconciliationOrchestrationTests
             provider.GetRequiredService<ReconciliationScheduler>();
         ReconciliationSchedule blobs = ReconciliationSchedules.BlobIntegrity;
 
-        Assert.Equal(
-            1,
-            await scheduler.EnqueueWindowAsync(blobs, CancellationToken.None));
-        Assert.Equal(
-            0,
-            await scheduler.EnqueueWindowAsync(blobs, CancellationToken.None));
+        ReconciliationEnqueueReport first =
+            await scheduler.EnqueueWindowAsync(blobs, CancellationToken.None);
+        ReconciliationEnqueueReport repeated =
+            await scheduler.EnqueueWindowAsync(blobs, CancellationToken.None);
         clock.Advance(blobs.Interval);
-        Assert.Equal(
-            1,
-            await scheduler.EnqueueWindowAsync(blobs, CancellationToken.None));
-        Assert.Equal(
-            1,
+        ReconciliationEnqueueReport nextWindow =
+            await scheduler.EnqueueWindowAsync(blobs, CancellationToken.None);
+        ReconciliationEnqueueReport purge =
             await scheduler.EnqueueWindowAsync(
                 ReconciliationSchedules.PurgeRecovery,
-                CancellationToken.None));
+                CancellationToken.None);
+
+        Assert.Equal(1, first.Created);
+        Assert.Equal(0, repeated.Created);
+        Assert.Equal(1, repeated.Existing);
+        Assert.Equal(1, nextWindow.Created);
+        Assert.Equal(1, purge.Created);
+        Assert.All(
+            new[] { first, repeated, nextWindow, purge },
+            report => Assert.Empty(report.Failures));
 
         JobRow[] routed = await ReadJobsAsync(connectionString, routedTenant);
         Assert.Empty(await ReadJobsAsync(connectionString, unroutedTenant));
@@ -92,7 +98,8 @@ public sealed class ReconciliationOrchestrationTests
                 [
                     ReconciliationSchedules.BlobIntegrity,
                     ReconciliationSchedules.BlobIntegrity,
-                ]));
+                ],
+                NullLogger<ReconciliationScheduler>.Instance));
     }
 
     [Fact]
@@ -317,6 +324,7 @@ public sealed class ReconciliationOrchestrationTests
             options.ConnectionString = connectionString;
             options.ConfiguredWorkerCount = 1;
         });
+        services.AddLogging();
         services.AddSingleton(clock);
         services.AddSingleton<IUuid7Generator>(new Uuid7Generator(clock));
         services.AddVistaraReconciliationSchedule(
