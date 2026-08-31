@@ -39,6 +39,7 @@ public sealed class VistaraDbContext(
     public DbSet<LocalIdentityRow> LocalIdentities => Set<LocalIdentityRow>();
     public DbSet<LocalCredentialRow> LocalCredentials => Set<LocalCredentialRow>();
     public DbSet<PlatformBootstrapRow> PlatformBootstrap => Set<PlatformBootstrapRow>();
+    public DbSet<UserPreferenceRow> UserPreferences => Set<UserPreferenceRow>();
     public DbSet<ExternalIdentityRow> ExternalIdentities => Set<ExternalIdentityRow>();
     public DbSet<TenantMembershipRow> TenantMemberships => Set<TenantMembershipRow>();
     public DbSet<AuthSessionRow> AuthSessions => Set<AuthSessionRow>();
@@ -165,6 +166,28 @@ public sealed class VistaraDbContext(
             entity.HasOne<UserRow>()
                 .WithMany()
                 .HasForeignKey(row => row.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<UserPreferenceRow>(entity =>
+        {
+            entity.ToTable("user_preferences", table =>
+            {
+                table.HasCheckConstraint(
+                    "ck_user_preferences_density",
+                    "\"density\" IN ('comfortable','compact')");
+                table.HasCheckConstraint(
+                    "ck_user_preferences_version",
+                    "\"version\" >= 1");
+            });
+            entity.HasKey(row => row.UserId);
+            entity.Property(row => row.Density).HasMaxLength(16);
+            entity.Property(row => row.Locale).HasMaxLength(35);
+            entity.Property(row => row.TimeZone).HasMaxLength(64);
+            entity.Property(row => row.Version).IsConcurrencyToken();
+            entity.HasOne<UserRow>()
+                .WithOne()
+                .HasForeignKey<UserPreferenceRow>(row => row.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

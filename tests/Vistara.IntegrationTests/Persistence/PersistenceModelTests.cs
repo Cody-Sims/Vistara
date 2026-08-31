@@ -84,6 +84,7 @@ public sealed class PersistenceModelTests
                 "upload_parts",
                 "upload_reconciliation_checkpoints",
                 "upload_sessions",
+                "user_preferences",
                 "users",
                 "worker_tenant_catalog",
             ],

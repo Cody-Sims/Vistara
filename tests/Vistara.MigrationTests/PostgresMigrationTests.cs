@@ -52,6 +52,10 @@ public sealed partial class PostgresMigrationTests
             script,
             StringComparison.Ordinal);
         Assert.Contains(
+            MigrationTestSupport.PostgresUserPreferencesMigration,
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "CREATE POLICY \"identity_directory\"",
             script,
             StringComparison.Ordinal);

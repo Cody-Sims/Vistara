@@ -2778,6 +2778,55 @@ namespace Vistara.Migrations.Sqlite.Migrations
                         });
                 });
 
+            modelBuilder.Entity("Vistara.Persistence.Model.UserPreferenceRow", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("user_id");
+
+                    b.Property<string>("Density")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("density");
+
+                    b.Property<string>("Locale")
+                        .HasMaxLength(35)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("locale");
+
+                    b.Property<bool>("ReducedMotion")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("reduced_motion");
+
+                    b.Property<bool>("ScreenReaderPagedMode")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("screen_reader_paged_mode");
+
+                    b.Property<string>("TimeZone")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("time_zone");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("version");
+
+                    b.HasKey("UserId");
+
+                    b.ToTable("user_preferences", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_user_preferences_density", "\"density\" IN ('comfortable','compact')");
+
+                            t.HasCheckConstraint("ck_user_preferences_version", "\"version\" >= 1");
+                        });
+                });
+
             modelBuilder.Entity("Vistara.Persistence.Model.UserRow", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3852,6 +3901,15 @@ namespace Vistara.Migrations.Sqlite.Migrations
                         .HasForeignKey("TenantId", "ActivatedRevisionId")
                         .HasPrincipalKey("TenantId", "Id")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("Vistara.Persistence.Model.UserPreferenceRow", b =>
+                {
+                    b.HasOne("Vistara.Persistence.Model.UserRow", null)
+                        .WithOne()
+                        .HasForeignKey("Vistara.Persistence.Model.UserPreferenceRow", "UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Vistara.Persistence.Sharing.SharingSessionRow", b =>

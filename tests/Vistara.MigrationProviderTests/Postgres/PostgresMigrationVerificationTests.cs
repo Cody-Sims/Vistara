@@ -25,6 +25,8 @@ public sealed class PostgresMigrationVerificationTests
         "20260830233131_AddLocalCredentials";
     private const string PlatformBootstrapMigration =
         "20260831000526_AddPlatformBootstrap";
+    private const string UserPreferencesMigration =
+        "20260831002849_AddUserPreferences";
     private const string SharingPersistenceMigration =
         "20260830101824_AddSharingPersistence";
     private const int ReplacedCheckConstraints = 3;
@@ -41,6 +43,7 @@ public sealed class PostgresMigrationVerificationTests
         SharingPersistenceMigration,
         LocalCredentialsMigration,
         PlatformBootstrapMigration,
+        UserPreferencesMigration,
     ];
 
     [Fact]

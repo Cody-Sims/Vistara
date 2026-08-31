@@ -55,6 +55,22 @@ public sealed class PlatformBootstrapRow
     public long Version { get; set; }
 }
 
+/// <summary>
+/// Account-level presentation preferences. They follow the user across every
+/// tenant, so the table carries no tenant column and no row-level security.
+/// </summary>
+public sealed class UserPreferenceRow
+{
+    public Guid UserId { get; set; }
+    public string Density { get; set; } = "comfortable";
+    public bool ReducedMotion { get; set; }
+    public bool ScreenReaderPagedMode { get; set; }
+    public string? Locale { get; set; }
+    public string? TimeZone { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+    public long Version { get; set; }
+}
+
 public sealed class LocalCredentialRow
 {
     public Guid LocalIdentityId { get; set; }

@@ -30,6 +30,8 @@ public sealed class SqliteMigrationVerificationTests
         "20260830233106_AddLocalCredentials";
     private const string PlatformBootstrapMigration =
         "20260831000511_AddPlatformBootstrap";
+    private const string UserPreferencesMigration =
+        "20260831002835_AddUserPreferences";
 
     private static readonly string[] ExpectedMigrations =
     [
@@ -42,6 +44,7 @@ public sealed class SqliteMigrationVerificationTests
         SharingPersistenceMigration,
         LocalCredentialsMigration,
         PlatformBootstrapMigration,
+        UserPreferencesMigration,
     ];
 
     private static readonly string[] ExpectedTables =
@@ -97,6 +100,7 @@ public sealed class SqliteMigrationVerificationTests
         "upload_parts",
         "upload_reconciliation_checkpoints",
         "upload_sessions",
+        "user_preferences",
         "users",
         "worker_tenant_catalog",
     ];
@@ -180,6 +184,10 @@ public sealed class SqliteMigrationVerificationTests
             script,
             StringComparison.Ordinal);
         Assert.Contains(
+            UserPreferencesMigration,
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "CREATE TEMP TABLE legacy_upload_job_decisions",
             script,
             StringComparison.Ordinal);
@@ -202,7 +210,7 @@ public sealed class SqliteMigrationVerificationTests
         IMigrator migrator = context.GetService<IMigrator>();
 
         string rollback = migrator.GenerateScript(
-            PlatformBootstrapMigration,
+            UserPreferencesMigration,
             Migration.InitialDatabase);
         foreach (string table in ExpectedTables)
         {
