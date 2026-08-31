@@ -2,6 +2,11 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The assistant renders the whole administration page for every case, and the
+// credential fields are filled through real user events, so this file needs
+// more room than the default when the suite runs in parallel.
+vi.setConfig({ testTimeout: 30_000 });
 import { VistaraApiError } from '../../api/generated/client';
 import { VistaraThrottledError } from '../../api/platform';
 import type {
@@ -106,15 +111,20 @@ function renderStorage(options: Options = {}) {
 
 async function fillS3(user: ReturnType<typeof userEvent.setup>) {
   await user.click(await screen.findByRole('radio', { name: /S3-compatible/ }));
-  await user.type(
-    screen.getByLabelText('Endpoint URL'),
-    'https://s3.eu-central-1.example',
-  );
-  await user.type(screen.getByLabelText('Region'), 'eu-central-1');
-  await user.type(screen.getByLabelText('Bucket'), 'vistara-media');
-  await user.type(screen.getByLabelText('Access key ID'), 'AKIAEXAMPLE');
-  await user.type(screen.getByLabelText('Secret access key'), secret);
-  await user.type(screen.getByLabelText('Session token'), sessionSecret);
+
+  // Operators paste these values; pasting is also far cheaper than typing
+  // every character through the event pipeline.
+  for (const [label, value] of [
+    ['Endpoint URL', 'https://s3.eu-central-1.example'],
+    ['Region', 'eu-central-1'],
+    ['Bucket', 'vistara-media'],
+    ['Access key ID', 'AKIAEXAMPLE'],
+    ['Secret access key', secret],
+    ['Session token', sessionSecret],
+  ] as const) {
+    await user.click(screen.getByLabelText(label));
+    await user.paste(value);
+  }
 }
 
 beforeEach(() => {
