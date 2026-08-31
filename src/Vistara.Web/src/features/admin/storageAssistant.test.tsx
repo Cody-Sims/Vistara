@@ -13,6 +13,7 @@ import { AdminStoragePage } from './AdminStoragePage';
 import { clearStorageDraft, storageDraftSecrets } from './storageDraft';
 
 const secret = 's3-secret-access-key-value';
+const sessionSecret = 's3-session-token-value';
 
 const summary: StorageSummary = {
   buckets: [
@@ -113,6 +114,7 @@ async function fillS3(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText('Bucket'), 'vistara-media');
   await user.type(screen.getByLabelText('Access key ID'), 'AKIAEXAMPLE');
   await user.type(screen.getByLabelText('Secret access key'), secret);
+  await user.type(screen.getByLabelText('Session token'), sessionSecret);
 }
 
 beforeEach(() => {
@@ -255,6 +257,7 @@ describe('provider assistant', () => {
             bucket: 'vistara-media',
             accessKeyId: 'AKIAEXAMPLE',
             secretAccessKey: secret,
+            sessionToken: sessionSecret,
             forcePathStyle: true,
           },
         },
@@ -520,6 +523,47 @@ describe('validation statuses', () => {
     release?.({ valid: true, provider: 's3', checks: [] });
   });
 
+  it('moves off a provider the deployment cannot validate', async () => {
+    const { client } = renderStorage({
+      getStorageValidationSupport: async () => ({
+        supported: true,
+        providers: ['azureBlob', 's3'],
+      }),
+    });
+
+    const group = await screen.findByRole('radiogroup', {
+      name: 'Storage provider',
+    });
+    await waitFor(() =>
+      expect(
+        within(group).getByRole('radio', { name: /Azure Blob Storage/ }),
+      ).toBeChecked(),
+    );
+    expect(
+      within(group).queryByRole('radio', { name: /Local filesystem/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Storage account name')).toBeInTheDocument();
+    expect(client.validateStorage).not.toHaveBeenCalled();
+  });
+
+  it('offers nothing to test when the deployment lists no provider', async () => {
+    renderStorage({
+      getStorageValidationSupport: async () => ({
+        supported: true,
+        providers: [],
+      }),
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Test connection' }),
+      ).toBeDisabled(),
+    );
+    expect(
+      screen.getByText(/cannot test storage connections/),
+    ).toBeInTheDocument();
+  });
+
   it('offers only the providers the deployment can validate', async () => {
     renderStorage({
       getStorageValidationSupport: async () => ({
@@ -636,7 +680,7 @@ describe('credential handling', () => {
     expect(JSON.stringify(sessionStorage)).not.toContain(secret);
   });
 
-  it('keeps the credential out of the document after the test', async () => {
+  it('keeps every credential out of the document after the test', async () => {
     const user = userEvent.setup();
     renderStorage();
 
@@ -644,8 +688,26 @@ describe('credential handling', () => {
     await user.click(screen.getByRole('button', { name: 'Test connection' }));
     await screen.findByText('Connection succeeded.');
 
+    expect(screen.getByLabelText('Access key ID')).toHaveValue('');
     expect(screen.getByLabelText('Secret access key')).toHaveValue('');
+    expect(screen.getByLabelText('Session token')).toHaveValue('');
+    expect(storageDraftSecrets()).toHaveLength(0);
     expect(document.body.innerHTML).not.toContain(secret);
+    expect(document.body.innerHTML).not.toContain(sessionSecret);
+  });
+
+  it('forgets a session token when a test is cancelled', async () => {
+    const user = userEvent.setup();
+    renderStorage({
+      validateStorage: () => new Promise<StorageValidationResponse>(() => {}),
+    });
+
+    await fillS3(user);
+    await user.click(screen.getByRole('button', { name: 'Test connection' }));
+    await user.click(await screen.findByRole('button', { name: 'Cancel test' }));
+
+    expect(storageDraftSecrets()).toHaveLength(0);
+    expect(document.body.innerHTML).not.toContain(sessionSecret);
   });
 
   it('forgets every credential when the page is left', async () => {

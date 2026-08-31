@@ -24,7 +24,6 @@ import {
   AdminFailure,
   AdminLoading,
   AdminPage,
-  AdminPendingContract,
 } from './AdminPage';
 import { formatBytes, formatMoment } from './format';
 import {
@@ -199,6 +198,26 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
     };
   }, [client]);
 
+  // A provider the deployment cannot validate must not stay selected, or a
+  // candidate would be built for something it just said it cannot check.
+  // Only a deployment that can validate narrows the list; one that cannot
+  // still needs every provider available for building a deploy template.
+  const testable = support?.supported ? support.providers : [];
+  const offered =
+    testable.length > 0
+      ? providers.filter((provider) => testable.includes(provider.kind))
+      : providers;
+
+  if (
+    testable.length > 0 &&
+    !offered.some((provider) => provider.kind === draft.provider)
+  ) {
+    updateStorageDraft({ provider: offered[0]!.kind });
+    setProblems([]);
+    setTest({ kind: 'idle' });
+    setTemplate(undefined);
+  }
+
   // A template describes one exact configuration; an edit withdraws it.
   if (template && templateDraft && templateDraft !== draft) {
     setTemplate(undefined);
@@ -211,7 +230,11 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
 
   function forgetSecrets() {
     updateProviderDraft('azureBlob', { accountKey: '', sasToken: '' });
-    updateProviderDraft('s3', { accessKeyId: '', secretAccessKey: '' });
+    updateProviderDraft('s3', {
+      accessKeyId: '',
+      secretAccessKey: '',
+      sessionToken: '',
+    });
   }
 
   function focusProblem(found: readonly DraftProblem[]) {
@@ -410,14 +433,7 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
           aria-label="Storage provider"
         >
           <legend className={styles.legend}>Provider</legend>
-          {providers
-            .filter(
-              (provider) =>
-                support === undefined ||
-                support.providers.length === 0 ||
-                support.providers.includes(provider.kind),
-            )
-            .map((provider) => (
+          {offered.map((provider) => (
             <label className={styles.providerCard} key={provider.kind}>
               <input
                 aria-describedby={`provider-${provider.kind}-summary`}
@@ -443,8 +459,8 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
                   {provider.summary}
                 </span>
               </span>
-              </label>
-            ))}
+            </label>
+          ))}
         </fieldset>
 
         {draft.provider === 'filesystem' ? (
@@ -687,10 +703,16 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
         <div className={styles.formActions}>
           <button
             aria-describedby={
-              support?.supported === false ? 'validate-missing' : undefined
+              support && (!support.supported || testable.length === 0)
+                ? 'validate-missing'
+                : undefined
             }
             className={styles.primaryButton}
-            disabled={test.kind === 'testing' || support?.supported !== true}
+            disabled={
+              test.kind === 'testing' ||
+              support?.supported !== true ||
+              testable.length === 0
+            }
             type="button"
             onClick={() => void runTest()}
           >
@@ -726,7 +748,7 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
           {test.kind === 'cancelled' ? 'Test cancelled.' : ''}
         </p>
 
-        {support?.supported === false ? (
+        {support && (!support.supported || testable.length === 0) ? (
           <p className={styles.alert} id="validate-missing">
             {supportProblem ??
               'This deployment cannot test storage connections, so no credential is sent from here. Generate the template below and apply it on the server instead.'}
@@ -830,13 +852,6 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
         ) : null}
       </section>
 
-      <AdminPendingContract
-        title="Connection testing"
-        description="The assistant tests a candidate configuration through one route. Until it is published, testing reports that the deployment cannot check the connection."
-        contract={
-          'POST /api/v1/admin/storage/validate — body { provider, filesystem? { rootPath }, azureBlob? { accountName, container, endpointSuffix?, credentialKind, accountKey? | sasToken? }, s3? { endpoint, region, bucket, accessKeyId, secretAccessKey, forcePathStyle } } → 200 { valid, provider, checks: [{ id, status, detail? }], message? }; never echoes a submitted credential'
-        }
-      />
     </AdminPage>
   );
 }
