@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from 'react';
 import { VistaraApiError } from '../../api/generated/client';
+import { onSessionExpired } from '../../api/sessionExpiry';
 import type {
   CurrentUser,
   LoginRequest,
@@ -142,11 +143,11 @@ export function SessionProvider({
   // the account's data is dropped, and the guards send private routes to sign
   // in with the destination they were on.
   useEffect(() => {
-    if (mode === 'preview' || !client.onUnauthorized) {
+    if (mode === 'preview') {
       return;
     }
 
-    return client.onUnauthorized(() => {
+    const expire = () => {
       if (cachedIdentity.current === undefined) {
         return;
       }
@@ -155,7 +156,18 @@ export function SessionProvider({
       cachedIdentity.current = undefined;
       setState({ status: 'anonymous' });
       void endAccount();
-    });
+    };
+
+    const unsubscribe = [
+      client.onUnauthorized?.(expire),
+      onSessionExpired(expire),
+    ];
+
+    return () => {
+      for (const stop of unsubscribe) {
+        stop?.();
+      }
+    };
   }, [client, endAccount, mode]);
 
   const signIn = useCallback(

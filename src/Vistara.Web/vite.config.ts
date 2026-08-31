@@ -85,6 +85,10 @@ export default defineConfig(({ mode }) => {
       environment: 'jsdom',
       setupFiles: './src/test/setup.ts',
       restoreMocks: true,
+      // Whole-application renders are slow on a loaded machine; the defaults
+      // fail these suites for scheduling rather than for behaviour.
+      testTimeout: 30_000,
+      hookTimeout: 30_000,
     },
   };
 });
