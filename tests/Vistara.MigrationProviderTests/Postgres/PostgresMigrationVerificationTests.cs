@@ -117,6 +117,25 @@ public sealed class PostgresMigrationVerificationTests
             "tenant.quotas_json IS JSON OBJECT",
             script,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "CREATE TABLE platform_bootstrap",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ck_platform_bootstrap_singleton",
+            script,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "ALTER TABLE \"platform_bootstrap\" ENABLE ROW LEVEL SECURITY",
+            script,
+            StringComparison.Ordinal);
+        foreach (string table in PostgresTenantRowSecurity.IdentityDirectoryTables)
+        {
+            Assert.Contains(
+                $"CREATE POLICY \"identity_directory\" ON \"{table}\"",
+                script,
+                StringComparison.Ordinal);
+        }
         Assert.Equal(
             PostgresTenantRowSecurity.TenantOwnedTables.Count,
             Count(idempotentScript, "CREATE POLICY \"tenant_isolation\""));
