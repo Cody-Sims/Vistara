@@ -17,6 +17,7 @@ internal sealed class OidcProviderFixture : IDisposable
 {
     internal const string SigningKeyId = "vistara-test-key";
     internal const string SecondarySigningKeyId = "vistara-test-key-2";
+    internal const string RotatedSigningKeyId = "vistara-test-key-rotated";
 
     private readonly RSA _signingRsa = RSA.Create(2048);
     private readonly RSA _secondaryRsa = RSA.Create(2048);
@@ -129,8 +130,21 @@ internal sealed class OidcProviderFixture : IDisposable
         }
         """;
 
-    internal string BuildDuplicateKidJwksJson() =>
+    /// <summary>
+    /// The key set after a provider rotation: the original key plus a new one
+    /// a cache must pick up on refresh.
+    /// </summary>
+    internal string BuildRotatedJwksJson() =>
         $$"""
+        {
+          "keys": [
+            {{RsaKeyJson(_signingRsa, SigningKeyId, "sig", "RS256")}},
+            {{RsaKeyJson(_secondaryRsa, RotatedSigningKeyId, "sig", "RS256")}}
+          ]
+        }
+        """;
+
+    internal string BuildDuplicateKidJwksJson() =>        $$"""
         {
           "keys": [
             {{RsaKeyJson(_signingRsa, SigningKeyId, "sig", "RS256")}},
@@ -172,6 +186,7 @@ internal sealed class OidcHttpTestTransport : HttpMessageHandler
     private readonly Lock _gate = new();
     private readonly List<Uri> _requestedUris = [];
     private readonly List<string> _requestBodies = [];
+    private int _inFlight;
     private readonly Uri _metadataAddress;
     private readonly Uri _jwksUri;
     private readonly Uri _tokenEndpoint;
@@ -204,6 +219,20 @@ internal sealed class OidcHttpTestTransport : HttpMessageHandler
     /// request, which the redirect check must treat as unverifiable.
     /// </summary>
     internal bool StripRequestMessage { get; set; }
+
+    /// <summary>
+    /// Completed as soon as a metadata request reaches the transport, so a
+    /// test can cancel a fetch that is genuinely in flight instead of racing a
+    /// timer against it.
+    /// </summary>
+    internal TaskCompletionSource? MetadataRequestStarted { get; set; }
+
+    /// <summary>
+    /// The highest number of requests this transport ever had in flight at
+    /// once, which is how a test observes that the cache collapsed concurrent
+    /// callers onto a single fetch.
+    /// </summary>
+    internal int MaxConcurrentRequests { get; private set; }
 
     internal IReadOnlyList<Uri> RequestedUris
     {
@@ -280,30 +309,44 @@ internal sealed class OidcHttpTestTransport : HttpMessageHandler
         string body = request.Content is null
             ? string.Empty
             : await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        int inFlight;
         lock (_gate)
         {
             _requestedUris.Add(uri);
             _requestBodies.Add(body);
+            inFlight = ++_inFlight;
+            MaxConcurrentRequests = Math.Max(MaxConcurrentRequests, inFlight);
         }
 
-        if (uri == _metadataAddress)
+        try
         {
-            await DelayAsync(MetadataDelay, cancellationToken).ConfigureAwait(false);
-            return Attach(request, (MetadataResponse ?? (() => Json("{}")))());
-        }
+            if (uri == _metadataAddress)
+            {
+                MetadataRequestStarted?.TrySetResult();
+                await DelayAsync(MetadataDelay, cancellationToken).ConfigureAwait(false);
+                return Attach(request, (MetadataResponse ?? (() => Json("{}")))());
+            }
 
-        if (uri == _jwksUri)
+            if (uri == _jwksUri)
+            {
+                return Attach(request, (JwksResponse ?? (() => Json("{\"keys\":[]}")))());
+            }
+
+            if (uri == _tokenEndpoint)
+            {
+                await DelayAsync(TokenDelay, cancellationToken).ConfigureAwait(false);
+                return Attach(request, (TokenResponse ?? (() => Json("{}")))());
+            }
+
+            return Attach(request, new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
+        finally
         {
-            return Attach(request, (JwksResponse ?? (() => Json("{\"keys\":[]}")))());
+            lock (_gate)
+            {
+                _inFlight--;
+            }
         }
-
-        if (uri == _tokenEndpoint)
-        {
-            await DelayAsync(TokenDelay, cancellationToken).ConfigureAwait(false);
-            return Attach(request, (TokenResponse ?? (() => Json("{}")))());
-        }
-
-        return Attach(request, new HttpResponseMessage(HttpStatusCode.NotFound));
     }
 
     /// <summary>
@@ -328,7 +371,7 @@ internal sealed class OidcHttpTestTransport : HttpMessageHandler
 
     private static async Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
     {
-        if (delay > TimeSpan.Zero)
+        if (delay == Timeout.InfiniteTimeSpan || delay > TimeSpan.Zero)
         {
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
         }

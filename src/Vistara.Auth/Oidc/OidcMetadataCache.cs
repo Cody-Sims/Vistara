@@ -109,6 +109,11 @@ public sealed class OidcMetadataCache : IOidcMetadataProvider, IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            // A caller that went away while queued behind the gate must not
+            // start a provider request on its way out. SemaphoreSlim can hand
+            // the gate to a waiter at the same moment its token is cancelled,
+            // so re-check before spending any budget.
+            cancellationToken.ThrowIfCancellationRequested();
             now = _clock.UtcNow.ToUniversalTime();
             if (!forceRefresh && IsFresh(_cached, now))
             {
@@ -120,10 +125,30 @@ public sealed class OidcMetadataCache : IOidcMetadataProvider, IDisposable
                 return Resolve(_cached, now);
             }
 
+            DateTimeOffset previousAttemptAt = _lastAttemptAt;
+            bool previousHasAttempted = _hasAttempted;
             _lastAttemptAt = now;
             _hasAttempted = true;
-            OidcProviderMetadata? fetched = await FetchAsync(now, cancellationToken)
-                .ConfigureAwait(false);
+            OidcProviderMetadata? fetched;
+            try
+            {
+                fetched = await FetchAsync(now, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Only a caller cancellation reaches here: a provider timeout
+                // is resolved to a failed fetch inside ReadDocumentAsync. The
+                // caller went away before this attempt learned anything about
+                // the provider, so the attempt must not spend the refresh
+                // budget. Restoring the previous attempt state under the gate
+                // stops a client that connects and disconnects in a loop from
+                // holding the cache in a permanent suppressed outage and
+                // denying every legitimate sign-in.
+                _lastAttemptAt = previousAttemptAt;
+                _hasAttempted = previousHasAttempted;
+                throw;
+            }
+
             if (fetched is not null)
             {
                 Volatile.Write(ref _cached, fetched);
@@ -212,16 +237,30 @@ public sealed class OidcMetadataCache : IOidcMetadataProvider, IDisposable
                 now);
     }
 
+    /// <summary>
+    /// Reads one provider document under an HTTP budget the library owns.
+    ///
+    /// The budget lives in its own token source rather than in a linked source
+    /// with a deadline, so a cancelled read can be attributed exactly. Asking
+    /// whether the caller's token is cancelled is not a sound test: a caller
+    /// that gives up moments after a genuine timeout would make a real outage
+    /// look like a disconnect, and a timeout that fires while a caller is
+    /// walking away would make a disconnect look like an outage. Asking which
+    /// source fired answers the question directly. The timeout is checked
+    /// first, because a budget that has already elapsed is an outage signal
+    /// whatever the caller did afterwards.
+    /// </summary>
     private async Task<string?> ReadDocumentAsync(Uri address, CancellationToken cancellationToken)
     {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(_options.HttpTimeout);
+        using var providerBudget = new CancellationTokenSource(_options.HttpTimeout);
+        using CancellationTokenSource attempt = CancellationTokenSource
+            .CreateLinkedTokenSource(cancellationToken, providerBudget.Token);
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, address);
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(JsonMediaType));
             using HttpResponseMessage response = await _httpClient
-                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token)
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, attempt.Token)
                 .ConfigureAwait(false);
 
             // A followed redirect would mean the body came from a URL that
@@ -236,19 +275,28 @@ public sealed class OidcMetadataCache : IOidcMetadataProvider, IDisposable
                 response.Content.Headers.ContentLength > MaximumDocumentBytes
                 ? null
                 : await OidcBoundedContent
-                    .ReadAsync(response.Content, MaximumDocumentBytes, timeout.Token)
+                    .ReadAsync(response.Content, MaximumDocumentBytes, attempt.Token)
                     .ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (providerBudget.IsCancellationRequested)
         {
+            // The library's own HTTP budget elapsed. The provider is
+            // unresponsive, which is a real outage observation and must spend
+            // the refresh backoff like any other failed attempt.
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            // The caller went away. Nothing was learned about the provider, so
+            // this must not count as an attempt.
             throw;
         }
 #pragma warning disable CA1031
         catch (Exception)
         {
-            // Transport, TLS, timeout, and protocol failures are all reported
-            // as one redacted unavailability so a provider error body can never
-            // reach a Vistara response or log.
+            // Transport, TLS, and protocol failures are all reported as one
+            // redacted unavailability so a provider error body can never reach
+            // a Vistara response or log.
             return null;
         }
 #pragma warning restore CA1031

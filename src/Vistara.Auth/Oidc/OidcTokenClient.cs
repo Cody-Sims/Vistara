@@ -112,8 +112,13 @@ public sealed class OidcTokenClient
                 credential.Error ?? OidcErrors.ClientCredentialUnavailable);
         }
 
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(_options.HttpTimeout);
+        // The HTTP budget lives in its own source so a cancelled exchange can
+        // be attributed exactly: an elapsed budget is a provider outage, while
+        // a cancelled caller must surface as cancellation rather than as a
+        // fabricated provider verdict.
+        using var providerBudget = new CancellationTokenSource(_options.HttpTimeout);
+        using CancellationTokenSource attempt = CancellationTokenSource
+            .CreateLinkedTokenSource(cancellationToken, providerBudget.Token);
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, metadata.TokenEndpoint)
@@ -124,7 +129,7 @@ public sealed class OidcTokenClient
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(JsonMediaType));
 
             using HttpResponseMessage response = await _httpClient
-                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token)
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, attempt.Token)
                 .ConfigureAwait(false);
 
             // A followed redirect would mean the tokens came from a URL that
@@ -148,13 +153,17 @@ public sealed class OidcTokenClient
             }
 
             string? body = await OidcBoundedContent
-                .ReadAsync(response.Content, MaximumResponseBytes, timeout.Token)
+                .ReadAsync(response.Content, MaximumResponseBytes, attempt.Token)
                 .ConfigureAwait(false);
             return body is null
                 ? Result.Failure<OidcTokenSet>(OidcErrors.TokenExchangeFailed)
                 : ReadTokenSet(body);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (providerBudget.IsCancellationRequested)
+        {
+            return Result.Failure<OidcTokenSet>(OidcErrors.TokenEndpointUnavailable);
+        }
+        catch (OperationCanceledException)
         {
             throw;
         }
