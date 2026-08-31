@@ -116,8 +116,8 @@ describe('primary navigation', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('shows administration destinations to workspace administrators', async () => {
-    renderNavigation('/admin/jobs', client('TenantAdmin'));
+  it('shows the administration destinations the session may open', async () => {
+    renderNavigation('/admin/jobs', client('TenantOwner'));
 
     const administration = await screen.findByRole('navigation', {
       name: 'Administration',

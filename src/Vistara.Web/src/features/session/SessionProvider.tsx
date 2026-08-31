@@ -14,7 +14,13 @@ import type {
   LoginResponse,
 } from '../../api/platform';
 import { clearAccountScopedData } from './accountData';
-import { activeMembership, canAdminister } from './roles';
+import {
+  activeMembership,
+  canAdminister,
+  credentialKind,
+  previewScopes,
+  sessionScopes,
+} from './roles';
 import {
   SessionContext,
   type SessionContextValue,
@@ -173,11 +179,18 @@ export function SessionProvider({
   const signIn = useCallback(
     async (credentials: LoginRequest) => {
       const session = await client.login(credentials);
+      // Login answers the antiforgery token beside the user rather than on it;
+      // carrying it onto the session is what marks this as the cookie session
+      // it just opened, exactly as a later `GET /api/v1/me` would.
+      const user: CurrentUser = {
+        ...session.user,
+        csrfToken: session.user.csrfToken ?? session.csrfToken,
+      };
       setSignOutIncomplete(false);
       request.current += 1;
-      await adoptIdentity(session.user.userId);
-      setState({ status: 'authenticated', user: session.user });
-      return session.user;
+      await adoptIdentity(user.userId);
+      setState({ status: 'authenticated', user });
+      return user;
     },
     [adoptIdentity, client],
   );
@@ -207,6 +220,10 @@ export function SessionProvider({
       user: state.user,
       membership,
       role: membership?.role,
+      credentialKind:
+        state.status === 'preview' ? 'browser' : credentialKind(state.user),
+      scopes:
+        state.status === 'preview' ? previewScopes : sessionScopes(state.user),
       canAdminister:
         state.status === 'preview' ? true : canAdminister(state.user),
       error: state.error,

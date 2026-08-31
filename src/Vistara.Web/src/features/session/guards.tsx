@@ -1,11 +1,17 @@
 import type { ReactNode } from 'react';
 import { Link, Navigate, useLocation } from 'react-router-dom';
 import { Skeleton, StatusMessage } from '../../components';
+import type { SessionScope } from './roles';
 import { useSession } from './sessionContext';
 import styles from './session.module.css';
 
 interface GuardProps {
   readonly children: ReactNode;
+}
+
+export interface AdministrationGuardProps extends GuardProps {
+  /** The scope the screen behind this guard spends on its first request. */
+  readonly scope?: SessionScope;
 }
 
 export function RequireSession({ children }: GuardProps) {
@@ -64,19 +70,58 @@ export function RequireSession({ children }: GuardProps) {
   );
 }
 
-export function RequireAdministration({ children }: GuardProps) {
+export function RequireAdministration({
+  children,
+  scope,
+}: AdministrationGuardProps) {
   return (
     <RequireSession>
-      <AdministrationGate>{children}</AdministrationGate>
+      <AdministrationGate scope={scope}>{children}</AdministrationGate>
     </RequireSession>
   );
 }
 
-function AdministrationGate({ children }: GuardProps) {
+/**
+ * Administration is opened by what the credential may spend, not by the role
+ * it reports. A tenant-bound credential reaches this workspace read-only, so
+ * it is told that rather than being shown screens the API will refuse.
+ */
+function AdministrationGate({ children, scope }: AdministrationGuardProps) {
   const session = useSession();
+  const authorized =
+    session.canAdminister &&
+    (scope === undefined || session.scopes.includes(scope));
 
-  if (session.canAdminister) {
+  if (authorized) {
     return <>{children}</>;
+  }
+
+  if (session.credentialKind === 'tenantBound') {
+    return (
+      <section
+        className={styles.guard}
+        aria-labelledby="admin-credential-heading"
+      >
+        <p className={styles.eyebrow}>Administration</p>
+        <h1 id="admin-credential-heading">
+          Administration needs a signed-in session
+        </h1>
+        <p className={styles.description}>
+          This workspace was reached with a workspace credential, such as an
+          API key. Those credentials read and write gallery content only, so
+          administration is unavailable however the workspace names your role.
+          Sign in with your account to administer it.
+        </p>
+        <div className={styles.actions}>
+          <Link className={styles.primaryButton} to="/library">
+            Return to library
+          </Link>
+          <Link className={styles.secondaryLink} to="/login">
+            Sign in
+          </Link>
+        </div>
+      </section>
+    );
   }
 
   return (

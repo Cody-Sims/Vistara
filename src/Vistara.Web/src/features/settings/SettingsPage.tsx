@@ -19,7 +19,7 @@ import {
   useThemePreference,
   type ThemePreference,
 } from '../../app/theme';
-import { describeRole, useSession } from '../session';
+import { describeCredential, describeRole, useSession } from '../session';
 import styles from './settings.module.css';
 
 export type SettingsClient = Pick<
@@ -101,7 +101,18 @@ export function SettingsPage({ client }: SettingsPageProps) {
             <dt>Role</dt>
             <dd>{describeRole(session.role)}</dd>
           </div>
+          <div>
+            <dt>Signed in with</dt>
+            <dd>{describeCredential(session.credentialKind)}</dd>
+          </div>
         </dl>
+        {session.credentialKind === 'tenantBound' ? (
+          <p className={styles.hint}>
+            This workspace was reached with a workspace credential, such as an
+            API key. It reads and writes gallery content only; administration
+            needs an interactive sign-in.
+          </p>
+        ) : null}
         <div className={styles.actions}>
           <button
             className={styles.secondaryButton}

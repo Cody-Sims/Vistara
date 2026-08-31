@@ -4,6 +4,8 @@ import {
   LoginPage,
   RequireAdministration,
   RequireSession,
+  type AdministrationGuardProps,
+  type SessionScope,
 } from '../../features/session';
 import { platformClient } from '../apiClients';
 import { ApplicationFrame } from '../ApplicationFrame';
@@ -78,13 +80,14 @@ export function galleryRoutes(
    */
   const behindGuard = (
     title: string,
-    Guard: typeof RequireSession,
+    Guard: ComponentType<AdministrationGuardProps>,
     Screen: ComponentType,
+    scope?: SessionScope,
   ) =>
     preview ? (
       <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
     ) : (
-      <Guard>
+      <Guard scope={scope}>
         <Suspense fallback={<InitialLoadingPage />}>
           <Screen />
         </Suspense>
@@ -168,23 +171,48 @@ export function galleryRoutes(
         },
         {
           path: 'admin/users',
-          element: behindGuard('People', RequireAdministration, AdminUsersScreen),
+          element: behindGuard(
+            'People',
+            RequireAdministration,
+            AdminUsersScreen,
+            'members.manage',
+          ),
         },
         {
           path: 'admin/storage',
-          element: behindGuard('Storage', RequireAdministration, AdminStorageScreen),
+          element: behindGuard(
+            'Storage',
+            RequireAdministration,
+            AdminStorageScreen,
+            'quotas.manage',
+          ),
         },
         {
           path: 'admin/jobs',
-          element: behindGuard('Jobs', RequireAdministration, AdminJobsScreen),
+          element: behindGuard(
+            'Jobs',
+            RequireAdministration,
+            AdminJobsScreen,
+            'assets.read',
+          ),
         },
         {
           path: 'admin/policies',
-          element: behindGuard('Policies', RequireAdministration, AdminPoliciesScreen),
+          element: behindGuard(
+            'Policies',
+            RequireAdministration,
+            AdminPoliciesScreen,
+            'quotas.manage',
+          ),
         },
         {
           path: 'admin/audit',
-          element: behindGuard('Audit log', RequireAdministration, AdminAuditScreen),
+          element: behindGuard(
+            'Audit log',
+            RequireAdministration,
+            AdminAuditScreen,
+            'members.manage',
+          ),
         },
         ...additionalRoutes,
         {

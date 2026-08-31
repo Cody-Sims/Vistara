@@ -1,6 +1,11 @@
 import { useId, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink } from 'react-router-dom';
-import { describeRole, useSession } from '../../features/session';
+import {
+  describeCredential,
+  describeRole,
+  useSession,
+  type SessionScope,
+} from '../../features/session';
 import styles from './PrimaryNavigation.module.css';
 
 type NavigationVariant = 'rail' | 'bottom';
@@ -41,13 +46,38 @@ const utilityDestinations = [
   { label: 'Settings', to: '/settings', icon: 'settings' },
 ] as const;
 
-const administrationDestinations = [
-  { label: 'People', to: '/admin/users', icon: 'admin' },
-  { label: 'Storage', to: '/admin/storage', icon: 'storage' },
-  { label: 'Jobs', to: '/admin/jobs', icon: 'jobs' },
-  { label: 'Policies', to: '/admin/policies', icon: 'policies' },
-  { label: 'Audit log', to: '/admin/audit', icon: 'audit' },
-] as const;
+/**
+ * Each administration screen names the scope its first request spends, so the
+ * rail only offers what this session may actually open.
+ */
+const administrationDestinations: readonly {
+  label: string;
+  to: string;
+  icon: IconName;
+  scope: SessionScope;
+}[] = [
+  { label: 'People', to: '/admin/users', icon: 'admin', scope: 'members.manage' },
+  { label: 'Storage', to: '/admin/storage', icon: 'storage', scope: 'quotas.manage' },
+  { label: 'Jobs', to: '/admin/jobs', icon: 'jobs', scope: 'assets.read' },
+  {
+    label: 'Policies',
+    to: '/admin/policies',
+    icon: 'policies',
+    scope: 'quotas.manage',
+  },
+  {
+    label: 'Audit log',
+    to: '/admin/audit',
+    icon: 'audit',
+    scope: 'members.manage',
+  },
+];
+
+function authorizedAdministration(scopes: readonly SessionScope[]) {
+  return administrationDestinations.filter((destination) =>
+    scopes.includes(destination.scope),
+  );
+}
 
 export function PrimaryNavigation({ variant }: PrimaryNavigationProps) {
   return (
@@ -60,6 +90,9 @@ export function PrimaryNavigation({ variant }: PrimaryNavigationProps) {
 
 function RailNavigation() {
   const session = useSession();
+  const administration = session.canAdminister
+    ? authorizedAdministration(session.scopes)
+    : [];
 
   return (
     <nav
@@ -78,11 +111,16 @@ function RailNavigation() {
           <NavigationLink key={destination.to} {...destination} />
         ))}
       </div>
-      {session.canAdminister ? (
+      {administration.length > 0 ? (
         <nav className={styles.utilityGroup} aria-label="Administration">
           <span className={styles.groupLabel}>Administration</span>
-          {administrationDestinations.map((destination) => (
-            <NavigationLink key={destination.to} {...destination} />
+          {administration.map((destination) => (
+            <NavigationLink
+              key={destination.to}
+              icon={destination.icon}
+              label={destination.label}
+              to={destination.to}
+            />
           ))}
         </nav>
       ) : null}
@@ -155,7 +193,11 @@ function AccountControl({ compact = false }: { readonly compact?: boolean }) {
         <span className={styles.linkLabel}>
           {displayName}
           <span className={styles.accountRole}>
-            {describeRole(session.role)}
+            {session.credentialKind === 'browser'
+              ? describeRole(session.role)
+              : `${describeRole(session.role)} · ${describeCredential(
+                  session.credentialKind,
+                )}`}
           </span>
         </span>
       </button>
@@ -182,7 +224,10 @@ function AccountControl({ compact = false }: { readonly compact?: boolean }) {
 }
 
 function BottomNavigation() {
-  const { canAdminister: administration } = useSession();
+  const session = useSession();
+  const administration = session.canAdminister
+    ? authorizedAdministration(session.scopes)
+    : [];
 
   return (
     <nav
@@ -213,18 +258,16 @@ function BottomNavigation() {
               {destination.label}
             </NavLink>
           ))}
-          {administration
-            ? administrationDestinations.map((destination) => (
-                <NavLink
-                  key={destination.to}
-                  className={styles.menuLink}
-                  to={destination.to}
-                >
-                  <NavigationIcon name={destination.icon} />
-                  {destination.label}
-                </NavLink>
-              ))
-            : null}
+          {administration.map((destination) => (
+            <NavLink
+              key={destination.to}
+              className={styles.menuLink}
+              to={destination.to}
+            >
+              <NavigationIcon name={destination.icon} />
+              {destination.label}
+            </NavLink>
+          ))}
           <AccountControl compact />
         </div>
       </details>

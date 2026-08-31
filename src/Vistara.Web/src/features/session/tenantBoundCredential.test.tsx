@@ -1,0 +1,161 @@
+import { render, screen, within } from '@testing-library/react';
+import { createMemoryRouter, RouterProvider } from 'react-router-dom';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { CurrentUser } from '../../api/platform';
+import { createAppQueryClient } from '../../api/queryClient';
+import { ApplicationProviders } from '../../app/ApplicationProviders';
+import { PrimaryNavigation } from '../../app/navigation/PrimaryNavigation';
+import { createAppRouter } from '../../app/router';
+import { SessionProvider } from './SessionProvider';
+import { currentUser, tenantBoundUser } from './sessionTestData';
+
+const imported = vi.hoisted(() => ({ count: 0 }));
+
+vi.mock('../../app/routes/deferredScreens', async () => {
+  imported.count += 1;
+  return {
+    AdminUsersScreen: () => <h1>People</h1>,
+    AdminStorageScreen: () => <h1>Storage</h1>,
+    AdminJobsScreen: () => <h1>Jobs</h1>,
+    AdminPoliciesScreen: () => <h1>Policies</h1>,
+    AdminAuditScreen: () => <h1>Audit log</h1>,
+    SettingsScreen: () => <h1>Settings</h1>,
+    SetupScreen: () => <h1>Set up Vistara</h1>,
+  };
+});
+
+afterEach(() => {
+  imported.count = 0;
+});
+
+function sessionClient(user: CurrentUser) {
+  return {
+    getSession: vi.fn(async () => user),
+    login: vi.fn(),
+    logout: vi.fn(async () => undefined),
+  };
+}
+
+function renderNavigation(user: CurrentUser) {
+  const router = createMemoryRouter(
+    [{ path: '*', element: <PrimaryNavigation /> }],
+    { initialEntries: ['/library'] },
+  );
+
+  render(
+    <SessionProvider client={sessionClient(user)}>
+      <RouterProvider router={router} />
+    </SessionProvider>,
+  );
+}
+
+function renderAt(entry: string, user: CurrentUser) {
+  const router = createAppRouter({
+    initialEntries: [entry],
+    liveFeatures: true,
+    staticPreview: false,
+  });
+
+  render(
+    <ApplicationProviders
+      queryClient={createAppQueryClient()}
+      router={router}
+      sessionClient={sessionClient(user) as never}
+    />,
+  );
+}
+
+describe('tenant-bound credential', () => {
+  it('offers no administration navigation to an owner reported by an API key', async () => {
+    renderNavigation(tenantBoundUser());
+
+    expect(
+      await screen.findAllByRole('button', { name: /Ada Lovelace/ }),
+    ).not.toHaveLength(0);
+    expect(
+      screen.queryByRole('navigation', { name: 'Administration' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('link', { name: 'People' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('names the credential so the read-only context is not read as owner rights', async () => {
+    renderNavigation(tenantBoundUser());
+
+    const [account] = await screen.findAllByRole('button', {
+      name: /Ada Lovelace/,
+    });
+    expect(account).toHaveTextContent(/Workspace credential/i);
+  });
+
+  it('explains the credential instead of opening the storage assistant', async () => {
+    renderAt('/admin/storage', tenantBoundUser());
+
+    expect(
+      await screen.findByRole('heading', {
+        name: 'Administration needs a signed-in session',
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Test connection' }),
+    ).not.toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(imported.count).toBe(0);
+  });
+
+  it('keeps the same owner administering from an interactive session', async () => {
+    renderAt('/admin/storage', currentUser({}, 'TenantOwner'));
+
+    expect(
+      await screen.findByRole('heading', { name: 'Storage' }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe('administration scopes', () => {
+  it('offers an administrator only the screens their scopes authorize', async () => {
+    renderNavigation(currentUser({}, 'TenantAdmin'));
+
+    const administration = await screen.findByRole('navigation', {
+      name: 'Administration',
+    });
+
+    for (const name of ['People', 'Jobs', 'Audit log']) {
+      expect(
+        within(administration).getByRole('link', { name }),
+      ).toBeInTheDocument();
+    }
+    for (const name of ['Storage', 'Policies']) {
+      expect(
+        within(administration).queryByRole('link', { name }),
+      ).not.toBeInTheDocument();
+    }
+  });
+
+  it('offers an owner every administration screen', async () => {
+    renderNavigation(currentUser({}, 'TenantOwner'));
+
+    const administration = await screen.findByRole('navigation', {
+      name: 'Administration',
+    });
+
+    for (const name of ['People', 'Storage', 'Jobs', 'Policies', 'Audit log']) {
+      expect(
+        within(administration).getByRole('link', { name }),
+      ).toBeInTheDocument();
+    }
+  });
+
+  it('refuses an administrator the owner-only policies screen', async () => {
+    renderAt('/admin/policies', currentUser({}, 'TenantAdmin'));
+
+    expect(
+      await screen.findByRole('heading', {
+        name: 'Administration unavailable',
+      }),
+    ).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(imported.count).toBe(0);
+  });
+});

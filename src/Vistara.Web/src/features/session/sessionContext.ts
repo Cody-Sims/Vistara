@@ -5,6 +5,7 @@ import type {
   TenantMembership,
   TenantRole,
 } from '../../api/platform';
+import type { CredentialKind, SessionScope } from './roles';
 
 export type SessionStatus =
   | 'loading'
@@ -19,6 +20,10 @@ export interface SessionContextValue {
   readonly user?: CurrentUser;
   readonly membership?: TenantMembership;
   readonly role?: TenantRole;
+  /** How the API authenticated this session. */
+  readonly credentialKind: CredentialKind;
+  /** Scopes this session may spend; empty for a tenant-bound credential. */
+  readonly scopes: readonly SessionScope[];
   readonly canAdminister: boolean;
   readonly error?: unknown;
   /**
@@ -33,6 +38,8 @@ export interface SessionContextValue {
 
 const anonymousSession: SessionContextValue = {
   status: 'anonymous',
+  credentialKind: 'tenantBound',
+  scopes: [],
   canAdminister: false,
   signOutIncomplete: false,
   signIn: () => Promise.reject(new Error('No session provider is mounted.')),

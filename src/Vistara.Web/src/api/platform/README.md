@@ -44,6 +44,14 @@ Every route below is implemented on the API branch
   default). A reloaded browser therefore reads the session once before its
   first unsafe request. The token is held in memory only and dropped on
   sign-out; nothing is persisted.
+- `GET /api/v1/me` names the membership role but publishes no scopes and no
+  credential kind. The antiforgery token is the only signal the contract gives:
+  an interactive cookie session receives one, a tenant-bound credential such as
+  an API key never does. `src/features/session/roles.ts` therefore reads the
+  credential kind from `csrfToken`, derives scopes from the membership role for
+  a cookie session only, and assumes none for a tenant-bound credential, whose
+  key scopes never include `members.manage` or `quotas.manage`. Administration
+  screens are offered by scope, not by the reported role.
 - Entity tags are `"v{version}"` (`src/api/versionTag.ts`).
 - `412` means a stale `If-Match`: reload the record and reapply the edit.
   `409` means a state conflict that repeating the same edit will not fix.

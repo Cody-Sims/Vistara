@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { CurrentUser, TenantMembership } from '../../api/platform';
-import { activeMembership, canAdminister, describeRole } from './roles';
+import {
+  activeMembership,
+  canAdminister,
+  credentialKind,
+  describeRole,
+  hasScope,
+  sessionScopes,
+} from './roles';
 
 function membership(
   id: string,
@@ -19,8 +26,14 @@ function user(overrides: Partial<CurrentUser> = {}): CurrentUser {
     role: 'TenantAdmin',
     tenants: [membership('tenant-a', 'TenantAdmin')],
     csrfHeaderName: 'X-Vistara-CSRF',
+    csrfToken: 'csrf-token-1',
     ...overrides,
   };
+}
+
+/** The same account reached with an API key: no antiforgery token is issued. */
+function tenantBound(overrides: Partial<CurrentUser> = {}): CurrentUser {
+  return { ...user(overrides), csrfToken: undefined };
 }
 
 describe('active membership', () => {
@@ -118,5 +131,72 @@ describe('administration', () => {
     expect(describeRole('Member')).toBe('Member');
     expect(describeRole('Viewer')).toBe('Viewer');
     expect(describeRole(undefined)).toBe('Guest');
+  });
+});
+
+describe('credential kind', () => {
+  it('reads an interactive cookie session from its antiforgery token', () => {
+    expect(credentialKind(user())).toBe('browser');
+  });
+
+  it('reads a credential without an antiforgery token as tenant-bound', () => {
+    expect(credentialKind(tenantBound())).toBe('tenantBound');
+    expect(credentialKind(undefined)).toBe('tenantBound');
+  });
+});
+
+describe('session scopes', () => {
+  it('grants a cookie session the scopes its membership role carries', () => {
+    expect(sessionScopes(user({ role: 'TenantOwner', tenants: [membership('tenant-a', 'TenantOwner')] })))
+      .toEqual(
+        expect.arrayContaining(['assets.read', 'members.manage', 'quotas.manage']),
+      );
+    expect(sessionScopes(user())).not.toContain('quotas.manage');
+    expect(
+      sessionScopes(user({ role: 'Member', tenants: [membership('tenant-a', 'Member')] })),
+    ).not.toContain('members.manage');
+  });
+
+  it('assumes no scope for a tenant-bound credential, whatever role it reports', () => {
+    expect(
+      sessionScopes(
+        tenantBound({
+          role: 'TenantOwner',
+          tenants: [membership('tenant-a', 'TenantOwner')],
+        }),
+      ),
+    ).toEqual([]);
+    expect(hasScope(tenantBound(), 'members.manage')).toBe(false);
+    expect(hasScope(user(), 'members.manage')).toBe(true);
+  });
+
+  it('grants nothing for a membership that is not active', () => {
+    expect(
+      sessionScopes(user({ tenants: [membership('tenant-a', 'TenantAdmin', 'Suspended')] })),
+    ).toEqual([]);
+  });
+});
+
+describe('administration with a tenant-bound credential', () => {
+  it('refuses an owner reported by an API key that cannot administer', () => {
+    expect(
+      canAdminister(
+        tenantBound({
+          role: 'TenantOwner',
+          tenants: [membership('tenant-a', 'TenantOwner')],
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('still admits the same owner on an interactive session', () => {
+    expect(
+      canAdminister(
+        user({
+          role: 'TenantOwner',
+          tenants: [membership('tenant-a', 'TenantOwner')],
+        }),
+      ),
+    ).toBe(true);
   });
 });
