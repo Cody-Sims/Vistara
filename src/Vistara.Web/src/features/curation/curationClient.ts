@@ -122,11 +122,35 @@ export function restorableReferences(
     .map((result) => ({ id: result.assetId, version: result.version! }));
 }
 
+/** The API accepts at most this many references in one batch. */
+export const maximumBatch = 200;
+
+export function batches<T>(items: readonly T[]): readonly (readonly T[])[] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += maximumBatch) {
+    chunks.push(items.slice(index, index + maximumBatch));
+  }
+
+  return chunks.length > 0 ? chunks : [[]];
+}
+
+/**
+ * Restores in batches the API accepts, answering one job per batch. Callers
+ * add the submitted counts up rather than reading one job.
+ */
 export async function restoreTrashedAssets(
   client: Pick<CurationClient, 'restoreAssets'>,
   items: readonly VersionedAssetReference[],
-  idempotencyKey: string,
-): Promise<OperationJob> {
-  const response = await client.restoreAssets({ items }, { idempotencyKey });
-  return response.data;
+  createIdempotencyKey: () => string,
+): Promise<readonly OperationJob[]> {
+  const jobs: OperationJob[] = [];
+  for (const batch of batches(items)) {
+    const response = await client.restoreAssets(
+      { items: batch },
+      { idempotencyKey: createIdempotencyKey() },
+    );
+    jobs.push(response.data);
+  }
+
+  return jobs;
 }

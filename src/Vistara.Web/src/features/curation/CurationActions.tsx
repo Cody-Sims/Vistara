@@ -10,6 +10,7 @@ import { VistaraApiError } from '../../api/generated/client';
 import type { ApiResponse } from '../../api/generated/client';
 import type {
   AlbumSummary,
+  AssetBulkAction,
   AssetDetail,
   AssetSummary,
   Tag,
@@ -19,8 +20,10 @@ import { useDialogFocusTrap } from '../../accessibility/focus';
 import { isStaleVersion, versionTag } from '../../api/versionTag';
 import { StatusMessage } from '../../components';
 import { useSession } from '../session';
+import { retryAfterSeconds } from '../../api/throttling';
 import type { AssetMutationResult } from './curationClient';
 import {
+  batches,
   restorableReferences,
   restoreTrashedAssets,
   outcomeForTrashStatus,
@@ -63,6 +66,8 @@ export interface CurationActionsProps {
   ) => void;
   readonly onRestored?: (ids: readonly string[]) => void;
   readonly createIdempotencyKey?: () => string;
+  /** Waits out a rate limit; replaced in tests so they do not really wait. */
+  readonly wait?: (milliseconds: number) => Promise<void>;
 }
 
 type Panel = 'tags' | 'albums';
@@ -74,19 +79,25 @@ interface ListState<T> {
 
 const idle: ListState<never> = { kind: 'loading', items: [] };
 
-/** The API accepts at most 200 references in one batch. */
-const maximumBatch = 200;
+/** A refused batch is retried once, after the delay the API asked for. */
+const throttleRetries = 1;
+const maximumThrottleWait = 30_000;
 
-/** How many single-asset changes are in flight at once. */
-const concurrentAssetChanges = 4;
+/**
+ * A replayed create answers with the record that already exists, so it
+ * replaces the copy in the list instead of joining it a second time.
+ */
+function withRecord<T extends { readonly id: string }>(
+  items: readonly T[],
+  record: T,
+): readonly T[] {
+  return items.some((item) => item.id === record.id)
+    ? items.map((item) => (item.id === record.id ? record : item))
+    : [...items, record];
+}
 
-function batches<T>(items: readonly T[]): readonly (readonly T[])[] {
-  const chunks: T[][] = [];
-  for (let index = 0; index < items.length; index += maximumBatch) {
-    chunks.push(items.slice(index, index + maximumBatch));
-  }
-
-  return chunks.length > 0 ? chunks : [[]];
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function defaultKey(): string {
@@ -162,6 +173,7 @@ export function CurationActions({
   onCurated,
   onRestored,
   onTrashed,
+  wait = sleep,
 }: CurationActionsProps) {
   const session = useSession();
   const allowed = canCurate ?? session.scopes.includes('metadata.manage');
@@ -326,34 +338,24 @@ export function CurationActions({
   }, [focusReport]);
 
   /**
-   * Favourites and tags are one versioned change per asset, so they are sent a
-   * few at a time rather than one after another; the report still follows the
-   * order the images were selected in.
+   * Applies a versioned change to each target in turn. A selection larger than
+   * one image goes through the bulk route instead, so this carries the single
+   * asset a viewer, or a one-image selection, holds.
    */
   async function runOverTargets(
     action: string,
     run: (target: AssetSummary) => Promise<ApiResponse<AssetDetail>>,
   ) {
     setBusy(true);
-    const outcomes: { result: CurationItemResult; asset?: AssetSummary }[] =
-      new Array(targets.length);
-    let next = 0;
-    const worker = async () => {
-      for (let index = next++; index < targets.length; index = next++) {
-        outcomes[index] = await applyToAsset(client, targets[index]!, run);
+    const results: CurationItemResult[] = [];
+    const updated: AssetSummary[] = [];
+    for (const target of targets) {
+      const outcome = await applyToAsset(client, target, run);
+      results.push(outcome.result);
+      if (outcome.asset) {
+        updated.push(outcome.asset);
       }
-    };
-
-    await Promise.all(
-      Array.from(
-        { length: Math.min(concurrentAssetChanges, targets.length) },
-        worker,
-      ),
-    );
-    const results = outcomes.map((outcome) => outcome.result);
-    const updated = outcomes
-      .map((outcome) => outcome.asset)
-      .filter((asset): asset is AssetSummary => asset !== undefined);
+    }
 
     report(action, results);
     setBusy(false);
@@ -361,21 +363,95 @@ export function CurationActions({
     return updated;
   }
 
+  /**
+   * Sends one action for the whole selection through the bulk route, in
+   * batches the API accepts. The route answers with a queued job rather than
+   * per-asset results, so every image in an accepted batch is reported as
+   * queued and every image in a refused one is reported with what refused it.
+   * A `429` is retried once, after the delay the answer asked for, so a rate
+   * limit is respected instead of hammered.
+   */
+  async function runBulk(action: string, bulkAction: AssetBulkAction) {
+    setBusy(true);
+    const results: CurationItemResult[] = [];
+    let refused = false;
+
+    for (const batch of batches(actionable)) {
+      let attempt = 0;
+      for (;;) {
+        try {
+          await client.bulkMutateAssets(
+            {
+              items: toVersionedReferences(batch),
+              action: bulkAction,
+            },
+            { idempotencyKey: createIdempotencyKey() },
+          );
+          results.push(
+            ...batch.map((target) => ({
+              id: target.id,
+              title: target.title,
+              outcome: 'queued' as const,
+            })),
+          );
+          break;
+        } catch (error) {
+          const seconds = retryAfterSeconds(error);
+          if (seconds !== undefined && attempt < throttleRetries) {
+            attempt += 1;
+            await wait(Math.min(seconds * 1000, maximumThrottleWait));
+            continue;
+          }
+
+          refused = true;
+          const status = statusOf(error);
+          results.push(
+            ...batch.map((target) => ({
+              id: target.id,
+              title: target.title,
+              outcome:
+                status === 404
+                  ? ('notFound' as const)
+                  : status === 409 || status === 412
+                    ? ('conflict' as const)
+                    : ('failed' as const),
+            })),
+          );
+          break;
+        }
+      }
+    }
+
+    report(action, results);
+    setBusy(false);
+    onCurated?.([]);
+    return !refused;
+  }
+
   async function toggleFavorite() {
     const next = !favorited;
     setFavoriteOverride({ key: identity, value: next });
-    const updated = await runOverTargets(
-      next ? 'Added to favorites' : 'Removed from favorites',
-      (target) =>
-        next
-          ? client.favoriteAsset(target.id, {
-              idempotencyKey: createIdempotencyKey(),
-              ifMatch: versionTag(target.version),
-            })
-          : client.unfavoriteAsset(target.id, {
-              idempotencyKey: createIdempotencyKey(),
-              ifMatch: versionTag(target.version),
-            }),
+    const action = next ? 'Added to favorites' : 'Removed from favorites';
+
+    if (actionable.length > 1) {
+      const accepted = await runBulk(action, {
+        kind: 'setFavorite',
+        favorite: next,
+      });
+      setFavoriteOverride(accepted ? { key: identity, value: next } : undefined);
+      return;
+    }
+
+    const updated = await runOverTargets(action, (target) =>
+      next
+        ? client.favoriteAsset(target.id, {
+            idempotencyKey: createIdempotencyKey(),
+            ifMatch: versionTag(target.version),
+          })
+        : client.unfavoriteAsset(target.id, {
+            idempotencyKey: createIdempotencyKey(),
+            ifMatch: versionTag(target.version),
+          }),
     );
     setFavoriteOverride(
       updated.length === targets.length &&
@@ -388,18 +464,28 @@ export function CurationActions({
   async function toggleTag(value: Tag) {
     const state = tagStateFor(targets, value.id);
     const add = state !== 'all';
-    await runOverTargets(
-      add ? `Tagged ${value.name}` : `Removed tag ${value.name}`,
-      (target) =>
+    const action = add ? `Tagged ${value.name}` : `Removed tag ${value.name}`;
+
+    if (actionable.length > 1) {
+      await runBulk(
+        action,
         add
-          ? client.addAssetTag(target.id, value.id, {
-              idempotencyKey: createIdempotencyKey(),
-              ifMatch: versionTag(target.version),
-            })
-          : client.removeAssetTag(target.id, value.id, {
-              idempotencyKey: createIdempotencyKey(),
-              ifMatch: versionTag(target.version),
-            }),
+          ? { kind: 'addTag', tagId: value.id }
+          : { kind: 'removeTag', tagId: value.id },
+      );
+      return;
+    }
+
+    await runOverTargets(action, (target) =>
+      add
+        ? client.addAssetTag(target.id, value.id, {
+            idempotencyKey: createIdempotencyKey(),
+            ifMatch: versionTag(target.version),
+          })
+        : client.removeAssetTag(target.id, value.id, {
+            idempotencyKey: createIdempotencyKey(),
+            ifMatch: versionTag(target.version),
+          }),
     );
   }
 
@@ -419,7 +505,7 @@ export function CurationActions({
       setTagName('');
       setTags((current) => ({
         kind: 'ready',
-        items: [...current.items, created.data],
+        items: withRecord(current.items, created.data),
       }));
       setBusy(false);
       await toggleTag(created.data);
@@ -439,12 +525,6 @@ export function CurationActions({
   async function changeAlbum(value: AlbumSummary, add: boolean) {
     setBusy(true);
     const action = add ? `Added to ${value.name}` : `Removed from ${value.name}`;
-    const every = (outcome: CurationItemResult['outcome']) =>
-      targets.map((target) => ({
-        id: target.id,
-        title: target.title,
-        outcome,
-      }));
     const call = (
       album: AlbumSummary,
       items: readonly VersionedAssetReference[],
@@ -460,46 +540,75 @@ export function CurationActions({
       );
 
     let album = value;
-    let updated = value;
-    for (const batch of batches(toVersionedReferences(targets))) {
-      try {
-        updated = (await call(album, batch)).data.album;
-      } catch (error) {
-        if (!isStaleVersion(error)) {
-          const status = statusOf(error);
-          report(action, every(status === 404 ? 'notFound' : 'failed'));
-          setBusy(false);
-          return;
-        }
+    let committedAny = false;
+    const results: CurationItemResult[] = [];
+    const versions: AssetSummary[] = [];
 
-        /**
-         * `412` answers a stale `If-Match` on the album and a stale version on
-         * any asset in the batch, so both are read again before the single
-         * retry: reusing the versions in hand would fail the same way.
-         */
-        try {
-          album = (await client.getAlbum(album.id)).data.album;
-          updated = (await call(album, await refreshed(batch))).data.album;
-        } catch {
-          report(action, every('conflict'));
-          setBusy(false);
-          return;
+    for (const batch of batches(toVersionedReferences(targets))) {
+      const inBatch = batch.map(
+        (item) => targets.find((target) => target.id === item.id)!,
+      );
+      const outcome = (value: CurationItemResult['outcome']) =>
+        inBatch.map((target) => ({
+          id: target.id,
+          title: target.title,
+          outcome: value,
+        }));
+      let detail;
+      try {
+        detail = (await call(album, batch)).data;
+      } catch (error) {
+        if (isStaleVersion(error)) {
+          /**
+           * `412` answers a stale `If-Match` on the album and a stale version
+           * on any asset in the batch, so both are read again before the
+           * single retry: reusing the versions in hand would fail the same
+           * way.
+           */
+          try {
+            album = (await client.getAlbum(album.id)).data.album;
+            detail = (await call(album, await refreshed(batch))).data;
+          } catch {
+            results.push(...outcome('conflict'));
+            continue;
+          }
+        } else {
+          const status = statusOf(error);
+          results.push(
+            ...outcome(status === 404 ? 'notFound' : 'failed'),
+          );
+          continue;
         }
       }
 
-      album = updated;
+      // A batch the API took is committed, whatever a later one does.
+      committedAny = true;
+      album = detail.album;
+      results.push(...outcome('updated'));
+      const applied = new Set(inBatch.map((target) => target.id));
+      for (const item of detail.items.items) {
+        if (applied.has(item.asset.id)) {
+          versions.push(item.asset);
+        }
+      }
     }
 
-    const covered = add ? await ensureCover(value, updated) : updated;
-    setAlbums((current) => ({
-      kind: current.kind,
-      items: current.items.map((item) =>
-        item.id === covered.id ? covered : item,
-      ),
-    }));
-    report(action, every('updated'));
+    const covered =
+      add && committedAny ? await ensureCover(value, album) : album;
+    if (committedAny) {
+      setAlbums((current) => ({
+        kind: current.kind,
+        items: current.items.map((item) =>
+          item.id === covered.id ? covered : item,
+        ),
+      }));
+    }
+
+    report(action, results);
     setBusy(false);
-    onCurated?.([]);
+    if (committedAny) {
+      onCurated?.(versions);
+    }
   }
 
   /** Reads the version each asset is on now, dropping any that disappeared. */
@@ -564,7 +673,7 @@ export function CurationActions({
       const album = created.data.album;
       setAlbums((current) => ({
         kind: 'ready',
-        items: [...current.items, album],
+        items: withRecord(current.items, album),
       }));
       setBusy(false);
       await changeAlbum(album, true);
@@ -646,16 +755,20 @@ export function CurationActions({
     setBusy(true);
     const items = undoable;
     try {
-      const job = await restoreTrashedAssets(
+      const jobs = await restoreTrashedAssets(
         client,
         items,
-        createIdempotencyKey(),
+        createIdempotencyKey,
+      );
+      const submitted = jobs.reduce(
+        (total, job) => total + job.submittedCount,
+        0,
       );
       setOutcome({
         key: scope,
         summary: {
           message: `Restore queued for ${
-            job.submittedCount === 1 ? '1 image' : `${job.submittedCount} images`
+            submitted === 1 ? '1 image' : `${submitted} images`
           }.`,
           tone: 'success',
         },

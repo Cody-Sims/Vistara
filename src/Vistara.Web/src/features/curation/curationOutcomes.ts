@@ -2,6 +2,8 @@
 export type CurationOutcome =
   | 'updated'
   | 'refreshed'
+  /** Accepted by the API as work to finish, not applied yet. */
+  | 'queued'
   | 'unchanged'
   | 'conflict'
   | 'notFound'
@@ -29,6 +31,8 @@ export function describeOutcome(outcome: CurationOutcome): string {
       return 'Done';
     case 'refreshed':
       return 'Done after a refresh';
+    case 'queued':
+      return 'Queued';
     case 'unchanged':
       return 'Already in that state';
     case 'conflict':
@@ -60,7 +64,14 @@ export function summarizeCuration(
   const count = (outcome: CurationOutcome) =>
     results.filter((result) => result.outcome === outcome).length;
   const done = results.filter((result) => succeeded.has(result.outcome)).length;
-  const parts = [`${action}: ${done === 0 ? 'no images' : images(done)}.`];
+  const queued = count('queued');
+  const parts =
+    done === 0 && queued > 0
+      ? [`${action}: ${images(queued)} queued.`]
+      : [`${action}: ${done === 0 ? 'no images' : images(done)}.`];
+  if (done > 0 && queued > 0) {
+    parts.push(`${images(queued)} ${were(queued)} queued.`);
+  }
 
   const refreshed = count('refreshed');
   if (refreshed > 0) {
@@ -96,7 +107,7 @@ export function summarizeCuration(
   return {
     message: parts.join(' '),
     tone:
-      done === 0 && results.length > 0
+      done + queued === 0 && results.length > 0
         ? 'danger'
         : conflict + missing + failed + unchanged > 0
           ? 'warning'

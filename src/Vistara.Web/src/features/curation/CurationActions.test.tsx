@@ -120,6 +120,7 @@ function renderActions(
     canCurate?: boolean;
     onCurated?: () => void;
     onTrashed?: (ids: readonly string[]) => void;
+    wait?: (milliseconds: number) => Promise<void>;
   } = {},
 ) {
   const client = options.client ?? makeClient();
@@ -130,6 +131,7 @@ function renderActions(
       canCurate={options.canCurate ?? true}
       client={client as never}
       createIdempotencyKey={() => 'key-1'}
+      {...(options.wait ? { wait: options.wait } : {})}
       {...(options.onCurated ? { onCurated: options.onCurated } : {})}
       {...(options.onTrashed ? { onTrashed: options.onTrashed } : {})}
     />,
@@ -235,12 +237,16 @@ describe('curation actions', () => {
     );
   });
 
-  it('applies a tag to every selected image and reports each one', async () => {
-    const addAssetTag = vi
-      .fn()
-      .mockResolvedValueOnce(detail(asset({ id: 'a' })))
-      .mockRejectedValueOnce(apiError(500));
-    const client = makeClient({ addAssetTag });
+  it('reports every image in a selection the bulk route accepted', async () => {
+    const bulkMutateAssets = vi.fn(async () => ({
+      data: {
+        jobId: 'job-1',
+        state: 'queued',
+        submittedCount: 2,
+        submittedAt: '2026-01-01T00:00:00Z',
+      },
+    }));
+    const client = makeClient({ bulkMutateAssets });
     const { user } = renderActions({
       assets: [asset({ id: 'a' }), asset({ id: 'b', title: 'Coastline' })],
       client,
@@ -250,51 +256,69 @@ describe('curation actions', () => {
     const panel = await screen.findByRole('group', { name: 'Tags' });
     await user.click(within(panel).getByRole('button', { name: /Coast/ }));
 
-    await waitFor(() => expect(addAssetTag).toHaveBeenCalledTimes(2));
-    expect(addAssetTag.mock.calls[0]?.[0]).toBe('a');
-    expect(addAssetTag.mock.calls[0]?.[1]).toBe('tag-1');
-    expect(screen.getByRole('status', { name: 'Curation result' })).toHaveTextContent(
-      'Tagged Coast: 1 image. 1 image could not be updated.',
+    await waitFor(() => expect(bulkMutateAssets).toHaveBeenCalledTimes(1));
+    expect(client.addAssetTag).not.toHaveBeenCalled();
+    const request = (bulkMutateAssets.mock.calls[0] as unknown[])[0] as {
+      items: readonly unknown[];
+    };
+    expect(request.items).toEqual([
+      { id: 'a', version: 3 },
+      { id: 'b', version: 3 },
+    ]);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent('Tagged Coast: 2 images queued.'),
     );
     const outcomes = screen.getByRole('list', { name: 'Result for each image' });
     expect(within(outcomes).getAllByRole('listitem')).toHaveLength(2);
     expect(outcomes).toHaveTextContent('Coastline');
-    expect(outcomes).toHaveTextContent('Could not be updated');
+    expect(outcomes).toHaveTextContent('Queued');
   });
 
-  it('keeps several single-asset changes in flight but reports them in order', async () => {
-    let inFlight = 0;
-    let peak = 0;
-    const addAssetTag = vi.fn(async (id: string) => {
-      inFlight += 1;
-      peak = Math.max(peak, inFlight);
-      await new Promise((resolve) => setTimeout(resolve, 1));
-      inFlight -= 1;
-      return detail(asset({ id }));
+  it('reports every image in a selection the bulk route refused', async () => {
+    const client = makeClient({
+      bulkMutateAssets: vi.fn(async () => {
+        throw apiError(500);
+      }),
     });
-    const many = Array.from({ length: 12 }, (_, index) =>
-      asset({ id: `asset-${index}`, title: `Image ${index}` }),
-    );
     const { user } = renderActions({
-      assets: many,
-      client: makeClient({ addAssetTag }),
+      assets: [asset({ id: 'a' }), asset({ id: 'b', title: 'Coastline' })],
+      client,
     });
 
     await user.click(screen.getByRole('button', { name: 'Tags' }));
     const panel = await screen.findByRole('group', { name: 'Tags' });
     await user.click(within(panel).getByRole('button', { name: /Coast/ }));
 
-    const outcomes = await screen.findByRole('list', {
-      name: 'Result for each image',
-    });
     await waitFor(() =>
-      expect(within(outcomes).getAllByRole('listitem')).toHaveLength(12),
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent(
+        'Tagged Coast: no images. 2 images could not be updated.',
+      ),
     );
-    expect(addAssetTag).toHaveBeenCalledTimes(12);
-    expect(peak).toBeGreaterThan(1);
-    const rows = within(outcomes).getAllByRole('listitem');
-    expect(rows[0]).toHaveTextContent('Image 0');
-    expect(rows[11]).toHaveTextContent('Image 11');
+    const outcomes = screen.getByRole('list', { name: 'Result for each image' });
+    expect(outcomes).toHaveTextContent('Could not be updated');
+  });
+
+  it('keeps the versioned path for the single image a viewer holds', async () => {
+    const { client, user } = renderActions();
+
+    await user.click(screen.getByRole('button', { name: 'Tags' }));
+    const panel = await screen.findByRole('group', { name: 'Tags' });
+    await user.click(within(panel).getByRole('button', { name: /Coast/ }));
+
+    await waitFor(() =>
+      expect(client.addAssetTag).toHaveBeenCalledWith('asset-1', 'tag-1', {
+        idempotencyKey: 'key-1',
+        ifMatch: '"v3"',
+      }),
+    );
+    expect(client.bulkMutateAssets).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole('status', { name: 'Curation result' }),
+    ).toHaveTextContent('Tagged Coast: 1 image.');
   });
 
   it('creates a tag and applies it in the same step', async () => {
@@ -672,6 +696,274 @@ describe('curation actions', () => {
     expect(
       screen.getByRole('button', { name: 'Undo move to trash' }),
     ).toBeInTheDocument();
+  });
+
+  it('favourites a large selection through the bulk route in batches', async () => {
+    const many = Array.from({ length: 450 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}` }),
+    );
+    const bulkMutateAssets = vi.fn(async () => ({
+      data: {
+        jobId: 'job-1',
+        state: 'queued',
+        submittedCount: 200,
+        submittedAt: '2026-01-01T00:00:00Z',
+      },
+    }));
+    const client = makeClient({ bulkMutateAssets });
+    const { user } = renderActions({ assets: many, client });
+
+    await user.click(screen.getByRole('button', { name: 'Favorite' }));
+
+    await waitFor(() => expect(bulkMutateAssets).toHaveBeenCalledTimes(3));
+    expect(client.favoriteAsset).not.toHaveBeenCalled();
+    for (const call of bulkMutateAssets.mock.calls as unknown[][]) {
+      const request = call[0] as {
+        items: readonly unknown[];
+        action: unknown;
+      };
+      expect(request.items.length).toBeLessThanOrEqual(200);
+      expect(request.action).toEqual({ kind: 'setFavorite', favorite: true });
+    }
+    await waitFor(() =>
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent('Added to favorites: 450 images queued.'),
+    );
+  });
+
+  it('tags a large selection through the bulk route', async () => {
+    const many = Array.from({ length: 450 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}` }),
+    );
+    const bulkMutateAssets = vi.fn(async () => ({
+      data: {
+        jobId: 'job-1',
+        state: 'queued',
+        submittedCount: 200,
+        submittedAt: '2026-01-01T00:00:00Z',
+      },
+    }));
+    const client = makeClient({ bulkMutateAssets });
+    const { user } = renderActions({ assets: many, client });
+
+    await user.click(screen.getByRole('button', { name: 'Tags' }));
+    const panel = await screen.findByRole('group', { name: 'Tags' });
+    await user.click(within(panel).getByRole('button', { name: /Coast/ }));
+
+    await waitFor(() => expect(bulkMutateAssets).toHaveBeenCalledTimes(3));
+    expect(client.addAssetTag).not.toHaveBeenCalled();
+    const first = (bulkMutateAssets.mock.calls[0] as unknown[])[0] as {
+      action: unknown;
+    };
+    expect(first.action).toEqual({ kind: 'addTag', tagId: 'tag-1' });
+  });
+
+  it('waits the delay a rate limit asked for instead of flooding it', async () => {
+    const many = Array.from({ length: 450 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}` }),
+    );
+    const throttled = new VistaraApiError(429, {
+      type: 'about:blank',
+      title: 'rate_limited',
+      status: 429,
+      code: 'rate_limited',
+      errors: {},
+      retryAfterSeconds: 2,
+    } as never);
+    const bulkMutateAssets = vi
+      .fn()
+      .mockRejectedValueOnce(throttled)
+      .mockResolvedValue({
+        data: {
+          jobId: 'job-1',
+          state: 'queued',
+          submittedCount: 200,
+          submittedAt: '2026-01-01T00:00:00Z',
+        },
+      });
+    const waits: number[] = [];
+    const { user } = renderActions({
+      assets: many,
+      client: makeClient({ bulkMutateAssets }),
+      wait: async (milliseconds: number) => {
+        waits.push(milliseconds);
+      },
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Favorite' }));
+
+    // Three batches plus exactly one retry of the refused batch.
+    await waitFor(() => expect(bulkMutateAssets).toHaveBeenCalledTimes(4));
+    expect(waits).toEqual([2000]);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent('Added to favorites: 450 images queued.'),
+    );
+  });
+
+  it('gives up on a batch the API keeps refusing without retrying it again', async () => {
+    const many = Array.from({ length: 250 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}` }),
+    );
+    const throttled = new VistaraApiError(429, {
+      type: 'about:blank',
+      title: 'rate_limited',
+      status: 429,
+      code: 'rate_limited',
+      errors: {},
+      retryAfterSeconds: 1,
+    } as never);
+    const bulkMutateAssets = vi
+      .fn()
+      .mockRejectedValueOnce(throttled)
+      .mockRejectedValueOnce(throttled)
+      .mockResolvedValue({
+        data: {
+          jobId: 'job-1',
+          state: 'queued',
+          submittedCount: 50,
+          submittedAt: '2026-01-01T00:00:00Z',
+        },
+      });
+    const { user } = renderActions({
+      assets: many,
+      client: makeClient({ bulkMutateAssets }),
+      wait: async () => undefined,
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Favorite' }));
+
+    await waitFor(() => expect(bulkMutateAssets).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent(
+        'Added to favorites: 50 images queued. 200 images could not be updated.',
+      ),
+    );
+  });
+
+  it('restores every image it trashed in batches the API accepts', async () => {
+    const many = Array.from({ length: 250 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}` }),
+    );
+    const restoreAssets = vi.fn(
+      async (request: { items: readonly unknown[] }) => ({
+        data: {
+          jobId: 'job-1',
+          state: 'queued',
+          submittedCount: request.items.length,
+          submittedAt: '2026-01-01T00:00:00Z',
+        },
+      }),
+    );
+    const client = makeClient({
+      bulkMutateAssets: vi.fn(async (request: { items: readonly unknown[] }) => ({
+        data: request.items.map((item) => ({
+          assetId: (item as { id: string }).id,
+          status: 'trashed',
+          version: 4,
+        })),
+      })),
+      restoreAssets,
+    });
+    const { user } = renderActions({ assets: many, client });
+
+    await user.click(screen.getByRole('button', { name: 'Move to trash' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Move to trash' }));
+    const undo = await screen.findByRole('button', {
+      name: 'Undo move to trash',
+    });
+    await user.click(undo);
+
+    await waitFor(() => expect(restoreAssets).toHaveBeenCalledTimes(2));
+    for (const call of restoreAssets.mock.calls as unknown[][]) {
+      const request = call[0] as { items: readonly unknown[] };
+      expect(request.items.length).toBeLessThanOrEqual(200);
+    }
+    await waitFor(() =>
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent('Restore queued for 250 images.'),
+    );
+  });
+
+  it('keeps what an earlier album batch committed when a later one fails', async () => {
+    const many = Array.from({ length: 250 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}` }),
+    );
+    const addAlbumItems = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: {
+          album: { ...album, version: 3, itemCount: 200 },
+          items: { items: [] },
+        },
+      })
+      .mockRejectedValue(apiError(500));
+    const onCurated = vi.fn();
+    const { user } = renderActions({
+      assets: many,
+      client: makeClient({ addAlbumItems }),
+      onCurated,
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Albums' }));
+    const panel = await screen.findByRole('group', { name: 'Albums' });
+    await user.click(within(panel).getByRole('button', { name: 'Add to Summer' }));
+
+    await waitFor(() => expect(addAlbumItems).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent(
+        'Added to Summer: 200 images. 50 images could not be updated.',
+      ),
+    );
+    expect(onCurated).toHaveBeenCalled();
+  });
+
+  it('lists a tag the API replayed only once', async () => {
+    const { client, user } = renderActions();
+
+    await user.click(screen.getByRole('button', { name: 'Tags' }));
+    const panel = await screen.findByRole('group', { name: 'Tags' });
+    await user.click(within(panel).getByLabelText('New tag name'));
+    await user.paste('Coast');
+    await user.click(within(panel).getByRole('button', { name: 'Create and add' }));
+
+    await waitFor(() => expect(client.createTag).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole('group', { name: 'Tags' })).getAllByRole(
+          'button',
+          { name: /Coast/ },
+        ),
+      ).toHaveLength(1),
+    );
+  });
+
+  it('lists an album the API replayed only once', async () => {
+    const { client, user } = renderActions();
+
+    await user.click(screen.getByRole('button', { name: 'Albums' }));
+    const panel = await screen.findByRole('group', { name: 'Albums' });
+    await user.click(within(panel).getByLabelText('New album name'));
+    await user.paste('Summer');
+    await user.click(within(panel).getByRole('button', { name: 'Create and add' }));
+
+    await waitFor(() => expect(client.createAlbum).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole('group', { name: 'Albums' })).getAllByRole(
+          'button',
+          { name: 'Add to Summer' },
+        ),
+      ).toHaveLength(1),
+    );
   });
 
   it('reports how many images the actions apply to', () => {

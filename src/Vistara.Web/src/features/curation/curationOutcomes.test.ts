@@ -80,9 +80,32 @@ describe('curation outcomes', () => {
     expect(summary.tone).toBe('success');
   });
 
+  it('reports work the API accepted but has not finished', () => {
+    const summary = summarizeCuration('Added to favorites', [
+      result('a', 'queued'),
+      result('b', 'queued'),
+    ]);
+
+    expect(summary.message).toBe('Added to favorites: 2 images queued.');
+    expect(summary.tone).toBe('success');
+  });
+
+  it('separates queued work from work that was refused', () => {
+    const summary = summarizeCuration('Added to favorites', [
+      result('a', 'queued'),
+      result('b', 'failed'),
+    ]);
+
+    expect(summary.message).toBe(
+      'Added to favorites: 1 image queued. 1 image could not be updated.',
+    );
+    expect(summary.tone).toBe('warning');
+  });
+
   it('describes each outcome for the per-image list', () => {
     expect(describeOutcome('updated')).toBe('Done');
     expect(describeOutcome('refreshed')).toBe('Done after a refresh');
+    expect(describeOutcome('queued')).toBe('Queued');
     expect(describeOutcome('unchanged')).toBe('Already in that state');
     expect(describeOutcome('conflict')).toBe('Changed elsewhere');
     expect(describeOutcome('notFound')).toBe('No longer available');

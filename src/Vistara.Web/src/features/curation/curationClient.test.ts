@@ -104,16 +104,52 @@ describe('trash and restore boundary', () => {
       },
     });
 
-    const job = await restoreTrashedAssets(
+    const jobs = await restoreTrashedAssets(
       { restoreAssets } as never,
       [{ id: 'a', version: 4 }],
-      'key-4',
+      () => 'key-4',
     );
 
     expect(restoreAssets).toHaveBeenCalledWith(
       { items: [{ id: 'a', version: 4 }] },
       { idempotencyKey: 'key-4' },
     );
-    expect(job.submittedCount).toBe(1);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.submittedCount).toBe(1);
+  });
+
+  it('restores more references than one batch may carry', async () => {
+    const restoreAssets = vi.fn(
+      async (request: { items: readonly unknown[] }) => ({
+        data: {
+          jobId: 'job-3',
+          state: 'queued',
+          submittedCount: request.items.length,
+          submittedAt: '2026-01-01T00:00:00Z',
+        },
+      }),
+    );
+    const references = Array.from({ length: 450 }, (_, index) => ({
+      id: `asset-${index}`,
+      version: 2,
+    }));
+    let key = 0;
+
+    const jobs = await restoreTrashedAssets(
+      { restoreAssets } as never,
+      references,
+      () => `key-${++key}`,
+    );
+
+    expect(jobs).toHaveLength(3);
+    expect(jobs.reduce((total, job) => total + job.submittedCount, 0)).toBe(450);
+    const keys = new Set<string>();
+    for (const call of restoreAssets.mock.calls as unknown[][]) {
+      const request = call[0] as { items: readonly unknown[] };
+      const options = call[1] as { idempotencyKey: string };
+      expect(request.items.length).toBeLessThanOrEqual(200);
+      keys.add(options.idempotencyKey);
+    }
+    expect(keys.size).toBe(3);
   });
 });
