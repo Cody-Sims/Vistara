@@ -245,7 +245,9 @@ internal sealed class FilesystemValidationClient(string rootPath)
         }
 
         recorder.Pass(StorageCheckId.Reachable);
-        recorder.Skip(StorageCheckId.Authenticated, "A directory needs no credential.");
+        recorder.Skip(
+            StorageCheckId.Authenticated,
+            StorageValidationDetails.NoCredentialNeeded);
 
         try
         {

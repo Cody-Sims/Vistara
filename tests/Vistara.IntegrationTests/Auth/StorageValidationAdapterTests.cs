@@ -353,6 +353,140 @@ public sealed class StorageValidationAdapterTests
     }
 
     [Fact]
+    public async Task The_shipped_filesystem_client_probes_without_touching_existing_data()
+    {
+        string root = Path.Combine(
+            Directory.GetCurrentDirectory(),
+            $"storage-validate-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        string existing = Path.Combine(root, "existing-object.bin");
+        await File.WriteAllBytesAsync(existing, [1, 2, 3], CancellationToken.None);
+        try
+        {
+            var factory = new PlatformStorageValidationClientFactory();
+            PlatformStorageValidationAdapter port = CreatePort(factory);
+
+            using var candidate = new StorageValidationCandidate(
+                StorageCandidateKind.Filesystem,
+                "filesystem",
+                rootPath: root);
+            StorageValidationOutcome outcome =
+                await port.ValidateAsync(candidate, default);
+
+            Assert.True(outcome.Valid);
+            Assert.Equal(
+                StorageCheckStatus.Skipped,
+                outcome.Checks[1].Status);
+            Assert.Equal([1, 2, 3], await File.ReadAllBytesAsync(
+                existing,
+                CancellationToken.None));
+            Assert.Equal(
+                [existing],
+                Directory.GetFiles(root, "*", SearchOption.AllDirectories));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task The_shipped_filesystem_client_reports_a_missing_directory()
+    {
+        var factory = new PlatformStorageValidationClientFactory();
+        PlatformStorageValidationAdapter port = CreatePort(factory);
+
+        using var candidate = new StorageValidationCandidate(
+            StorageCandidateKind.Filesystem,
+            "filesystem",
+            rootPath: Path.Combine(
+                Directory.GetCurrentDirectory(),
+                $"absent-{Guid.NewGuid():N}"));
+        StorageValidationOutcome outcome = await port.ValidateAsync(candidate, default);
+
+        Assert.False(outcome.Valid);
+        Assert.Equal(StorageValidationDetails.PathMissing, outcome.Checks[0].Detail);
+    }
+
+    [Fact]
+    public async Task Every_detail_the_adapter_answers_comes_from_the_catalogue()
+    {
+        string[] catalogue = [.. typeof(StorageValidationDetails)
+            .GetFields(System.Reflection.BindingFlags.Public |
+                System.Reflection.BindingFlags.Static)
+            .Select(field => (string)field.GetRawConstantValue()!)];
+        var outcomes = new List<StorageValidationOutcome>();
+        PlatformStorageValidationAdapter permissive =
+            CreatePort(new RecordingClientFactory { Outcome = Denied() });
+        PlatformStorageValidationAdapter throwing =
+            CreatePort(new ThrowingClientFactory("boom"));
+        PlatformStorageValidationAdapter failing =
+            CreatePort(new FailingConstructionFactory("boom"));
+        PlatformStorageValidationAdapter shipped =
+            CreatePort(new PlatformStorageValidationClientFactory());
+
+        using (StorageValidationCandidate blocked = S3Candidate("https://10.0.0.1"))
+        {
+            outcomes.Add(await permissive.ValidateAsync(blocked, default));
+        }
+
+        using (StorageValidationCandidate reachable =
+            S3Candidate("https://93.184.216.34"))
+        {
+            outcomes.Add(await permissive.ValidateAsync(reachable, default));
+            outcomes.Add(await throwing.ValidateAsync(reachable, default));
+            outcomes.Add(await failing.ValidateAsync(reachable, default));
+        }
+
+        using (var anonymous = new StorageValidationCandidate(
+            StorageCandidateKind.S3,
+            "s3",
+            endpoint: new Uri("https://93.184.216.34"),
+            container: "private-media",
+            region: "eu-central-1",
+            s3Credential: S3CredentialKind.Anonymous))
+        {
+            outcomes.Add(await permissive.ValidateAsync(anonymous, default));
+        }
+
+        using (var missing = new StorageValidationCandidate(
+            StorageCandidateKind.Filesystem,
+            "filesystem",
+            rootPath: Path.Combine(
+                Directory.GetCurrentDirectory(),
+                $"absent-{Guid.NewGuid():N}")))
+        {
+            outcomes.Add(await shipped.ValidateAsync(missing, default));
+        }
+
+        string root = Path.Combine(
+            Directory.GetCurrentDirectory(),
+            $"storage-validate-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var usable = new StorageValidationCandidate(
+                StorageCandidateKind.Filesystem,
+                "filesystem",
+                rootPath: root);
+            outcomes.Add(await shipped.ValidateAsync(usable, default));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+
+        string[] details = [.. outcomes
+            .SelectMany(outcome => outcome.Checks)
+            .Select(check => check.Detail)
+            .Concat(outcomes.Select(outcome => outcome.Message))
+            .OfType<string>()
+            .Distinct()];
+        Assert.NotEmpty(details);
+        Assert.All(details, detail => Assert.Contains(detail, catalogue));
+    }
+
+    [Fact]
     public void The_shipped_surface_resolves_the_client_factory()
     {
         var services = new ServiceCollection();

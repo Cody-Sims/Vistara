@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Vistara.Api.Composition.Platform;
 using Vistara.Api.Features.Account;
 using Vistara.Domain.Common;
 using Xunit;
@@ -138,11 +139,31 @@ public sealed class FirstOwnerProvisioningContractTests
         Assert.Equal(available, json.RootElement.GetProperty("available").GetBoolean());
     }
 
+    [Fact]
+    public async Task Setup_availability_is_rate_limited_before_it_reads_state()
+    {
+        var provisioning = new FakeProvisioningPort();
+
+        TestResponse response = await DescribeAsync(
+            provisioning,
+            new DenyingRateLimitHook());
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
+        Assert.Equal("30", response.RetryAfter);
+        Assert.False(provisioning.AvailabilityWasRead);
+    }
+
     private static async Task<TestResponse> DescribeAsync(
-        IFirstOwnerProvisioningPort provisioning)
+        IFirstOwnerProvisioningPort provisioning,
+        IPlatformRateLimitHook? rateLimit = null)
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.Services.AddSingleton(provisioning);
+        if (rateLimit is not null)
+        {
+            builder.Services.AddSingleton(rateLimit);
+        }
+
         builder.Services.AddVistaraAccountSurface();
         WebApplication app = builder.Build();
         app.MapVistaraAccount();
@@ -171,7 +192,8 @@ public sealed class FirstOwnerProvisioningContractTests
             (HttpStatusCode)context.Response.StatusCode,
             context.Response.Headers.CacheControl.ToString(),
             context.Response.Headers.Location.ToString(),
-            responseBody);
+            responseBody,
+            context.Response.Headers.RetryAfter.ToString());
     }
 
     private static async Task<TestResponse> SendAsync(
@@ -216,7 +238,17 @@ public sealed class FirstOwnerProvisioningContractTests
         HttpStatusCode StatusCode,
         string CacheControl,
         string Location,
-        string Body);
+        string Body,
+        string RetryAfter = "");
+
+    private sealed class DenyingRateLimitHook : IPlatformRateLimitHook
+    {
+        public ValueTask<PlatformRateLimitDecision> CheckAsync(
+            HttpContext context,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult(
+                PlatformRateLimitDecision.Reject(TimeSpan.FromSeconds(30)));
+    }
 
     private sealed class FakeProvisioningPort : IFirstOwnerProvisioningPort
     {
@@ -226,8 +258,13 @@ public sealed class FirstOwnerProvisioningContractTests
 
         public bool Available { get; init; } = true;
 
-        public ValueTask<bool> IsAvailableAsync(CancellationToken cancellationToken) =>
-            ValueTask.FromResult(Available);
+        public bool AvailabilityWasRead { get; private set; }
+
+        public ValueTask<bool> IsAvailableAsync(CancellationToken cancellationToken)
+        {
+            AvailabilityWasRead = true;
+            return ValueTask.FromResult(Available);
+        }
 
         public ValueTask<Result<ProvisionedOwnerView>> ProvisionAsync(
             FirstOwnerProvisioningCommand command,

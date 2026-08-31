@@ -26,6 +26,7 @@ public static class AccountServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
 
         services.TryAddScoped<IAccountAuthorizationPort, ClaimsAccountAuthorizationPort>();
+        services.TryAddSingleton<IPlatformRateLimitHook, PermitAllPlatformRateLimitHook>();
         services.TryAddSingleton<IClock>(SystemClock.Instance);
         services.TryAddSingleton<IUuid7Generator, Uuid7Generator>();
         services.TryAddSingleton(new CookieAuthOptions());
@@ -95,6 +96,8 @@ public static class AccountEndpointMapping
                         context,
                         context.RequestServices
                             .GetRequiredService<IFirstOwnerProvisioningPort>(),
+                        context.RequestServices
+                            .GetRequiredService<IPlatformRateLimitHook>(),
                         cancellationToken))
             .AllowAnonymous();
         endpoints.MapPost(

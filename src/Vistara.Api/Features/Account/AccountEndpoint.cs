@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Net.Http.Headers;
+using Vistara.Api.Composition.Platform;
 using Vistara.Auth.Cookies;
 using Vistara.Contracts.Identity;
 using Vistara.Domain.Common;
@@ -162,13 +164,40 @@ public static class AccountEndpoint
             cancellationToken);
     }
 
+    /// <summary>
+    /// Publishes whether first-run provisioning is still open. This is the one
+    /// anonymous read on the account surface, so it is throttled and answers a
+    /// single boolean: no identity count, tenant count, or topology.
+    /// </summary>
     public static async Task DescribeSetupAsync(
         HttpContext context,
         IFirstOwnerProvisioningPort provisioning,
+        IPlatformRateLimitHook rateLimit,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(provisioning);
+        ArgumentNullException.ThrowIfNull(rateLimit);
+
+        PlatformRateLimitDecision decision =
+            await rateLimit.CheckAsync(context, cancellationToken);
+        if (!decision.IsAllowed)
+        {
+            if (decision.RetryAfter is { } retryAfter)
+            {
+                context.Response.Headers.RetryAfter =
+                    ((int)Math.Ceiling(retryAfter.TotalSeconds))
+                    .ToString(CultureInfo.InvariantCulture);
+            }
+
+            await ApiProblemWriter.WriteAsync(
+                context,
+                StatusCodes.Status429TooManyRequests,
+                "setup.throttled",
+                "Setup discovery is throttled; retry later.",
+                cancellationToken);
+            return;
+        }
 
         await WriteJsonAsync(
             context,

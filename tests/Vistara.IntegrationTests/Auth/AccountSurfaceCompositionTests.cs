@@ -45,6 +45,7 @@ public sealed class AccountSurfaceCompositionTests
         Assert.NotNull(services.GetRequiredService<RelationalIdentityCatalog>());
         Assert.NotNull(
             services.GetRequiredService<RelationalFirstOwnerProvisioningStore>());
+        Assert.NotNull(services.GetRequiredService<IPlatformRateLimitHook>());
     }
 
     [Fact]

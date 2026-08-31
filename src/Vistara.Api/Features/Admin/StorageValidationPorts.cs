@@ -289,6 +289,8 @@ public static class StorageValidationDetails
 
     public const string PathMissing = "The directory does not exist.";
 
+    public const string NoCredentialNeeded = "A directory needs no credential.";
+
     public const string TimedOut =
         "The provider did not answer within the validation timeout.";
 

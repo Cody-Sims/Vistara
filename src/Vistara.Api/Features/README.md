@@ -115,10 +115,28 @@ screen without attempting provisioning.
 { "available": true }     // false once an owner owns the bootstrap marker
 ```
 
-Availability is read from the same database-enforced singleton marker that
-`POST /api/v1/setup` claims, so it can never disagree with the route it
-advertises. `false` is advisory only: the `POST` still answers
-`409 setup.already_provisioned` on its own.
+`available` flips to `false` in the same committed transaction that claims the
+marker, so it can never disagree with the route it advertises. The answer is
+exactly one member: no identity count, no tenant count, no slug, and no
+topology, because an unauthenticated caller must not learn the size or shape of
+the deployment.
+
+This is the only anonymous read on the account surface, so it is throttled by
+the platform rate limit hook before it reads any state, and it answers
+`Cache-Control: no-store` so a shared cache cannot keep serving `true` after
+provisioning closes.
+
+| Status | Code | Meaning |
+|---|---|---|
+| `200` | — | `{ "available": true \| false }` |
+| `429` | `setup.throttled` | Throttled; `Retry-After` in seconds |
+
+`POST /api/v1/setup` is unchanged and answers `201` with the provisioned owner,
+`409 setup.already_provisioned`, `409 setup.provisioning_contended`,
+`422 setup.invalid_request` with a per-field `errors` map, and
+`422 setup.weak_password`. A client that read `available: true` a moment ago
+must still handle both `409`s, because the read is advisory and the write is
+the only arbiter.
 
 ## Antiforgery
 
@@ -193,7 +211,13 @@ fixed catalogue:
 `The probe object could not be written.` ·
 `The probe object could not be deleted.` ·
 `The directory does not exist.` ·
+`A directory needs no credential.` ·
 `The provider did not answer within the validation timeout.`
+
+The catalogue is closed: an integration test drives every shipped failure and
+success path and asserts each emitted `detail` and `message` is one of these
+constants, so a client may match on them and a provider string can never reach
+the browser.
 
 Credential kinds:
 
@@ -231,6 +255,26 @@ Rules:
   converted into a timeout. The one-shot provider client is disposed on every
   path, including timeout and cancellation. The platform rate limiter guards the
   route and answers `429` with `Retry-After`.
+
+Statuses:
+
+| Status | Code | Meaning |
+|---|---|---|
+| `200` | — | A completed validation, valid or not. A candidate that fails is a `200` with `valid: false`, never an error status |
+| `400` | `storage_validation.malformed_request` | The body is not JSON |
+| `401` | `storage_validation.unauthenticated` | No credential |
+| `403` | `storage_validation.forbidden` | Not a tenant owner, or missing `quotas.manage` |
+| `413` | `storage_validation.body_too_large` | Body over 16 KiB |
+| `422` | `storage_validation.invalid_request` | Per-field `errors` map naming the rejected member |
+| `429` | `storage_validation.throttled` | Throttled; `Retry-After` in seconds |
+
+`GET` answers `200` with `{ "supported": true, "providers": [...] }`, or `401`
+and `403` with the same codes. It carries no credential and no topology, so a
+client may call it before an operator has typed anything.
+
+A deployment that cannot validate at all would answer `supported: false`; this
+release always answers `true`, and a client should still branch on the member
+rather than assume it.
 
 ## Known limits in this release
 
