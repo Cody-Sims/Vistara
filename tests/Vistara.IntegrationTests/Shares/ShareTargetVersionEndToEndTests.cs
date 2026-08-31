@@ -609,6 +609,89 @@ public sealed class ShareTargetVersionEndToEndTests
         Assert.Equal("share_target_not_deliverable", ProblemCode(empty));
     }
 
+    /// <summary>
+    /// A share link is followed by anonymous recipients and by people already
+    /// signed in to either tenant, and every one of those views has to reach the
+    /// owning tenant's audit trail without recording the visitor's own identity
+    /// or writing anything into their tenant.
+    /// </summary>
+    [Fact]
+    public async Task Share_views_are_audited_for_anonymous_and_signed_in_visitors_alike()
+    {
+        await using ShareVersionScenario scenario =
+            await ShareVersionScenario.CreateAsync();
+        Guid assetId = await scenario.IngestReadyAssetAsync();
+        AssetContractVersions asset = await scenario.ReadAssetAsync(assetId);
+        SharePublication share = await scenario.PublishShareAsync(
+            assetId,
+            asset.Version,
+            idempotencyKey: "share-audit");
+        string viewPath = share.PathForKind("viewer");
+        string missingPath = share.PathForIdentifier(
+            Guid.CreateVersion7().ToString("D"));
+        int viewedBefore = await scenario.CountShareAuditAsync(
+            scenario.Owner.TenantId,
+            "ShareViewed",
+            share.ShareId);
+        int rejectedBefore = await scenario.CountShareAuditAsync(
+            scenario.Owner.TenantId,
+            "ShareViewRejected",
+            share.ShareId);
+
+        foreach (string? visitor in new[]
+                 {
+                     null,
+                     scenario.OwnerApiKey,
+                     scenario.NeighbourApiKey,
+                 })
+        {
+            ApiResponse viewed = await scenario.SendAsync(
+                HttpMethods.Get,
+                $"/api/v1/public/shares/{share.Token}",
+                apiKey: visitor);
+            Assert.Equal(HttpStatusCode.OK, viewed.Status);
+
+            ApiResponse served = await scenario.SendAsync(
+                HttpMethods.Get,
+                viewPath,
+                apiKey: visitor);
+            Assert.Equal(HttpStatusCode.OK, served.Status);
+
+            ApiResponse rejected = await scenario.SendAsync(
+                HttpMethods.Get,
+                missingPath,
+                apiKey: visitor);
+            Assert.Equal(HttpStatusCode.NotFound, rejected.Status);
+        }
+
+        Assert.Equal(
+            viewedBefore + 3,
+            await scenario.CountShareAuditAsync(
+                scenario.Owner.TenantId,
+                "ShareViewed",
+                share.ShareId));
+        Assert.Equal(
+            rejectedBefore + 3,
+            await scenario.CountShareAuditAsync(
+                scenario.Owner.TenantId,
+                "ShareViewRejected",
+                share.ShareId));
+
+        // The audit trail belongs to the share's tenant, and a signed-in
+        // visitor from elsewhere is recorded as a share recipient rather than
+        // by their own identity.
+        Assert.Equal(
+            0,
+            await scenario.CountTenantShareAuditAsync(scenario.Neighbour.TenantId));
+        Assert.Equal(
+            ["public-share-recipient"],
+            await scenario.ReadShareAuditActorsAsync(share.ShareId));
+        Assert.DoesNotContain(
+            scenario.Neighbour.UserId.ToString("D"),
+            await scenario.DumpShareAuditAsync(share.ShareId),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string? ProblemCode(ApiResponse response)
     {
         using JsonDocument document = JsonDocument.Parse(response.Body);
@@ -999,6 +1082,76 @@ internal sealed class ShareVersionScenario : IAsyncDisposable
             challenged.Headers.SetCookie.ToArray(),
             value => value!.StartsWith("Vistara.ShareSession=", StringComparison.Ordinal))!;
         return cookie["Vistara.ShareSession=".Length..].Split(';')[0];
+    }
+
+    internal async ValueTask<int> CountShareAuditAsync(
+        Guid tenantId,
+        string action,
+        Guid shareId)
+    {
+        await using SqliteCommand command = _anchor.CreateCommand();
+        command.CommandText =
+            "SELECT COUNT(*) FROM audit_events " +
+            "WHERE tenant_id = $tenant AND action = $action " +
+            "AND resource_identifier = $resource;";
+        command.Parameters.AddWithValue("$tenant", tenantId);
+        command.Parameters.AddWithValue("$action", action);
+        command.Parameters.AddWithValue("$resource", shareId.ToString("D"));
+        return (int)(long)(await command.ExecuteScalarAsync())!;
+    }
+
+    /// <summary>
+    /// Counts the share records in a tenant's audit trail. A tenant still
+    /// audits its own authentication, so only share resources answer the
+    /// cross-tenant question.
+    /// </summary>
+    internal async ValueTask<int> CountTenantShareAuditAsync(Guid tenantId)
+    {
+        await using SqliteCommand command = _anchor.CreateCommand();
+        command.CommandText =
+            "SELECT COUNT(*) FROM audit_events " +
+            "WHERE tenant_id = $tenant AND resource_type = 'Share';";
+        command.Parameters.AddWithValue("$tenant", tenantId);
+        return (int)(long)(await command.ExecuteScalarAsync())!;
+    }
+
+    internal async ValueTask<string[]> ReadShareAuditActorsAsync(Guid shareId)
+    {
+        await using SqliteCommand command = _anchor.CreateCommand();
+        command.CommandText =
+            "SELECT DISTINCT actor_identifier FROM audit_events " +
+            "WHERE resource_type = 'Share' AND resource_identifier = $resource " +
+            "AND action IN ('ShareViewed', 'ShareViewRejected') " +
+            "ORDER BY actor_identifier;";
+        command.Parameters.AddWithValue("$resource", shareId.ToString("D"));
+        List<string> actors = [];
+        await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            actors.Add(reader.GetString(0));
+        }
+
+        return [.. actors];
+    }
+
+    internal async ValueTask<string> DumpShareAuditAsync(Guid shareId)
+    {
+        await using SqliteCommand command = _anchor.CreateCommand();
+        command.CommandText =
+            "SELECT tenant_id, actor_kind, actor_identifier, action, after_json " +
+            "FROM audit_events WHERE resource_identifier = $resource;";
+        command.Parameters.AddWithValue("$resource", shareId.ToString("D"));
+        List<string> rows = [];
+        await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            rows.Add(string.Join(
+                " | ",
+                Enumerable.Range(0, reader.FieldCount)
+                    .Select(index => reader.GetValue(index).ToString())));
+        }
+
+        return string.Join("\n", rows);
     }
 
     internal async ValueTask<string> ReadRenditionIdentifierAsync(

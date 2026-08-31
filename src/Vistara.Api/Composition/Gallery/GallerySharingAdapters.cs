@@ -192,14 +192,18 @@ internal sealed class GalleryShareAssetCatalog(
 }
 
 internal sealed class GalleryShareAuditSink(
-    VistaraDbContext context,
-    IMutableTenantScope tenantScope,
-    IUuid7Generator ids,
+    IServiceScopeFactory scopeFactory,
     IHttpContextAccessor httpContextAccessor) : IShareAuditSink
 {
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
 
+    /// <summary>
+    /// Writes the audit record in its own scope established from the audited
+    /// share's tenant. A share is read by whoever holds its link, including a
+    /// visitor signed in to a different tenant, so the record must never depend
+    /// on the caller's ambient tenant context.
+    /// </summary>
     public async ValueTask WriteAsync(
         ShareAuditEvent auditEvent,
         CancellationToken cancellationToken)
@@ -210,10 +214,17 @@ internal sealed class GalleryShareAuditSink(
             return;
         }
 
-        tenantScope.Establish(tenantId);
+        await using AsyncServiceScope scope = scopeFactory.CreateAsyncScope();
+        scope.ServiceProvider
+            .GetRequiredService<IMutableTenantScope>()
+            .Establish(tenantId);
+        VistaraDbContext context =
+            scope.ServiceProvider.GetRequiredService<VistaraDbContext>();
         context.AuditEvents.Add(new AuditEventRow
         {
-            Id = ids.NewId(),
+            Id = scope.ServiceProvider
+                .GetRequiredService<IUuid7Generator>()
+                .NewId(),
             TenantId = tenantId,
             ActorKind = ActorKind(auditEvent, httpContextAccessor.HttpContext),
             ActorIdentifier =
