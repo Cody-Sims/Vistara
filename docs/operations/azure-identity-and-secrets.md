@@ -24,48 +24,124 @@ no primary source was confirmed.
 
 ## 1. Ordering
 
-A system-assigned identity does not exist until the container app does, so the
-sequence across both documents is:
+Vistara binds blob access to a **user-assigned** managed identity, and a
+user-assigned identity is a resource of its own: it exists, and can hold role
+assignments, before any container app does. That removes the create-then-grant
+round trip a system-assigned identity forces, and it matches the hosted plan in
+[hosted-identity-and-azure-bootstrap.md](../future-plans/hosted-identity-and-azure-bootstrap.md),
+where the Bicep modules give the API and the worker separate identities with
+least-privilege role assignments.
+
+The sequence across both documents is:
 
 1. Provision the resource group, storage, PostgreSQL, and the Container Apps
    environment — [azure-free-credits.md §5](azure-free-credits.md#5-provisioning-with-the-azure-cli).
-2. Create the Key Vault and write the secrets — [§4](#4-key-vault-and-secret-hygiene)
-   below. This does **not** need the apps to exist.
-3. If your GHCR packages are private, prepare registry credentials —
+2. Create the two user-assigned identities and grant their blob roles —
+   [§2](#2-managed-identity-and-blob-rbac). This does **not** need the apps to
+   exist.
+3. Create the Key Vault, write the secrets, and grant the same identities
+   **Key Vault Secrets User** — [§4](#4-key-vault-and-secret-hygiene).
+4. If your GHCR packages are private, prepare registry credentials —
    [§5](#5-private-ghcr-registry-credentials).
-4. Create the container apps — [azure-free-credits.md §8](azure-free-credits.md#8-migrations-deployment-and-validation).
-5. Grant the resulting identities their roles — [§2](#2-managed-identity-and-blob-rbac)
-   and [§4](#4-key-vault-and-secret-hygiene).
-6. Restart or update the apps so they pick up the new permissions.
+5. Create the container apps with the identities attached and their client IDs
+   in configuration — [azure-free-credits.md §8](azure-free-credits.md#8-migrations-deployment-and-validation).
+
+Because every role assignment is already in place when the apps start, there is
+no permission-propagation restart step.
 
 The shell variables (`$RG`, `$STORAGE`, `$CONTAINER`, `$KV`, `$APIAPP`,
-`$WORKERAPP`) are the ones defined in
+`$WORKERAPP`, `$APIMI`, `$WORKERMI`) are the ones defined in
 [azure-free-credits.md §4](azure-free-credits.md#4-naming-and-shell-variables).
 
 ---
 
 ## 2. Managed identity and blob RBAC
 
-**[Verified from `src/Vistara.Api/Composition/Media/MediaComposition.cs`]**
-`DefaultMediaRuntimeDependencies.CreateAzureCredential()` returns
-`new DefaultAzureCredential()`, so a system-assigned managed identity is picked
-up with no secret at all when
-`Media__Storage__Azure__CredentialMode=DefaultCredential`.
+**[Verified from `src/Vistara.Api/Composition/Media/MediaComposition.cs` and
+`src/Vistara.Worker/Composition/Media/MediaComposition.cs`]** the supported
+production path is a **user-assigned** managed identity named by its client ID:
+
+```text
+Media__Storage__Azure__CredentialMode=ManagedIdentity
+Media__Storage__Azure__ManagedIdentityClientId=<user-assigned-client-id>
+```
+
+`DefaultMediaRuntimeDependencies.CreateAzureCredential(MediaAzureOptions)` then
+builds
+`new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(...))`
+and caches it for the process. Nothing chains to a developer credential such as
+the Azure CLI, so a host that cannot reach its identity endpoint fails instead
+of borrowing whatever identity happens to be signed in.
+
+**[Verified from `MediaOptionsValidator.ValidateAzure`]** the validator refuses
+to start the app when:
+
+- `ManagedIdentity` is selected without `ManagedIdentityClientId`, or the value
+  is not a non-empty hyphenated GUID (`8ec1a4d5-42d1-4d84-9d2a-9a9a2f3f9a11`
+  form; braces, the 32-character form, and padding are rejected);
+- a client ID is supplied for any other credential mode;
+- `ManagedIdentity` is combined with `ConnectionString` or
+  `AllowSharedKeySas`;
+- an identity credential is pointed at anything but a first-party Azure Blob
+  endpoint for the configured account, such as
+  `https://$STORAGE.blob.core.windows.net`.
+
+**`DefaultCredential` is not a supported deployment mode.** It stays for local
+development, where `ASPNETCORE_ENVIRONMENT`/`DOTNET_ENVIRONMENT` is
+`Development` and `DefaultAzureCredential` picks up your `az login` session.
+Every other environment — including an unnamed, empty, or custom one such as
+`Test`, `QA`, or `Preview` — is rejected unless the deployment reviews and sets
+`Media__Storage__Azure__AllowDefaultCredentialOutsideDevelopment=true`, which
+should be reserved for a deliberate exception rather than a normal rollout.
 
 **[Verified]** "The Azure platform manages the identity, so you don't need to
 provision or rotate any secrets."
 — <https://learn.microsoft.com/en-us/azure/app-service/overview-managed-identity>
 
-### 2.1 Assign the identities
+**[Verified]** Microsoft recommends this identity type: "User-assigned managed
+identities, which are provisioned independently from compute and can be
+assigned to multiple compute resources, are the recommended managed identity
+type for Microsoft services." You "may also create a managed identity as a
+standalone Azure resource", and its service principal "is managed separately
+from the resources that use it" — where a system-assigned service principal "is
+tied to the lifecycle of that Azure resource".
+— <https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/overview>
+
+### 2.1 Create one identity per role
+
+**[Inferred]** The API and the worker get separate identities so their role
+assignments, and any later revocation, stay independent.
 
 ```bash
-for APP in "$APIAPP" "$WORKERAPP"; do
-  az containerapp identity assign \
-    --name "$APP" --resource-group "$RG" --system-assigned
+for MI in "$APIMI" "$WORKERMI"; do
+  az identity create --name "$MI" --resource-group "$RG" --location "$LOC"
 done
+
+export APIMI_ID="$(az identity show --name "$APIMI" \
+  --resource-group "$RG" --query id -o tsv)"
+export APIMI_PRINCIPAL="$(az identity show --name "$APIMI" \
+  --resource-group "$RG" --query principalId -o tsv)"
+export APIMI_CLIENT="$(az identity show --name "$APIMI" \
+  --resource-group "$RG" --query clientId -o tsv)"
+
+export WORKERMI_ID="$(az identity show --name "$WORKERMI" \
+  --resource-group "$RG" --query id -o tsv)"
+export WORKERMI_PRINCIPAL="$(az identity show --name "$WORKERMI" \
+  --resource-group "$RG" --query principalId -o tsv)"
+export WORKERMI_CLIENT="$(az identity show --name "$WORKERMI" \
+  --resource-group "$RG" --query clientId -o tsv)"
 ```
 
-— <https://learn.microsoft.com/en-us/cli/azure/containerapp/identity>
+— <https://learn.microsoft.com/en-us/cli/azure/identity>
+
+**[Inferred]** `clientId` is the value Vistara wants
+(`Media__Storage__Azure__ManagedIdentityClientId`); `principalId` is the object
+ID that role assignments use; `id` is the resource ID that
+`az containerapp create --user-assigned` and `identityref:` need. They are
+three different values and are not interchangeable. The client ID is an
+identifier rather than a secret, but Vistara still redacts it from its own
+startup diagnostics, so read it back from `az identity show` rather than from
+application logs.
 
 ### 2.2 Grant two roles, not one
 
@@ -73,10 +149,7 @@ done
 STORAGE_ID="$(az storage account show \
   --name "$STORAGE" --resource-group "$RG" --query id -o tsv)"
 
-for APP in "$APIAPP" "$WORKERAPP"; do
-  PRINCIPAL="$(az containerapp identity show \
-    --name "$APP" --resource-group "$RG" --query principalId -o tsv)"
-
+for PRINCIPAL in "$APIMI_PRINCIPAL" "$WORKERMI_PRINCIPAL"; do
   # Data plane, scoped to the single container (least privilege).
   az role assignment create \
     --assignee-object-id "$PRINCIPAL" \
@@ -143,8 +216,10 @@ Media__Storage__Azure__AllowSharedKeySas=true
 ```
 
 The validator rejects the combination unless **both** the connection string and
-the explicit `AllowSharedKeySas` opt-in are present, and rejects mixing either
-of them with `DefaultCredential`.
+the explicit `AllowSharedKeySas` opt-in are present, rejects mixing either of
+them with an identity credential mode, and rejects a
+`ManagedIdentityClientId` here — a shared-key deployment must not also claim an
+identity.
 
 **[Inferred]** Treat this as a downgrade of last resort:
 
@@ -240,9 +315,7 @@ az keyvault secret set --vault-name "$KV" --name <secret-name> --file <path>
 ### 4.3 Grant the apps read access and reference the secrets
 
 ```bash
-for APP in "$APIAPP" "$WORKERAPP"; do
-  PRINCIPAL="$(az containerapp identity show \
-    --name "$APP" --resource-group "$RG" --query principalId -o tsv)"
+for PRINCIPAL in "$APIMI_PRINCIPAL" "$WORKERMI_PRINCIPAL"; do
   az role assignment create \
     --assignee-object-id "$PRINCIPAL" \
     --assignee-principal-type ServicePrincipal \
@@ -251,7 +324,7 @@ done
 
 az containerapp secret set \
   --name "$APIAPP" --resource-group "$RG" \
-  --secrets "api-pepper=keyvaultref:https://$KV.vault.azure.net/secrets/vistara-api-pepper,identityref:system"
+  --secrets "api-pepper=keyvaultref:https://$KV.vault.azure.net/secrets/vistara-api-pepper,identityref:$APIMI_ID"
 ```
 
 **[Verified]** **Key Vault Secrets User** grants exactly "Read secret contents
@@ -261,11 +334,13 @@ Apps reference syntax is
 — <https://learn.microsoft.com/en-us/azure/key-vault/general/rbac-guide>,
 <https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets>
 
-**[Inferred]** `identityref:system` for a system-assigned identity — the
-documented worked example uses a user-assigned identity resource ID. If it is
-rejected, create a user-assigned identity, grant **Key Vault Secrets User** to
-it, attach it with `az containerapp identity assign --user-assigned`, and pass
-its resource ID.
+**[Inferred]** `identityref:` takes the **resource ID** of the user-assigned
+identity (`$APIMI_ID`), which is what the documented worked example uses, and
+that identity must already hold **Key Vault Secrets User** and be attached to
+the app — [azure-free-credits.md §8](azure-free-credits.md#8-migrations-deployment-and-validation)
+attaches it with `az containerapp create --user-assigned`. `identityref:system`
+is only meaningful for a system-assigned identity, which this design does not
+use.
 
 ### 4.4 Hygiene rules for this repository
 
@@ -343,7 +418,7 @@ Then reference it from the container app by **secret name**:
 ```bash
 az containerapp secret set \
   --name "$APIAPP" --resource-group "$RG" \
-  --secrets "ghcr-token=keyvaultref:https://$KV.vault.azure.net/secrets/vistara-ghcr-token,identityref:system"
+  --secrets "ghcr-token=keyvaultref:https://$KV.vault.azure.net/secrets/vistara-ghcr-token,identityref:$APIMI_ID"
 
 az containerapp registry set \
   --name "$APIAPP" --resource-group "$RG" \
@@ -364,8 +439,9 @@ managed identity **instead of** username/password, but the documented parameter
 describes Azure Container Registry and `acrpull`; it is not a GHCR
 substitute.
 
-**[Inferred]** Repeat both commands for `$WORKERAPP`, and repeat them for the
-migration job's registry configuration if that image is also private.
+**[Inferred]** Repeat both commands for `$WORKERAPP` with
+`identityref:$WORKERMI_ID`, and repeat them for the migration job's registry
+configuration if that image is also private.
 
 ---
 
@@ -378,8 +454,8 @@ resource group as the storage account, so a group delete removes them — but
 re-deriving and deleting them explicitly is safe, idempotent, and correct even
 if you scoped anything to the subscription.
 
-Run this **before** `az group delete`, while the apps still exist to resolve
-their principal IDs:
+Run this **before** `az group delete`, while the identities still exist to
+resolve their principal IDs:
 
 ```bash
 STORAGE_ID="$(az storage account show \
@@ -387,11 +463,11 @@ STORAGE_ID="$(az storage account show \
 KV_ID="$(az keyvault show \
   --name "$KV" --resource-group "$RG" --query id -o tsv 2>/dev/null || true)"
 
-for APP in "$APIAPP" "$WORKERAPP"; do
-  PRINCIPAL="$(az containerapp identity show \
-    --name "$APP" --resource-group "$RG" --query principalId -o tsv 2>/dev/null || true)"
+for MI in "$APIMI" "$WORKERMI"; do
+  PRINCIPAL="$(az identity show \
+    --name "$MI" --resource-group "$RG" --query principalId -o tsv 2>/dev/null || true)"
   if [ -z "$PRINCIPAL" ] || [ "$PRINCIPAL" = "null" ]; then
-    echo "skip: no system-assigned identity for $APP"
+    echo "skip: no user-assigned identity named $MI"
     continue
   fi
 
@@ -410,8 +486,8 @@ for APP in "$APIAPP" "$WORKERAPP"; do
 done
 ```
 
-**[Inferred]** The guards matter: `az containerapp identity show` returns an
-empty or `null` `principalId` when no identity was ever assigned, and
+**[Inferred]** The guards matter: `az identity show` returns nothing when the
+identity was never created or is already gone, and
 **[Verified]** `az role assignment delete` is documented to "Delete all role
 assignments" matching whatever filters it is given — an unguarded empty
 assignee would widen the delete instead of narrowing it. `--assignee-object-id`

@@ -331,6 +331,8 @@ export KV="kv-vistara-$SUFFIX"
 export ACAENV="cae-vistara-$SUFFIX"
 export APIAPP="ca-vistara-api"
 export WORKERAPP="ca-vistara-worker"
+export APIMI="id-vistara-api-$SUFFIX"      # user-assigned identity, API
+export WORKERMI="id-vistara-worker-$SUFFIX"  # user-assigned identity, worker
 export MIGJOB="caj-vistara-migrate"
 export GHCR_NS="<your-github-namespace>"   # ghcr.io/<ns>/vistara-api
 export IMAGE_TAG="<release-tag>"
@@ -651,7 +653,8 @@ the first day.
 These steps live in the companion guide:
 
 - [Managed identity and blob RBAC](azure-identity-and-secrets.md#2-managed-identity-and-blob-rbac)
-  — including the **two** role assignments Vistara needs, one of which is only
+  — create one **user-assigned** identity per role, capture each `clientId`,
+  and make the **two** role assignments Vistara needs, one of which is only
   discovered at runtime if you miss it.
 - [Key Vault and secret hygiene](azure-identity-and-secrets.md#4-key-vault-and-secret-hygiene)
   — create the vault, grant yourself **Key Vault Secrets Officer** so
@@ -661,8 +664,12 @@ These steps live in the companion guide:
   — public packages need no credentials at all; private ones should be
   referenced by secret name, never pasted on a command line.
 
-Create the Key Vault and its secrets now; do the role assignments after
-[§8](#8-migrations-deployment-and-validation) creates the apps.
+Create the two user-assigned identities, the Key Vault, and its secrets now,
+and grant every role while you are there. A user-assigned identity is a
+standalone resource, so it and its role assignments exist before
+[§8](#8-migrations-deployment-and-validation) creates the apps — which is why
+that section attaches the identities with `--user-assigned` and passes their
+client IDs straight into configuration.
 
 ---
 
@@ -684,9 +691,11 @@ use exactly these names.
 | `Media__Storage__Azure__AccountName` | `$STORAGE` | `MediaComposition.cs` |
 | `Media__Storage__Azure__ContainerName` | `$CONTAINER` | `MediaComposition.cs` |
 | `Media__Storage__Azure__ServiceUri` | `https://$STORAGE.blob.core.windows.net` | `AzureBlobStoreOptions.cs` trusted-suffix check |
-| `Media__Storage__Azure__CredentialMode` | `DefaultCredential` (managed identity) or `SharedKey` (fallback) | `MediaComposition.cs` (`MediaAzureCredentialMode`) |
+| `Media__Storage__Azure__CredentialMode` | `ManagedIdentity` (supported deployment path) or `SharedKey` (fallback) | `MediaComposition.cs` (`MediaAzureCredentialMode`) |
+| `Media__Storage__Azure__ManagedIdentityClientId` | `clientId` of the app's user-assigned identity; **required** with `ManagedIdentity`, rejected otherwise | `MediaOptionsValidator.ValidateAzure` |
 | `Media__Storage__Azure__ConnectionString` | **only** with `SharedKey` | `MediaOptionsValidator.ValidateAzure` |
 | `Media__Storage__Azure__AllowSharedKeySas` | `true` **only** with `SharedKey` | `MediaOptionsValidator.ValidateAzure` |
+| `Media__Storage__Azure__AllowDefaultCredentialOutsideDevelopment` | leave unset; reviewed exception that keeps `DefaultCredential` usable outside a `Development` environment | `MediaOptionsValidator.ValidateAzure` |
 | `Media__Storage__Azure__MaximumGrantLifetime` | optional; must be > 0 and ≤ 7 days | `AzureBlobStoreOptions.Validate` |
 | `Media__Imaging__Provider` | `NetVips` (the only accepted value) | `MediaOptionsValidator` |
 | `Security__Hosts__AllowedHosts__0` | your container app FQDN | `SecurityComposition.cs` |
@@ -739,6 +748,8 @@ AZURE_POSTGRES_SERVER=<postgres-flexible-server-name>
 AZURE_POSTGRES_DATABASE=vistara
 AZURE_KEY_VAULT=<key-vault-name>
 AZURE_CONTAINERAPPS_ENV=<container-apps-environment-name>
+AZURE_API_IDENTITY=<user-assigned-identity-name-for-the-api>
+AZURE_WORKER_IDENTITY=<user-assigned-identity-name-for-the-worker>
 AZURE_TENANT_ID=<entra-tenant-id>
 
 # ---------------------------------------------------------------------------
@@ -754,7 +765,8 @@ Media__Storage__Provider=Azure
 Media__Storage__Azure__AccountName=<3-24-lowercase-alphanumeric>
 Media__Storage__Azure__ContainerName=<3-63-lowercase-with-single-hyphens>
 Media__Storage__Azure__ServiceUri=https://<3-24-lowercase-alphanumeric>.blob.core.windows.net
-Media__Storage__Azure__CredentialMode=DefaultCredential
+Media__Storage__Azure__CredentialMode=ManagedIdentity
+Media__Storage__Azure__ManagedIdentityClientId=<user-assigned-identity-client-id>
 Media__Imaging__Provider=NetVips
 
 Security__Hosts__AllowedHosts__0=<container-app-fqdn>
@@ -828,7 +840,7 @@ az containerapp create \
   --target-port 8080 --ingress external --transport auto \
   --cpu 0.5 --memory 1.0Gi \
   --min-replicas 0 --max-replicas 1 \
-  --system-assigned \
+  --user-assigned "$APIMI_ID" \
   --secrets "api-db-connection=<secret>" "api-pepper=<secret>" \
   --env-vars "Persistence__Provider=PostgreSql" \
              "ConnectionStrings__Vistara=secretref:api-db-connection" \
@@ -836,16 +848,25 @@ az containerapp create \
              "Media__Storage__Azure__AccountName=$STORAGE" \
              "Media__Storage__Azure__ContainerName=$CONTAINER" \
              "Media__Storage__Azure__ServiceUri=https://$STORAGE.blob.core.windows.net" \
-             "Media__Storage__Azure__CredentialMode=DefaultCredential" \
+             "Media__Storage__Azure__CredentialMode=ManagedIdentity" \
+             "Media__Storage__Azure__ManagedIdentityClientId=$APIMI_CLIENT" \
              "Media__Imaging__Provider=NetVips" \
              "Security__Transport__RedirectHttpToHttps=false" \
              "Platform__Authentication__ApiKeys__CurrentPepperVersion=v1" \
              "Platform__Authentication__ApiKeys__Peppers__v1=secretref:api-pepper"
 ```
 
-**[Verified]** `--ingress` accepts only `external` or `internal`, and
-`--transport` accepts `auto`, `http`, `http2`, or `tcp`.
+**[Verified]** `--ingress` accepts only `external` or `internal`,
+`--transport` accepts `auto`, `http`, `http2`, or `tcp`, and `--user-assigned`
+takes "Space-separated user identities to be assigned" — the identity
+**resource IDs**, not their client IDs.
 — <https://learn.microsoft.com/en-us/cli/azure/containerapp>
+
+**[Verified from `MediaComposition.cs`]** the app needs both halves of the
+identity: `--user-assigned` attaches it to the container app, and
+`Media__Storage__Azure__ManagedIdentityClientId` tells Vistara which identity
+to request tokens for. With the identity attached but the client ID missing,
+startup fails validation rather than falling back to any other identity.
 
 **[Verified]** `--min-replicas 0` with the default HTTP scale rule means "You
 aren't billed usage charges if your container app scales to zero." The
@@ -878,7 +899,7 @@ az containerapp create \
   --image "ghcr.io/$GHCR_NS/vistara-worker:$IMAGE_TAG" \
   --cpu 0.5 --memory 1.0Gi \
   --min-replicas 1 --max-replicas 1 \
-  --system-assigned \
+  --user-assigned "$WORKERMI_ID" \
   --secrets "worker-db-connection=<secret>" \
   --env-vars "Persistence__Provider=PostgreSql" \
              "ConnectionStrings__Vistara=secretref:worker-db-connection" \
@@ -886,7 +907,8 @@ az containerapp create \
              "Media__Storage__Azure__AccountName=$STORAGE" \
              "Media__Storage__Azure__ContainerName=$CONTAINER" \
              "Media__Storage__Azure__ServiceUri=https://$STORAGE.blob.core.windows.net" \
-             "Media__Storage__Azure__CredentialMode=DefaultCredential" \
+             "Media__Storage__Azure__CredentialMode=ManagedIdentity" \
+             "Media__Storage__Azure__ManagedIdentityClientId=$WORKERMI_CLIENT" \
              "Media__Imaging__Provider=NetVips" \
              "Worker__InstanceId=azure-worker" \
              "Worker__Jobs__MaximumConcurrency=1" \
@@ -934,7 +956,11 @@ Startup failures are informative because the options validators run with
 |---|---|
 | "Exactly one media storage provider section must be configured" | Remove leftover `Media__Storage__S3__*` / `Local__RootPath` values |
 | "The Azure Blob service endpoint is invalid" | `ServiceUri` must be `https://<account>.blob.core.windows.net`, no path or query |
-| "Azure shared-key settings cannot be combined with default credentials" | Drop `ConnectionString` / `AllowSharedKeySas` when using `DefaultCredential` |
+| "Azure managed-identity mode requires an explicit user-assigned client ID" | Set `Media__Storage__Azure__ManagedIdentityClientId` to the identity's `clientId` |
+| "The Azure user-assigned managed identity client ID must be a non-empty hyphenated GUID" | Pass the `clientId` unquoted and unbraced, not the `principalId` or the resource ID |
+| "Azure default credentials are limited to local development" | Use `CredentialMode=ManagedIdentity` in every deployed environment; `DefaultCredential` needs `ASPNETCORE_ENVIRONMENT=Development` or the reviewed `AllowDefaultCredentialOutsideDevelopment=true` |
+| "Azure shared-key settings cannot be combined with managed-identity credentials" | Drop `ConnectionString` / `AllowSharedKeySas` when using `ManagedIdentity` |
+| "Azure identity credentials are limited to a first-party Azure Blob endpoint" | `ServiceUri` must be `https://$STORAGE.blob.core.windows.net` for the configured account |
 | "A valid API key pepper and current pepper version are required" | Set `Peppers__v1` and `CurrentPepperVersion` |
 | "At least one valid, explicitly configured JWT issuer is required" | Set all four `Jwt__Issuers__0__*` keys |
 | "Required secret configuration '<key>' is missing" | A `Security__RequiredSecretKeys__N` key has no value |
