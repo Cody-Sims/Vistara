@@ -154,13 +154,13 @@ function renderSettings(
     { initialEntries: ['/settings'] },
   );
 
-  render(
+  const view = render(
     <SessionProvider client={client}>
       <RouterProvider router={router} />
     </SessionProvider>,
   );
 
-  return client;
+  return Object.assign(client, { unmount: view.unmount });
 }
 
 describe('settings: account', () => {
@@ -346,6 +346,25 @@ describe('settings: device preferences', () => {
       'still apply on this device',
     );
     expect(document.documentElement.dataset.reducedMotion).toBe('true');
+  });
+
+  it('stops writing a queued change once the screen is left', async () => {
+    const user = userEvent.setup();
+    let settle: ((value: VersionedPreferences) => void) | undefined;
+    const client = renderSettings({
+      updatePreferences: () =>
+        new Promise<VersionedPreferences>((resolve) => {
+          settle = resolve;
+        }),
+    });
+
+    await user.click(await screen.findByRole('radio', { name: 'Compact' }));
+    await user.click(screen.getByLabelText('Reduce motion'));
+    client.unmount();
+    settle?.({ data: { ...preferences, version: 4 }, etag: '"v4"' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(client.updatePreferences).toHaveBeenCalledTimes(1);
   });
 
   it('clears the alert once the preferences are read again', async () => {
