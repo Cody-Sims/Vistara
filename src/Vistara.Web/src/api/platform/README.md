@@ -44,6 +44,18 @@ Every route below is implemented on the API branch
   default). A reloaded browser therefore reads the session once before its
   first unsafe request. The token is held in memory only and dropped on
   sign-out; nothing is persisted.
+- One provider holds it for the whole page: `src/api/credentials.ts`. This
+  client publishes every session read, login, and rotation to it, and
+  `src/api/credentialedFetch.ts` spends it on every unsafe same-origin request,
+  so the generated gallery client and the upload client send the same header
+  without being edited. Safe requests, another origin, and a session
+  authenticated by a key or a bearer token are never given one, and a token a
+  caller set is never replaced. The provider is cleared when the session ends:
+  sign-out, a refused request, or another account signing in.
+- `403 cookie_auth.antiforgery_required` is decided before a request reaches an
+  endpoint, so it changed nothing. It is the one refusal a mutation is sent
+  again for, once, and only after `GET /api/v1/me` answers a token that differs
+  from the one just refused; nothing else is ever replayed.
 - `GET /api/v1/me` and the `user` of a successful login publish
   `authenticationKind`: `cookie`, `apiKey` or `bearer`. Only `cookie` is an
   interactive session. `src/features/session/roles.ts` reads that field,

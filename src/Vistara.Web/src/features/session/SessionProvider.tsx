@@ -6,6 +6,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { sessionCredentials } from '../../api/credentials';
 import { VistaraApiError } from '../../api/generated/client';
 import { onSessionExpired } from '../../api/sessionExpiry';
 import type {
@@ -63,6 +64,22 @@ async function resolveSession(client: SessionClient): Promise<SessionState> {
   }
 }
 
+/**
+ * Publishes the credential the resolved session carries, so every client that
+ * mutates for this session sends the antiforgery header the API named, and no
+ * client holds one once the session is gone.
+ */
+function publishCredential(state: SessionState): void {
+  if (state.user) {
+    sessionCredentials.adopt(state.user);
+    return;
+  }
+
+  if (state.status === 'anonymous') {
+    sessionCredentials.clear();
+  }
+}
+
 export function SessionProvider({
   children,
   client,
@@ -97,6 +114,9 @@ export function SessionProvider({
       const hadAccount = cachedIdentity.current !== undefined;
       cachedIdentity.current = identity;
       if (hadAccount) {
+        // The antiforgery token belonged to the account that just left; it is
+        // dropped before the next one is published anything.
+        sessionCredentials.clear();
         await endAccount();
       }
     },
@@ -120,6 +140,7 @@ export function SessionProvider({
       }
 
       await adoptIdentity(next.user?.userId);
+      publishCredential(next);
       setState(next);
     },
     [adoptIdentity, client, mode],
@@ -137,6 +158,7 @@ export function SessionProvider({
       }
 
       await adoptIdentity(next.user?.userId);
+      publishCredential(next);
       setState(next);
     });
 
@@ -160,6 +182,7 @@ export function SessionProvider({
 
       request.current += 1;
       cachedIdentity.current = undefined;
+      sessionCredentials.clear();
       setState({ status: 'anonymous' });
       void endAccount();
     };
@@ -185,11 +208,12 @@ export function SessionProvider({
       const user: CurrentUser = {
         ...session.user,
         authenticationKind: session.user.authenticationKind ?? 'cookie',
-        csrfToken: session.user.csrfToken ?? session.csrfToken,
+        csrfToken: session.csrfToken ?? session.user.csrfToken,
       };
       setSignOutIncomplete(false);
       request.current += 1;
       await adoptIdentity(user.userId);
+      sessionCredentials.adopt(user);
       setState({ status: 'authenticated', user });
       return user;
     },
@@ -209,6 +233,9 @@ export function SessionProvider({
 
     setSignOutIncomplete(!confirmed);
     cachedIdentity.current = undefined;
+    // Whether or not the server confirmed it, nothing of this session is spent
+    // from this device again.
+    sessionCredentials.clear();
     setState({ status: 'anonymous' });
     await endAccount();
   }, [client, endAccount]);

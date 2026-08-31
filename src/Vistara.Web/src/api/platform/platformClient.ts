@@ -2,12 +2,13 @@ import {
   VistaraApiError,
   type ApiClientOptions,
 } from '../generated/client';
+import { credentialedFetch } from '../credentialedFetch';
+import { sessionCredentials, type SessionCredentials } from '../credentials';
 import type { ApiProblemDetails } from '../generated/models';
 import { readRetryAfterSeconds, VistaraThrottledError } from './throttling';
 import type { EntityTag } from '../generated/models';
 import type {
   ApiKeyCollection,
-  AuthenticationKind,
   Capabilities,
   CreateApiKeyRequest,
   CreatedApiKey,
@@ -43,11 +44,17 @@ export interface VersionedResult<T> {
   readonly etag?: EntityTag;
 }
 
-/** Header the platform uses until `GET /api/v1/me` names another one. */
-const defaultAntiforgeryHeader = 'X-Vistara-CSRF';
-
 /** Routes the API accepts without a session, and therefore without a token. */
 const anonymousRoutes = new Set(['/api/v1/auth/login', '/api/v1/setup']);
+
+export interface PlatformApiClientOptions extends ApiClientOptions {
+  /**
+   * The credential every client of this browser session spends. It defaults
+   * to the shared one so the gallery and upload clients see each session read,
+   * login, and rotation this client performs.
+   */
+  readonly credentials?: SessionCredentials;
+}
 
 /**
  * Typed boundary for the account, tenant, API key, capability, and job routes
@@ -56,19 +63,22 @@ const anonymousRoutes = new Set(['/api/v1/auth/login', '/api/v1/setup']);
 export class PlatformApiClient {
   readonly #baseUrl: string;
   readonly #fetch: typeof fetch;
+  readonly #credentials: SessionCredentials;
   readonly #unauthorized = new Set<() => void>();
-  #antiforgeryHeader = defaultAntiforgeryHeader;
-  #antiforgeryToken = '';
-  /** The credential the API last said it authenticated this client with. */
-  #authenticationKind: AuthenticationKind | undefined;
 
-  public constructor(options: ApiClientOptions = {}) {
+  public constructor(options: PlatformApiClientOptions = {}) {
     this.#baseUrl = options.baseUrl?.replace(/\/+$/, '') ?? '';
-    this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.#credentials = options.credentials ?? sessionCredentials;
+    // Every unsafe request this client sends is answered for by the same
+    // provider that answers for the gallery and upload clients.
+    this.#fetch = credentialedFetch(options.fetch, this.#credentials);
+    // This client owns the session routes, so it is how every other client
+    // reads the session again when it needs a token it does not hold.
+    this.#credentials.useRefresher(() => this.getSession());
   }
 
   public get antiforgeryHeaderName(): string {
-    return this.#antiforgeryHeader;
+    return this.#credentials.headerName;
   }
 
   /**
@@ -84,12 +94,7 @@ export class PlatformApiClient {
 
   public async getSession(): Promise<CurrentUser> {
     const user = await this.#request<CurrentUser>('GET', '/api/v1/me');
-    this.#adoptHeaderName(user.csrfHeaderName);
-    this.#authenticationKind = user.authenticationKind;
-    if (user.csrfToken) {
-      this.#antiforgeryToken = user.csrfToken;
-    }
-
+    this.#credentials.adopt(user);
     return user;
   }
 
@@ -100,9 +105,13 @@ export class PlatformApiClient {
       { body: request },
     );
 
-    this.#adoptHeaderName(session.user.csrfHeaderName);
-    this.#authenticationKind = session.user.authenticationKind ?? 'cookie';
-    this.#antiforgeryToken = session.csrfToken;
+    // Login answers the token beside the user rather than on it, and opens a
+    // cookie session by definition.
+    this.#credentials.adopt({
+      ...session.user,
+      authenticationKind: session.user.authenticationKind ?? 'cookie',
+      csrfToken: session.csrfToken ?? session.user.csrfToken,
+    });
     return session;
   }
 
@@ -110,8 +119,7 @@ export class PlatformApiClient {
     try {
       await this.#request<void>('POST', '/api/v1/auth/logout');
     } finally {
-      this.#antiforgeryToken = '';
-      this.#authenticationKind = undefined;
+      this.#credentials.clear();
     }
   }
 
@@ -269,34 +277,6 @@ export class PlatformApiClient {
     );
   }
 
-  #adoptHeaderName(name: string | undefined) {
-    if (name && /^[\w-]+$/.test(name)) {
-      this.#antiforgeryHeader = name;
-    }
-  }
-
-  /**
-   * A reloaded browser holds the session cookie but no antiforgery token, so
-   * the session is read once before the first unsafe request. A credential
-   * bound to one tenant is never asked: the API issues it no token, so the
-   * read would repeat before every unsafe request and answer nothing.
-   */
-  async #ensureAntiforgeryToken(): Promise<void> {
-    if (
-      this.#antiforgeryToken ||
-      (this.#authenticationKind !== undefined &&
-        this.#authenticationKind !== 'cookie')
-    ) {
-      return;
-    }
-
-    try {
-      await this.getSession();
-    } catch {
-      // An unreadable session leaves the request to fail on its own terms.
-    }
-  }
-
   async #versioned<T>(
     method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
     path: string,
@@ -329,21 +309,9 @@ export class PlatformApiClient {
     path: string,
     options: { body?: unknown; ifMatch?: EntityTag; signal?: AbortSignal },
   ): Promise<Response> {
-    if (method !== 'GET' && !anonymousRoutes.has(path)) {
-      await this.#ensureAntiforgeryToken();
-    }
-
+    // The antiforgery header is added by the wrapped fetch, which reads the
+    // session first when a reloaded browser holds the cookie but no token.
     const headers = new Headers({ Accept: 'application/json' });
-    // The token belongs to a cookie session and is spent on unsafe requests
-    // only; no other credential is ever accompanied by one.
-    if (
-      method !== 'GET' &&
-      this.#antiforgeryToken &&
-      this.#authenticationKind !== 'apiKey' &&
-      this.#authenticationKind !== 'bearer'
-    ) {
-      headers.set(this.#antiforgeryHeader, this.#antiforgeryToken);
-    }
     if (options.ifMatch) {
       headers.set('If-Match', options.ifMatch);
     }
@@ -361,8 +329,7 @@ export class PlatformApiClient {
     });
 
     if (response.status === 401 && !anonymousRoutes.has(path)) {
-      this.#antiforgeryToken = '';
-      this.#authenticationKind = undefined;
+      this.#credentials.clear();
       for (const listener of this.#unauthorized) {
         listener();
       }
