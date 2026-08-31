@@ -55,6 +55,9 @@ Every route below is implemented on the API branch
 - Entity tags are `"v{version}"` (`src/api/versionTag.ts`).
 - `412` means a stale `If-Match`: reload the record and reapply the edit.
   `409` means a state conflict that repeating the same edit will not fix.
+  Because `If-Match` is per version, edits to one record are queued rather than
+  sent side by side; `src/features/settings/preferenceSync.ts` is the pattern
+  for `me/preferences`.
 - `429` carries `Retry-After` in seconds and is surfaced as
   `VistaraThrottledError` so the wait can be shown rather than a bare failure.
 - Collections answer with `{ items }`, cursor collections with

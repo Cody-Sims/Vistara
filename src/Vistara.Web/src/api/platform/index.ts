@@ -1,5 +1,9 @@
 export * from './models';
-export { PlatformApiClient } from './platformClient';
+export {
+  PlatformApiClient,
+  type VersionedRequestOptions,
+  type VersionedResult,
+} from './platformClient';
 export {
   describeRetryAfter,
   readRetryAfterSeconds,

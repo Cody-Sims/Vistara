@@ -1,19 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type {
   ApiKeyCollection,
   PlatformApiClient,
   TenantCollection,
-  UpdateUserPreferencesRequest,
   UserPreferences,
 } from '../../api/platform';
-import { isStaleVersion, versionTag } from '../../api/versionTag';
 import { useRemoteResource } from '../../app/useRemoteResource';
-import {
-  setPreferences,
-  useAppPreferences,
-  type Density,
-} from '../../app/preferences';
+import { useAppPreferences, type Density } from '../../app/preferences';
+import { usePreferenceSync } from './preferenceSync';
 import {
   setThemePreference,
   useThemePreference,
@@ -174,71 +169,36 @@ function ReadingPreferences({ client }: { readonly client: SettingsClient }) {
     data: UserPreferences;
     etag?: string;
   }>(load);
-  // Which stored document has been applied to the device, tracked in a ref so
-  // publishing to the preference store never schedules a React update here.
-  const applied = useRef<UserPreferences>(undefined);
-  const [saving, setSaving] = useState(false);
-  const [failure, setFailure] = useState('');
-  const [confirmation, setConfirmation] = useState('');
+  const { sync, state: saveState } = usePreferenceSync(client);
 
   // The account's stored preferences win when they arrive or are reloaded, and
   // are applied to the document so every view honours them immediately. This
   // publishes to a store other components subscribe to, so it happens after
-  // the render rather than during it. A save does not re-run it, so a
-  // just-made choice is never reverted.
-  const stored = state.kind === 'ready' ? state.value.data : undefined;
+  // the render rather than during it. Anything chosen in the meantime stays on
+  // top of the stored document and is queued for the account.
+  const stored = state.kind === 'ready' ? state.value : undefined;
 
   useEffect(() => {
-    if (!stored || applied.current === stored) {
-      return;
+    if (stored) {
+      sync.adopt(stored);
     }
+  }, [stored, sync]);
 
-    applied.current = stored;
-    setPreferences({
-      density: stored.density,
-      reducedMotion: stored.reducedMotion,
-      screenReaderPagedMode: stored.screenReaderPagedMode,
-    });
-  }, [stored]);
-
-  async function save(patch: UpdateUserPreferencesRequest) {
-    setPreferences({
-      ...(patch.density ? { density: patch.density } : {}),
-      ...(patch.reducedMotion === undefined
-        ? {}
-        : { reducedMotion: patch.reducedMotion }),
-      ...(patch.screenReaderPagedMode === undefined
-        ? {}
-        : { screenReaderPagedMode: patch.screenReaderPagedMode }),
-    });
-
-    if (state.kind !== 'ready') {
-      return;
-    }
-
-    setSaving(true);
-    setFailure('');
-    setConfirmation('');
-    try {
-      await client.updatePreferences(patch, {
-        ifMatch: state.value.etag ?? versionTag(state.value.data.version),
-      });
-      setConfirmation('Preferences saved to your account.');
-    } catch (error) {
-      setFailure(
-        isStaleVersion(error)
-          ? 'Your preferences changed on another device. Reload them before saving again.'
-          : 'Preferences could not be saved to your account. They still apply on this device.',
-      );
-    } finally {
-      setSaving(false);
-    }
-  }
+  const failure =
+    saveState.failure === 'conflict'
+      ? 'Your preferences changed on another device. Reload them before saving again.'
+      : saveState.failure === 'unreachable'
+        ? 'Preferences could not be saved to your account. They still apply on this device.'
+        : '';
 
   return (
-    <section className={styles.card} aria-labelledby="settings-reading">
+    <section
+      className={styles.card}
+      aria-labelledby="settings-reading"
+      aria-busy={saveState.saving}
+    >
       <h2 id="settings-reading">Reading and motion</h2>
-      <fieldset className={styles.choices} disabled={saving}>
+      <fieldset className={styles.choices}>
         <legend className={styles.legend}>Grid density</legend>
         {densityChoices.map((choice) => (
           <label className={styles.choice} key={choice.value}>
@@ -249,7 +209,7 @@ function ReadingPreferences({ client }: { readonly client: SettingsClient }) {
               name="density"
               type="radio"
               value={choice.value}
-              onChange={() => void save({ density: choice.value })}
+              onChange={() => sync.save({ density: choice.value })}
             />
             <span>
               <strong>{choice.label}</strong>
@@ -270,9 +230,7 @@ function ReadingPreferences({ client }: { readonly client: SettingsClient }) {
           aria-label="Reduce motion"
           checked={preferences.reducedMotion}
           type="checkbox"
-          onChange={(event) =>
-            void save({ reducedMotion: event.target.checked })
-          }
+          onChange={(event) => sync.save({ reducedMotion: event.target.checked })}
         />
         <span>
           <strong>Reduce motion</strong>
@@ -289,7 +247,7 @@ function ReadingPreferences({ client }: { readonly client: SettingsClient }) {
           checked={preferences.screenReaderPagedMode}
           type="checkbox"
           onChange={(event) =>
-            void save({ screenReaderPagedMode: event.target.checked })
+            sync.save({ screenReaderPagedMode: event.target.checked })
           }
         />
         <span>
@@ -302,7 +260,7 @@ function ReadingPreferences({ client }: { readonly client: SettingsClient }) {
       </label>
 
       <p className={styles.saveStatus} role="status" aria-live="polite">
-        {confirmation}
+        {saveState.saved && !failure ? 'Preferences saved to your account.' : ''}
       </p>
 
       {failure ? (
@@ -311,11 +269,7 @@ function ReadingPreferences({ client }: { readonly client: SettingsClient }) {
           <button
             className={styles.secondaryButton}
             type="button"
-            onClick={() => {
-              setFailure('');
-              applied.current = undefined;
-              reload();
-            }}
+            onClick={reload}
           >
             Reload preferences
           </button>

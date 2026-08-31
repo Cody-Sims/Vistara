@@ -7,6 +7,7 @@ import type {
   ApiKeyCollection,
   CreatedApiKey,
   TenantCollection,
+  UpdateUserPreferencesRequest,
   UserPreferences,
 } from '../../api/platform';
 import { resetPreferences } from '../../app/preferences';
@@ -87,17 +88,54 @@ const preferences: UserPreferences = {
   version: 3,
 };
 
+type VersionedPreferences = { data: UserPreferences; etag?: string };
+
+/**
+ * Answers `PATCH` the way the API does: the accepted patch is part of the
+ * document that comes back, and the version moves on.
+ */
+function preferenceDocument(initial: UserPreferences = preferences) {
+  let document = initial;
+
+  return {
+    read: async (): Promise<VersionedPreferences> => ({
+      data: document,
+      etag: `"v${document.version}"`,
+    }),
+    write: async (
+      patch: UpdateUserPreferencesRequest,
+    ): Promise<VersionedPreferences> => {
+      document = {
+        ...document,
+        ...(patch.density ? { density: patch.density } : {}),
+        ...(patch.reducedMotion === undefined
+          ? {}
+          : { reducedMotion: patch.reducedMotion }),
+        ...(patch.screenReaderPagedMode === undefined
+          ? {}
+          : { screenReaderPagedMode: patch.screenReaderPagedMode }),
+        version: document.version + 1,
+      };
+      return { data: document, etag: `"v${document.version}"` };
+    },
+  };
+}
+
 function renderSettings(
   overrides: {
     listTenants?: () => Promise<TenantCollection>;
     listApiKeys?: () => Promise<ApiKeyCollection>;
     createApiKey?: () => Promise<CreatedApiKey>;
     revokeApiKey?: () => Promise<void>;
-    getPreferences?: () => Promise<{ data: UserPreferences; etag?: string }>;
-    updatePreferences?: () => Promise<{ data: UserPreferences; etag?: string }>;
+    getPreferences?: () => Promise<VersionedPreferences>;
+    updatePreferences?: (
+      patch: UpdateUserPreferencesRequest,
+      options: { ifMatch: string },
+    ) => Promise<VersionedPreferences>;
     role?: 'Member' | 'TenantAdmin';
   } = {},
 ) {
+  const account = preferenceDocument();
   const client = {
     getSession: vi.fn(async () =>
       currentUser({}, overrides.role ?? 'TenantAdmin'),
@@ -108,17 +146,8 @@ function renderSettings(
     listApiKeys: vi.fn(overrides.listApiKeys ?? (async () => keys)),
     createApiKey: vi.fn(overrides.createApiKey ?? (async () => created)),
     revokeApiKey: vi.fn(overrides.revokeApiKey ?? (async () => undefined)),
-    getPreferences: vi.fn(
-      overrides.getPreferences ??
-        (async () => ({ data: preferences, etag: '"v3"' })),
-    ),
-    updatePreferences: vi.fn(
-      overrides.updatePreferences ??
-        (async () => ({
-          data: { ...preferences, version: 4 },
-          etag: '"v4"',
-        })),
-    ),
+    getPreferences: vi.fn(overrides.getPreferences ?? account.read),
+    updatePreferences: vi.fn(overrides.updatePreferences ?? account.write),
   };
   const router = createMemoryRouter(
     [{ path: '*', element: <SettingsPage client={client} /> }],
@@ -228,6 +257,95 @@ describe('settings: device preferences', () => {
       'changed on another device',
     );
     expect(document.documentElement.dataset.density).toBe('compact');
+  });
+
+  it('saves both of two rapid changes without losing one to a conflict', async () => {
+    const user = userEvent.setup();
+    const account = preferenceDocument();
+    let refused = 0;
+    const client = renderSettings({
+      updatePreferences: async (patch, options) => {
+        const current = await account.read();
+        if (options.ifMatch !== current.etag) {
+          refused += 1;
+          throw apiError(412);
+        }
+
+        return account.write(patch);
+      },
+    });
+
+    await screen.findByRole('radio', { name: 'Compact' });
+    await user.click(screen.getByRole('radio', { name: 'Compact' }));
+    await user.click(screen.getByLabelText('Reduce motion'));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText('Preferences saved to your account.'),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(document.documentElement.dataset.density).toBe('compact');
+    expect(document.documentElement.dataset.reducedMotion).toBe('true');
+
+    const patches = client.updatePreferences.mock.calls.map(
+      (call) => call[0] as UpdateUserPreferencesRequest,
+    );
+    expect(patches).toContainEqual({ density: 'compact' });
+    expect(patches).toContainEqual({ reducedMotion: true });
+    expect(refused).toBe(0);
+    await expect(account.read()).resolves.toMatchObject({
+      data: { density: 'compact', reducedMotion: true, version: 5 },
+    });
+  });
+
+  it('reapplies a change the account refused with a stale tag', async () => {
+    const user = userEvent.setup();
+    let attempts = 0;
+    const client = renderSettings({
+      updatePreferences: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw apiError(412);
+        }
+
+        return {
+          data: { ...preferences, density: 'compact' as const, version: 10 },
+          etag: '"v10"',
+        };
+      },
+      getPreferences: async () => ({
+        data: { ...preferences, version: 9 },
+        etag: '"v9"',
+      }),
+    });
+
+    await user.click(await screen.findByRole('radio', { name: 'Compact' }));
+
+    expect(
+      await screen.findByText('Preferences saved to your account.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(document.documentElement.dataset.density).toBe('compact');
+    expect(client.updatePreferences.mock.calls[1]?.[1]).toEqual({
+      ifMatch: '"v9"',
+    });
+  });
+
+  it('keeps a change on the device when the account cannot be reached', async () => {
+    const user = userEvent.setup();
+    renderSettings({
+      updatePreferences: async () => {
+        throw new TypeError('Failed to fetch');
+      },
+    });
+
+    await user.click(await screen.findByLabelText('Reduce motion'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'still apply on this device',
+    );
+    expect(document.documentElement.dataset.reducedMotion).toBe('true');
   });
 
   it('applies the preferences stored for the account on arrival', async () => {
