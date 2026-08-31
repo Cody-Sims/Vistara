@@ -1,27 +1,58 @@
 #!/usr/bin/env bash
 # Runs one migration bundle against the configured database.
 #
-# Password deployments are unchanged: the connection string arrives in
-# ConnectionStrings__Vistara and is handed to the bundle as-is.
+# Password mode (no MIGRATION_MANAGED_IDENTITY_CLIENT_ID) is unchanged: the
+# operator connection string arrives in ConnectionStrings__Vistara and is handed
+# to the bundle as-is.
 #
-# Hosted Azure deployments set MIGRATION_MANAGED_IDENTITY_CLIENT_ID instead of a
-# password. The token is then read directly from the Container Apps identity
-# endpoint (IDENTITY_ENDPOINT/IDENTITY_HEADER) with no Azure CLI, and is handed
-# to the bundle through a private pgpass file that Npgsql reads. Migration
-# bundles only accept --connection, and process arguments are world-readable
-# through /proc, so the token is never spliced into the command line, an
-# environment variable, or any log line. Query values are URL-encoded, the
-# response is validated, and every failure exits non-zero without running a
-# migration.
+# Managed-identity mode never reads, parses, or forwards an operator connection
+# string. Npgsql accepts aliases and repeated keywords, so any guard that
+# inspects a supplied string can be walked past with `pwd=`, `psw=`, a duplicate
+# `SSL Mode`, or quoting; instead this script builds the whole connection string
+# from discrete, individually validated values and ignores everything else. The
+# Entra access token is read straight from the Container Apps identity endpoint
+# with no Azure CLI, and reaches Npgsql through a private pgpass file, never
+# through an argument list, an environment variable, or a log line.
+#
+# Frozen environment contract (Bicep/azd emit these; see HB-08 and HB-12):
+#
+#   MIGRATION_PROVIDER                      Sqlite | PostgreSql
+#   ConnectionStrings__Vistara              password mode only; ignored otherwise
+#   MIGRATION_MANAGED_IDENTITY_CLIENT_ID    UAMI client id GUID; enables Entra mode
+#   MIGRATION_POSTGRES_HOST                 required in Entra mode
+#   MIGRATION_POSTGRES_PORT                 optional, default 5432, 1-65535
+#   MIGRATION_POSTGRES_DATABASE             required in Entra mode
+#   MIGRATION_POSTGRES_USERNAME             required in Entra mode
+#   MIGRATION_POSTGRES_HOST_SUFFIXES        optional, default .postgres.database.azure.com
+#   MIGRATION_POSTGRES_HOST_ALLOWLIST       optional exact hosts; replaces the suffix policy
+#   MIGRATION_POSTGRES_ROOT_CERTIFICATE     optional CA bundle path for VerifyFull
+#   MIGRATION_ENTRA_TOKEN_SCOPE             optional, default ossrdbms-aad .default scope
+#   IDENTITY_ENDPOINT                       injected by Azure Container Apps
+#   IDENTITY_HEADER                         injected by Azure Container Apps
+#
+# SSL Mode=VerifyFull, GSS Encryption Mode=Disable, and the pgpass path are
+# fixed by this script and cannot be configured away.
 set -euo pipefail
 set +o history 2>/dev/null || true
 
 DEFAULT_TOKEN_SCOPE="https://ossrdbms-aad.database.windows.net/.default"
+DEFAULT_POSTGRES_PORT="5432"
+DEFAULT_POSTGRES_HOST_SUFFIXES=".postgres.database.azure.com"
 IDENTITY_API_VERSION="2019-08-01"
 IDENTITY_TIMEOUT_SECONDS="${MIGRATION_IDENTITY_TIMEOUT_SECONDS:-10}"
 # A bundle run has to outlive the token it started with, so refuse anything that
 # expires inside the window a migration can plausibly need.
 MINIMUM_TOKEN_LIFETIME_SECONDS=300
+# PostgreSQL truncates identifiers at 63 bytes and DNS names at 253.
+MAXIMUM_IDENTIFIER_LENGTH=63
+MAXIMUM_HOST_LENGTH=253
+MAXIMUM_PATH_LENGTH=255
+
+HOST_PATTERN='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$'
+DATABASE_PATTERN='^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
+USERNAME_PATTERN='^[A-Za-z0-9_][A-Za-z0-9_.@-]*$'
+PATH_PATTERN='^/[A-Za-z0-9_./-]*$'
+PORT_PATTERN='^[1-9][0-9]{0,4}$'
 
 token_directory=""
 
@@ -35,12 +66,6 @@ cleanup() {
     rm -rf "$token_directory"
   fi
 }
-
-connection_string="${ConnectionStrings__Vistara:-${Persistence__ConnectionString:-}}"
-if [ -z "$connection_string" ]; then
-  echo "ConnectionStrings__Vistara is required." >&2
-  exit 64
-fi
 
 bundle_directory="${MIGRATION_BUNDLE_DIRECTORY:-/app}"
 case "${MIGRATION_PROVIDER:-}" in
@@ -60,10 +85,42 @@ esac
 
 managed_identity_client_id="${MIGRATION_MANAGED_IDENTITY_CLIENT_ID:-}"
 if [ -z "$managed_identity_client_id" ]; then
+  connection_string="${ConnectionStrings__Vistara:-${Persistence__ConnectionString:-}}"
+  if [ -z "$connection_string" ]; then
+    echo "ConnectionStrings__Vistara is required." >&2
+    exit 64
+  fi
+
   exec "$bundle" --connection "$connection_string"
 fi
 
 # --- Microsoft Entra ID token mode -------------------------------------------
+
+matches() {
+  printf '%s' "$1" | grep -Eq "$2"
+}
+
+require_value() {
+  # name, value, pattern, maximum length. Control characters are rejected before
+  # the pattern runs so a newline can never split the value into a matching line.
+  local name="$1"
+  local value="$2"
+  local pattern="$3"
+  local limit="$4"
+  [ -n "$value" ] ||
+    fail "$name is required for managed-identity migrations."
+  case "$value" in
+    *[![:print:]]*) fail "$name must not contain control characters." ;;
+  esac
+  [ "${#value}" -le "$limit" ] ||
+    fail "$name must be at most $limit characters."
+  matches "$value" "$pattern" ||
+    fail "$name contains characters that are not allowed."
+}
+
+lowercase() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
 
 url_encode() {
   local value="$1"
@@ -95,8 +152,33 @@ require_guid() {
   esac
 }
 
+# Nothing the operator supplies as a connection string, and nothing libpq or
+# Npgsql would read from the environment, may reach the bundle: the constructed
+# string is the only source of connection settings. HOME moves to the private
+# token directory so a planted ~/.pgpass or ~/.postgresql/root.crt cannot alter
+# authentication or certificate trust either.
+scrub_environment() {
+  local name
+  for name in $(compgen -e 2>/dev/null || true); do
+    case "$name" in
+      PG*|ConnectionStrings__*|Persistence__*) unset "$name" ;;
+    esac
+  done
+  unset PGPASSWORD PGPASSFILE PGUSER PGHOST PGHOSTADDR PGPORT PGDATABASE \
+    PGOPTIONS PGAPPNAME PGCLIENTENCODING PGTZ PGSSLMODE PGSSLNEGOTIATION \
+    PGSSLCERT PGSSLKEY PGSSLROOTCERT PGSSLCRL PGGSSENCMODE PGREQUIREAUTH \
+    PGTARGETSESSIONATTRS PGSERVICE PGSERVICEFILE PGSYSCONFDIR \
+    ConnectionStrings__Vistara Persistence__ConnectionString \
+    IDENTITY_ENDPOINT IDENTITY_HEADER 2>/dev/null || true
+  export HOME="$token_directory"
+}
+
 if [ "$provider" != "PostgreSql" ]; then
   fail "MIGRATION_MANAGED_IDENTITY_CLIENT_ID requires MIGRATION_PROVIDER=PostgreSql."
+fi
+
+if [ -n "${ConnectionStrings__Vistara:-}${Persistence__ConnectionString:-}" ]; then
+  echo "Ignoring the supplied connection string: managed-identity migrations build their own." >&2
 fi
 
 require_guid "$managed_identity_client_id" \
@@ -108,6 +190,65 @@ case "$token_scope" in
   *) fail "MIGRATION_ENTRA_TOKEN_SCOPE must be an HTTPS scope ending in /.default." ;;
 esac
 token_resource="${token_scope%/.default}"
+
+# --- Connection settings, taken only from discrete validated variables --------
+
+postgres_host="$(lowercase "${MIGRATION_POSTGRES_HOST:-}")"
+require_value MIGRATION_POSTGRES_HOST "$postgres_host" \
+  "$HOST_PATTERN" "$MAXIMUM_HOST_LENGTH"
+
+host_allowlist="${MIGRATION_POSTGRES_HOST_ALLOWLIST:-}"
+host_allowed="no"
+if [ -n "$host_allowlist" ]; then
+  for allowed_host in $host_allowlist; do
+    allowed_host="$(lowercase "$allowed_host")"
+    require_value MIGRATION_POSTGRES_HOST_ALLOWLIST "$allowed_host" \
+      "$HOST_PATTERN" "$MAXIMUM_HOST_LENGTH"
+    if [ "$allowed_host" = "$postgres_host" ]; then
+      host_allowed="yes"
+    fi
+  done
+  [ "$host_allowed" = "yes" ] ||
+    fail "MIGRATION_POSTGRES_HOST is not listed in MIGRATION_POSTGRES_HOST_ALLOWLIST."
+else
+  for allowed_suffix in ${MIGRATION_POSTGRES_HOST_SUFFIXES:-$DEFAULT_POSTGRES_HOST_SUFFIXES}; do
+    allowed_suffix="$(lowercase "$allowed_suffix")"
+    case "$allowed_suffix" in
+      .*) ;;
+      *) fail "MIGRATION_POSTGRES_HOST_SUFFIXES entries must start with a dot." ;;
+    esac
+    require_value MIGRATION_POSTGRES_HOST_SUFFIXES "${allowed_suffix#.}" \
+      "$HOST_PATTERN" "$MAXIMUM_HOST_LENGTH"
+    case "$postgres_host" in
+      *"$allowed_suffix") host_allowed="yes" ;;
+    esac
+  done
+  [ "$host_allowed" = "yes" ] ||
+    fail "MIGRATION_POSTGRES_HOST must be an Azure Database for PostgreSQL host; set MIGRATION_POSTGRES_HOST_SUFFIXES or MIGRATION_POSTGRES_HOST_ALLOWLIST to widen the policy."
+fi
+
+postgres_port="${MIGRATION_POSTGRES_PORT:-$DEFAULT_POSTGRES_PORT}"
+require_value MIGRATION_POSTGRES_PORT "$postgres_port" "$PORT_PATTERN" 5
+[ "$postgres_port" -le 65535 ] ||
+  fail "MIGRATION_POSTGRES_PORT must be between 1 and 65535."
+
+postgres_database="${MIGRATION_POSTGRES_DATABASE:-}"
+require_value MIGRATION_POSTGRES_DATABASE "$postgres_database" \
+  "$DATABASE_PATTERN" "$MAXIMUM_IDENTIFIER_LENGTH"
+
+postgres_username="${MIGRATION_POSTGRES_USERNAME:-}"
+require_value MIGRATION_POSTGRES_USERNAME "$postgres_username" \
+  "$USERNAME_PATTERN" "$MAXIMUM_IDENTIFIER_LENGTH"
+
+root_certificate="${MIGRATION_POSTGRES_ROOT_CERTIFICATE:-}"
+if [ -n "$root_certificate" ]; then
+  require_value MIGRATION_POSTGRES_ROOT_CERTIFICATE "$root_certificate" \
+    "$PATH_PATTERN" "$MAXIMUM_PATH_LENGTH"
+  [ -r "$root_certificate" ] ||
+    fail "MIGRATION_POSTGRES_ROOT_CERTIFICATE is not a readable file."
+fi
+
+# --- Managed-identity endpoint ------------------------------------------------
 
 identity_endpoint="${IDENTITY_ENDPOINT:-}"
 identity_header="${IDENTITY_HEADER:-}"
@@ -229,23 +370,7 @@ if [ "$((expires_on - now))" -lt "$MINIMUM_TOKEN_LIFETIME_SECONDS" ]; then
   fail "The managed-identity access token expires within ${MINIMUM_TOKEN_LIFETIME_SECONDS}s."
 fi
 
-# The token replaces the password, so a connection string that still carries one
-# would either leak it or silently win; both fail closed here.
-normalized_connection="$(tr -d '[:space:]' <<<"$connection_string" | tr '[:upper:]' '[:lower:]')"
-case "$normalized_connection" in
-  *password=*) fail "A managed-identity connection string must not contain Password." ;;
-esac
-case "$normalized_connection" in
-  *passfile=*) fail "A managed-identity connection string must not contain Passfile." ;;
-esac
-case "$normalized_connection" in
-  *sslmode=verifyfull*) ;;
-  *) fail "A managed-identity connection string must set SSL Mode=VerifyFull." ;;
-esac
-case "$normalized_connection" in
-  *gssencryptionmode=disable*) ;;
-  *) fail "A managed-identity connection string must set GSS Encryption Mode=Disable." ;;
-esac
+# --- Constructed connection string -------------------------------------------
 
 trap cleanup EXIT
 umask 077
@@ -257,10 +382,19 @@ chmod 600 "$token_file"
 printf '*:*:*:*:%s\n' "$access_token" >"$token_file"
 access_token=""
 
-case "$connection_string" in
-  *\;) connection_string="${connection_string}Passfile=$token_file" ;;
-  *) connection_string="$connection_string;Passfile=$token_file" ;;
-esac
+connection_string="Host=$postgres_host"
+connection_string="$connection_string;Port=$postgres_port"
+connection_string="$connection_string;Database=$postgres_database"
+connection_string="$connection_string;Username=$postgres_username"
+connection_string="$connection_string;SSL Mode=VerifyFull"
+connection_string="$connection_string;GSS Encryption Mode=Disable"
+connection_string="$connection_string;Include Error Detail=false"
+connection_string="$connection_string;Passfile=$token_file"
+if [ -n "$root_certificate" ]; then
+  connection_string="$connection_string;Root Certificate=$root_certificate"
+fi
+
+scrub_environment
 
 "$bundle" --connection "$connection_string" &
 bundle_pid=$!
