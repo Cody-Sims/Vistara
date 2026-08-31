@@ -24,8 +24,14 @@ public sealed class NetVipsImageProcessor : IImageProcessor
     private readonly NetVipsRuntimeState _runtime;
 
     public NetVipsImageProcessor()
+        : this(NetVipsRuntime.State)
     {
-        _runtime = NetVipsRuntime.State;
+    }
+
+    internal NetVipsImageProcessor(NetVipsRuntimeState runtime)
+    {
+        ArgumentNullException.ThrowIfNull(runtime);
+        _runtime = runtime;
     }
 
     public ImageProcessorCapabilities Capabilities => ProcessorCapabilities;
@@ -111,7 +117,7 @@ public sealed class NetVipsImageProcessor : IImageProcessor
                 linked.Token.ThrowIfCancellationRequested();
 
                 using var hashingDestination = new HashingWriteStream(destination);
-                WriteDeterministically(current, hashingDestination, recipe);
+                WriteDeterministically(current, hashingDestination, recipe, _runtime.Savers);
                 loaded.CompleteRead();
                 linked.Token.ThrowIfCancellationRequested();
 
@@ -455,7 +461,8 @@ public sealed class NetVipsImageProcessor : IImageProcessor
     private static void WriteDeterministically(
         VipsImage image,
         Stream destination,
-        CanonicalTransformRecipe recipe)
+        CanonicalTransformRecipe recipe,
+        NetVipsSaverSupport savers)
     {
         switch (recipe.OutputFormat)
         {
@@ -487,21 +494,28 @@ public sealed class NetVipsImageProcessor : IImageProcessor
                     keep: VipsEnums.ForeignKeep.None);
                 break;
             case ImageFormat.WebP:
+                // Arguments the installed libvips does not advertise are left
+                // unset rather than sent and rejected, and the set in use is
+                // declared by NetVipsSaverSupport.WebpArgumentsInUse. Only
+                // `exact` changes the encoded bytes when unset, which is why the
+                // pipeline fingerprint carries its state; `target_size`,
+                // `smart_deblock`, and `passes` are set to the values libvips
+                // already applies when those arguments are absent.
                 image.WebpsaveStream(
                     destination,
                     q: recipe.Quality,
                     lossless: false,
-                    exact: true,
+                    exact: savers.WebpExact ? true : null,
                     preset: VipsEnums.ForeignWebpPreset.Default,
                     smartSubsample: false,
                     nearLossless: false,
                     alphaQ: recipe.Quality,
                     minSize: false,
                     effort: 4,
-                    targetSize: 0,
+                    targetSize: savers.WebpTargetSize ? 0 : null,
                     mixed: false,
-                    smartDeblock: false,
-                    passes: 1,
+                    smartDeblock: savers.WebpSmartDeblock ? false : null,
+                    passes: savers.WebpPasses ? 1 : null,
                     keep: VipsEnums.ForeignKeep.None);
                 break;
             default:
