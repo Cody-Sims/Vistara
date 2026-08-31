@@ -189,10 +189,8 @@ public static class AssetEndpoint
             var response = new SearchFacetsResponse(
                 result.Groups.Select(group => new SearchFacetGroupResponse(
                     group.Name,
-                    group.Values.Select(value => new SearchFacetValueResponse(
-                        value.Value,
-                        value.Label,
-                        value.Count)).ToArray(),
+                    group.Values.Select(value => ToFacetValue(group.Name, value))
+                        .ToArray(),
                     group.Truncated)).ToArray());
             await WriteJsonAsync(
                 context,
@@ -210,6 +208,22 @@ public static class AssetEndpoint
                 cancellationToken);
         }
     }
+
+    /// <summary>
+    /// A facet value is the exact filter argument a client sends back, so the
+    /// status facet publishes the documented <c>AssetQueryStatus</c> token and
+    /// keeps the stored enum name out of the wire; the label carries the
+    /// readable form instead.
+    /// </summary>
+    private static SearchFacetValueResponse ToFacetValue(
+        string groupName,
+        AssetFacetValue value) =>
+        string.Equals(groupName, "status", StringComparison.Ordinal)
+            ? new SearchFacetValueResponse(
+                AssetContractVocabulary.PublishQueryStatus(value.Value),
+                AssetContractVocabulary.DisplayQueryStatus(value.Value),
+                value.Count)
+            : new SearchFacetValueResponse(value.Value, value.Label, value.Count);
 
     public static async Task GetAsync(
         HttpContext context,

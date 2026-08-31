@@ -49,6 +49,26 @@ public static class AssetContractVocabulary
     public static bool TryReadQueryStatus(string? token, out string storedValue) =>
         TryReadStored(token, QueryStatuses, out storedValue);
 
+    /// <summary>
+    /// Publishes a stored status as the documented <c>AssetQueryStatus</c>
+    /// token, which is the value a client feeds straight back into the
+    /// <c>statuses</c> filter.
+    /// </summary>
+    public static string PublishQueryStatus(string? storedValue) =>
+        Publish(storedValue, QueryStatuses);
+
+    /// <summary>
+    /// The human-readable label for a documented status token. The token is the
+    /// machine value; this is only ever shown to a person.
+    /// </summary>
+    public static string DisplayQueryStatus(string? token)
+    {
+        string documented = Publish(token, QueryStatuses);
+        return string.Concat(
+            char.ToUpperInvariant(documented[0]).ToString(),
+            documented[1..]);
+    }
+
     private static bool TryReadStored(
         string? token,
         IReadOnlyList<string> documented,
