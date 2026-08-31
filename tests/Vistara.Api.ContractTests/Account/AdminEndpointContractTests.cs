@@ -38,7 +38,7 @@ public sealed class AdminEndpointContractTests
             .SelectMany(source => source.Endpoints)
             .OfType<RouteEndpoint>()
             .ToArray();
-        Assert.Equal(4, endpoints.Length);
+        Assert.Equal(5, endpoints.Length);
         Assert.All(endpoints, endpoint => Assert.Equal(
             AdminEndpointMapping.PolicyName,
             Assert.Single(endpoint.Metadata.GetOrderedMetadata<IAuthorizeData>()).Policy));
@@ -52,6 +52,12 @@ public sealed class AdminEndpointContractTests
             2,
             endpoints.Count(endpoint =>
                 endpoint.RoutePattern.RawText == "/api/v1/admin/policies"));
+        Assert.Contains(
+            endpoints,
+            endpoint =>
+                endpoint.RoutePattern.RawText == "/api/v1/admin/storage/validate" &&
+                endpoint.Metadata.GetMetadata<HttpMethodMetadata>()!
+                    .HttpMethods.Contains("POST"));
     }
 
     [Fact]
