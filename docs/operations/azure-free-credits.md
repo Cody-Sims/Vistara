@@ -658,8 +658,8 @@ These steps live in the companion guide:
   discovered at runtime if you miss it.
 - [Key Vault and secret hygiene](azure-identity-and-secrets.md#4-key-vault-and-secret-hygiene)
   — create the vault, grant yourself **Key Vault Secrets Officer** so
-  `secret set` works, write the pepper and database passwords, then grant the
-  apps **Key Vault Secrets User**.
+  `secret set` works, write the pepper and database passwords, then grant both
+  identities **Key Vault Secrets User**.
 - [Private GHCR registry credentials](azure-identity-and-secrets.md#5-private-ghcr-registry-credentials)
   — public packages need no credentials at all; private ones should be
   referenced by secret name, never pasted on a command line.
@@ -670,6 +670,13 @@ standalone resource, so it and its role assignments exist before
 [§8](#8-migrations-deployment-and-validation) creates the apps — which is why
 that section attaches the identities with `--user-assigned` and passes their
 client IDs straight into configuration.
+
+The only companion steps that must wait for `az containerapp` to exist are the
+two that target an app by name: the Key Vault secret references in
+[azure-identity-and-secrets.md §4.4](azure-identity-and-secrets.md#44-reference-the-secrets-once-the-apps-exist)
+and the private-registry credentials in
+[§5.2](azure-identity-and-secrets.md#52-private-packages-store-the-token-in-key-vault-reference-it-by-name).
+[§8.3](#83-deploy-the-worker) sends you back for both.
 
 ---
 
@@ -929,10 +936,14 @@ accepting that it will not restart on its own. At 0.5 vCPU / 1.0 GiB a
 continuously running worker consumes the entire ≈ 100-hour free grant in about
 four days.
 
-Now grant both identities their roles —
+Both identities already hold their blob and Key Vault roles from
 [azure-identity-and-secrets.md §2](azure-identity-and-secrets.md#2-managed-identity-and-blob-rbac)
-and [§4.3](azure-identity-and-secrets.md#43-grant-the-apps-read-access-and-reference-the-secrets)
-— and restart the apps so the new permissions take effect.
+and [§4.3](azure-identity-and-secrets.md#43-grant-the-identities-read-access),
+so nothing here waits on permission propagation. Now that the apps exist, go
+back for the two app-scoped steps: the Key Vault secret references in
+[§4.4](azure-identity-and-secrets.md#44-reference-the-secrets-once-the-apps-exist)
+and, for private images, the registry credentials in
+[§5.2](azure-identity-and-secrets.md#52-private-packages-store-the-token-in-key-vault-reference-it-by-name).
 
 ### 8.4 Validate
 

@@ -262,7 +262,7 @@ settings.
 | `Media:Storage:Provider` | `Local`, `S3`, `Azure` | Exactly one matching `Media:Storage:*` subsection must be configured |
 | `Media:Storage:Local:RootPath` | absolute path | Dedicated directory |
 | `Media:Storage:S3:*` | `Profile`, `CredentialMode`, `BucketName`, `Region`, `ServiceUrl`, `ForcePathStyle`, `AllowInsecureHttp`, `AllowedEndpointHosts`, `AccessKeyId`, `SecretAccessKey`, `SessionToken`, `MaximumPresignLifetime` | `Profile` is `Aws`, `CloudflareR2`, `BackblazeB2`, or `Minio`; `CredentialMode` is `DefaultChain` or `Static` |
-| `Media:Storage:Azure:*` | `AccountName`, `ContainerName`, `ServiceUri`, `EmulatorMode`, `CredentialMode`, `ConnectionString`, `AllowSharedKeySas`, `MaximumGrantLifetime` | `CredentialMode` is `DefaultCredential` (managed identity or the default Azure credential chain) or `SharedKey` |
+| `Media:Storage:Azure:*` | `AccountName`, `ContainerName`, `ServiceUri`, `EmulatorMode`, `CredentialMode`, `ManagedIdentityClientId`, `AllowDefaultCredentialOutsideDevelopment`, `ConnectionString`, `AllowSharedKeySas`, `MaximumGrantLifetime` | `CredentialMode` is `ManagedIdentity`, `SharedKey`, or `DefaultCredential`. `ManagedIdentity` requires `ManagedIdentityClientId`, the client ID of a **user-assigned** managed identity as a hyphenated GUID; a system-assigned identity is not supported. `SharedKey` requires `ConnectionString` and `AllowSharedKeySas`. `DefaultCredential` is for local development only and is rejected outside a `Development` environment unless `AllowDefaultCredentialOutsideDevelopment` is set as a reviewed exception |
 | `Media:Imaging:Provider` | `NetVips` | Required |
 | `Platform:Authentication:ApiKeys:*` | `CurrentPepperVersion`, `Peppers:<version>` | Base64 peppers; required |
 | `Platform:Authentication:Jwt:Issuers` | `ProfileId`, `Issuer`, `Audience`, `MetadataAddress`, `AllowedAlgorithms`, `AllowedTypes` | At least one issuer entry is required at startup even when only local password sign-in is used |
@@ -334,6 +334,13 @@ directory rather than linking to external hosts.
   managed-identity token provider for PostgreSQL; managed identity is supported
   for Azure Blob Storage. See the Azure guides for the passwordless-PostgreSQL
   caveat.
+- Azure Blob managed identity is **user-assigned only**. Set
+  `Media:Storage:Azure:CredentialMode` to `ManagedIdentity` and supply the
+  identity's client ID in `Media:Storage:Azure:ManagedIdentityClientId`; a
+  system-assigned identity, or any identity inferred from the host, is not
+  supported. `DefaultCredential` remains for local development and needs the
+  explicit `AllowDefaultCredentialOutsideDevelopment` opt-in anywhere else,
+  and `SharedKey` remains the connection-string fallback.
 - Storage onboarding validates and generates configuration; it never writes
   configuration or swaps the active provider. Applying a provider requires a
   configuration change and an API and worker restart.

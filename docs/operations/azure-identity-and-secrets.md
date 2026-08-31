@@ -45,9 +45,14 @@ The sequence across both documents is:
    [§5](#5-private-ghcr-registry-credentials).
 5. Create the container apps with the identities attached and their client IDs
    in configuration — [azure-free-credits.md §8](azure-free-credits.md#8-migrations-deployment-and-validation).
+6. Return here for the two steps that need an existing app: the Key Vault
+   secret references in [§4.4](#44-reference-the-secrets-once-the-apps-exist)
+   and, for private images, the registry credentials in
+   [§5.2](#52-private-packages-store-the-token-in-key-vault-reference-it-by-name).
 
-Because every role assignment is already in place when the apps start, there is
-no permission-propagation restart step.
+Every role assignment is already in place when the apps start, so nothing waits
+on permission propagation; only the two app-scoped commands in step 6 come
+after deployment.
 
 The shell variables (`$RG`, `$STORAGE`, `$CONTAINER`, `$KV`, `$APIAPP`,
 `$WORKERAPP`, `$APIMI`, `$WORKERMI`) are the ones defined in
@@ -312,7 +317,10 @@ az keyvault secret set --vault-name "$KV" --name <secret-name> --file <path>
 — `--file` and `--value` are both documented parameters of
 <https://learn.microsoft.com/en-us/cli/azure/keyvault/secret>
 
-### 4.3 Grant the apps read access and reference the secrets
+### 4.3 Grant the identities read access
+
+The identities exist as soon as [§2.1](#21-create-one-identity-per-role) created
+them, so this runs now, before any container app exists:
 
 ```bash
 for PRINCIPAL in "$APIMI_PRINCIPAL" "$WORKERMI_PRINCIPAL"; do
@@ -321,28 +329,38 @@ for PRINCIPAL in "$APIMI_PRINCIPAL" "$WORKERMI_PRINCIPAL"; do
     --assignee-principal-type ServicePrincipal \
     --role "Key Vault Secrets User" --scope "$KV_ID"
 done
+```
 
+**[Verified]** **Key Vault Secrets User** grants exactly "Read secret contents
+including secret portion of a certificate with private key".
+— <https://learn.microsoft.com/en-us/azure/key-vault/general/rbac-guide>
+
+### 4.4 Reference the secrets once the apps exist
+
+`az containerapp secret set` targets an app, so it is the one step here that
+must wait for
+[azure-free-credits.md §8](azure-free-credits.md#8-migrations-deployment-and-validation)
+to create `$APIAPP` and `$WORKERAPP`. Come back and run it then:
+
+```bash
 az containerapp secret set \
   --name "$APIAPP" --resource-group "$RG" \
   --secrets "api-pepper=keyvaultref:https://$KV.vault.azure.net/secrets/vistara-api-pepper,identityref:$APIMI_ID"
 ```
 
-**[Verified]** **Key Vault Secrets User** grants exactly "Read secret contents
-including secret portion of a certificate with private key", and the Container
-Apps reference syntax is
+**[Verified]** The Container Apps reference syntax is
 `keyvaultref:<KEY_VAULT_SECRET_URI>,identityref:<MANAGED_IDENTITY_ID>`.
-— <https://learn.microsoft.com/en-us/azure/key-vault/general/rbac-guide>,
-<https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets>
+— <https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets>
 
 **[Inferred]** `identityref:` takes the **resource ID** of the user-assigned
 identity (`$APIMI_ID`), which is what the documented worked example uses, and
-that identity must already hold **Key Vault Secrets User** and be attached to
-the app — [azure-free-credits.md §8](azure-free-credits.md#8-migrations-deployment-and-validation)
-attaches it with `az containerapp create --user-assigned`. `identityref:system`
-is only meaningful for a system-assigned identity, which this design does not
-use.
+that identity must already hold **Key Vault Secrets User** ([§4.3](#43-grant-the-identities-read-access))
+and be attached to the app, which
+[azure-free-credits.md §8](azure-free-credits.md#8-migrations-deployment-and-validation)
+does with `az containerapp create --user-assigned`. `identityref:system` is only
+meaningful for a system-assigned identity, which this design does not use.
 
-### 4.4 Hygiene rules for this repository
+### 4.5 Hygiene rules for this repository
 
 - **[Verified]** App settings "are securely encrypted at rest, but if you need
   capabilities for managing secrets, they should go into a key vault."
@@ -413,7 +431,12 @@ expose to every user on the machine via `ps`. If you must type a secret on a
 command line, prefix the command with a space in a shell configured with
 `HISTCONTROL=ignorespace`, and treat the token as compromised if you forget.
 
-Then reference it from the container app by **secret name**:
+Then, **after** [azure-free-credits.md §8](azure-free-credits.md#8-migrations-deployment-and-validation)
+has created the app, reference the token from it by **secret name**. Both
+commands below target an existing container app; at creation time pass the
+token with `az containerapp create --registry-server/--registry-username/--registry-password`
+instead, or create the app from a public image first and switch the registry
+afterwards:
 
 ```bash
 az containerapp secret set \
