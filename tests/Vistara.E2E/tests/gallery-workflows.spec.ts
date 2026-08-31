@@ -146,8 +146,18 @@ test.describe('integrated gallery workflows', () => {
       .click();
     await expect(page.getByText(primaryTitle, { exact: true })).toHaveCount(0);
 
+    // The share target carries the asset resource version, so read the
+    // version the API advertises now rather than assuming a seeded value.
+    const shareTarget = await request.get(
+      `${runtime.baseUrl}/api/v1/assets/${seeded.primaryAssetId}`,
+      { headers: { 'X-API-Key': seeded.apiKey } },
+    );
+    expect(shareTarget.status()).toBe(200);
+    const shareTargetVersion = (await shareTarget.json()).asset
+      .version as number;
     await page.goto(
-      `${runtime.baseUrl}/shared/links?assetId=${seeded.primaryAssetId}&version=1`,
+      `${runtime.baseUrl}/shared/links?assetId=${seeded.primaryAssetId}` +
+        `&version=${shareTargetVersion}`,
     );
     const sharesRegion = page.getByRole('region', { name: 'Share links' });
     const shareName = `E2E link ${browserName}`;

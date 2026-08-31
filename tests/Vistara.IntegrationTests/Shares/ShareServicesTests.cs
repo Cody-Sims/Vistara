@@ -181,6 +181,7 @@ public sealed class ShareServicesTests
                 AssetId,
                 RevisionId,
                 4,
+                9,
                 "Original title",
                 "Private description",
                 Now.AddDays(-1),
@@ -200,13 +201,14 @@ public sealed class ShareServicesTests
         ShareService service = CreateService(store, catalog: catalog);
         ShareCreateResult created = await service.CreateAsync(
             Actor(TenantId),
-            CreateCommand(snapshotRevision: 4),
+            CreateCommand(snapshotVersion: 9),
             "create-snapshot",
             CancellationToken.None);
         catalog.Current = catalog.Current with
         {
             RevisionId = Guid.CreateVersion7(Now.AddDays(1)),
             RevisionNumber = 5,
+            AssetVersion = 10,
             Title = "Changed title",
             Renditions =
             [
@@ -222,7 +224,7 @@ public sealed class ShareServicesTests
         };
         ShareCreateResult replayed = await service.CreateAsync(
             Actor(TenantId),
-            CreateCommand(snapshotRevision: 4),
+            CreateCommand(snapshotVersion: 9),
             "create-snapshot",
             CancellationToken.None);
 
@@ -237,6 +239,7 @@ public sealed class ShareServicesTests
         Assert.Equal(SharePublicStatus.Available, result.Status);
         ShareAssetSnapshot asset = Assert.Single(result.Share!.Assets);
         Assert.Equal(4, asset.RevisionNumber);
+        Assert.Equal(9, asset.AssetVersion);
         Assert.Equal("Original title", asset.Title);
         Assert.Equal("/media/revision-4.webp", Assert.Single(asset.Renditions).Path);
     }
@@ -291,6 +294,7 @@ public sealed class ShareServicesTests
                 AssetId,
                 RevisionId,
                 4,
+                9,
                 "Safe title",
                 "Private description",
                 Now.AddDays(-1),
@@ -504,6 +508,7 @@ public sealed class ShareServicesTests
                     AssetId,
                     RevisionId,
                     4,
+                    9,
                     "Title",
                     "Description",
                     Now,
@@ -565,14 +570,14 @@ public sealed class ShareServicesTests
     private static ShareCreateCommand CreateCommand(
         string? password = null,
         DateTimeOffset? expiresAtUtc = null,
-        long snapshotRevision = 4,
+        long snapshotVersion = 9,
         ShareAccess permissions = ShareAccess.View,
         ShareMetadataExposure metadataExposure = ShareMetadataExposure.Basic) =>
         new(
             "Private gallery",
             ShareTargetType.Snapshot,
             null,
-            [new ShareAssetReference(AssetId, snapshotRevision)],
+            [new ShareAssetReference(AssetId, snapshotVersion)],
             permissions,
             metadataExposure,
             expiresAtUtc,
@@ -614,7 +619,7 @@ public sealed class ShareServicesTests
             if (tenantId != TenantId ||
                 assets.Count != 1 ||
                 assets[0].AssetId != Current.AssetId ||
-                assets[0].Revision != Current.RevisionNumber)
+                assets[0].Version != Current.AssetVersion)
             {
                 return ValueTask.FromResult<IReadOnlyList<ShareAssetSnapshot>?>(null);
             }

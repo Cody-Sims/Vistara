@@ -929,6 +929,7 @@ public sealed class ShareService
         asset.RevisionId != Guid.Empty &&
         asset.RevisionId.Version == 7 &&
         asset.RevisionNumber > 0 &&
+        asset.AssetVersion > 0 &&
         !string.IsNullOrWhiteSpace(asset.Title) &&
         asset.Width > 0 &&
         asset.Height > 0 &&
@@ -963,7 +964,7 @@ public sealed class ShareService
             Assets = command.SnapshotAssets.Select(asset => new
             {
                 asset.AssetId,
-                asset.Revision,
+                asset.Version,
             }),
             command.Permissions,
             command.MetadataExposure,

@@ -51,23 +51,28 @@ public sealed record ShareActor
     }
 }
 
+/// <summary>
+/// A share target: the asset and the optimistic concurrency version the caller
+/// last observed. The version is the asset resource version carried by the
+/// asset ETag, never the blob revision number.
+/// </summary>
 public sealed record ShareAssetReference
 {
-    public ShareAssetReference(Guid assetId, long revision)
+    public ShareAssetReference(Guid assetId, long version)
     {
         if (assetId == Guid.Empty || assetId.Version != 7)
         {
             throw new ArgumentException("The asset ID must use UUIDv7.", nameof(assetId));
         }
 
-        ArgumentOutOfRangeException.ThrowIfLessThan(revision, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(version, 1);
         AssetId = assetId;
-        Revision = revision;
+        Version = version;
     }
 
     public Guid AssetId { get; }
 
-    public long Revision { get; }
+    public long Version { get; }
 }
 
 public sealed record ShareRendition(
@@ -79,10 +84,17 @@ public sealed record ShareRendition(
     ShareAccess RequiredAccess,
     string? DeliveryIdentifier = null);
 
+/// <summary>
+/// A captured share member. <paramref name="RevisionId"/> and
+/// <paramref name="RevisionNumber"/> identify the stored blob revision, while
+/// <paramref name="AssetVersion"/> is the asset resource version that the
+/// capture was checked against and that the share contract publishes.
+/// </summary>
 public sealed record ShareAssetSnapshot(
     Guid AssetId,
     Guid RevisionId,
     long RevisionNumber,
+    long AssetVersion,
     string Title,
     string? Description,
     DateTimeOffset? CapturedAtUtc,

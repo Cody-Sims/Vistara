@@ -176,7 +176,15 @@ public static class ShareEndpoint
                     cancellationToken);
                 return;
             case ShareCreateStatus.NotFound:
-                await WriteNotFoundAsync(context, cancellationToken);
+                // Every absent, stale, trashed, purged, or foreign target
+                // reports the same problem so a share request cannot probe
+                // which assets exist.
+                await WriteProblemAsync(
+                    context,
+                    StatusCodes.Status404NotFound,
+                    "share_target_not_found",
+                    "The share target was not found",
+                    cancellationToken);
                 return;
             default:
                 await WriteProblemAsync(
@@ -654,7 +662,7 @@ public static class ShareEndpoint
             share.Assets
                 .Select(asset => new VersionedAssetReference(
                     asset.AssetId,
-                    new ResourceVersion(asset.RevisionNumber)))
+                    new ResourceVersion(asset.AssetVersion)))
                 .ToArray());
 
     private static PublicShareResponse ToPublic(

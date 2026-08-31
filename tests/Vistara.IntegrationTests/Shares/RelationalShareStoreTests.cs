@@ -39,6 +39,7 @@ public sealed class RelationalShareStoreTests
                     assetId,
                     revisionId,
                     7,
+                    12,
                     "Captured title",
                     null,
                     null,
@@ -84,6 +85,7 @@ public sealed class RelationalShareStoreTests
         Assert.NotNull(sameTenant);
         Assert.Null(concealed);
         Assert.Equal(7, Assert.Single(sameTenant.Assets).RevisionNumber);
+        Assert.Equal(12, Assert.Single(sameTenant.Assets).AssetVersion);
         await using SqliteCommand command = connection.CreateCommand();
         command.CommandText =
             "SELECT token_digest_hex, password_hash, assets_json FROM sharing_shares WHERE id = $id";

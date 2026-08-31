@@ -63,13 +63,11 @@ internal sealed class GalleryShareAssetCatalog(
                     from item in context.AlbumItems.AsNoTracking()
                     join asset in context.Assets.AsNoTracking()
                         on item.AssetId equals asset.Id
-                    join revision in context.AssetRevisions.AsNoTracking()
-                        on asset.CurrentRevisionId equals revision.Id
                     where item.AlbumId == id
                     orderby item.Position, item.AssetId
                     select new ShareAssetReference(
                         item.AssetId,
-                        revision.RevisionNumber))
+                        asset.Version))
                 .Take(201)
                 .ToArrayAsync(cancellationToken);
         }
@@ -109,7 +107,7 @@ internal sealed class GalleryShareAssetCatalog(
                 .SingleOrDefaultAsync(cancellationToken);
             if (detail is null ||
                 revisionId is null ||
-                detail.Asset.RevisionNumber != reference.Revision)
+                detail.Asset.Version != reference.Version)
             {
                 return null;
             }
@@ -118,6 +116,7 @@ internal sealed class GalleryShareAssetCatalog(
                 detail.Asset.Id,
                 revisionId.Value,
                 detail.Asset.RevisionNumber,
+                detail.Asset.Version,
                 detail.Asset.Title,
                 detail.Asset.Description,
                 detail.Asset.CapturedAt,
