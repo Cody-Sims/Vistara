@@ -1,14 +1,18 @@
 using System.Data;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Vistara.Application.Common;
+using Vistara.Application.Common.Events;
 using Vistara.Application.Common.Imaging;
 using Vistara.Application.Common.Storage;
 using Vistara.Application.Derivatives;
 using Vistara.Domain.Jobs;
+using Vistara.Persistence.Ingest;
 using Vistara.Persistence.Jobs;
 using Vistara.Persistence.Model;
+using Vistara.Persistence.Outbox;
 
 namespace Vistara.Persistence.Derivatives.Worker;
 
@@ -24,22 +28,30 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
     private const string PublicationOutcomeUnknown =
         "derivative.publication.outcome_unknown";
     private const string Ownership = "derivative.ownership";
+    private const string AssetReadyEventType = "asset.ready";
+    private const string AssetReadyActor = "worker.derivatives";
+
+    private static readonly JsonSerializerOptions JsonOptions =
+        new(JsonSerializerDefaults.Web);
 
     private readonly DbContextOptions<VistaraDbContext> _databaseOptions;
     private readonly IMutableTenantScope _tenantScope;
     private readonly IClock _clock;
+    private readonly IUuid7Generator _idGenerator;
     private readonly bool _isSqlite;
 
     public RelationalDerivativeStatePort(
         DbContextOptions<VistaraDbContext> databaseOptions,
         IMutableTenantScope tenantScope,
-        IClock clock)
+        IClock clock,
+        IUuid7Generator? idGenerator = null)
     {
         _databaseOptions = databaseOptions ??
             throw new ArgumentNullException(nameof(databaseOptions));
         _tenantScope = tenantScope ??
             throw new ArgumentNullException(nameof(tenantScope));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
+        _idGenerator = idGenerator ?? new Uuid7Generator(_clock);
         using var database =
             new VistaraDbContext(_databaseOptions, _tenantScope);
         string? provider = database.Database.ProviderName;
@@ -270,6 +282,10 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
         };
     }
 
+    /// <summary>
+    /// Keeps the fenced ownership marker on the ready row so the owning worker
+    /// can still complete cleanup; only cleanup clears it.
+    /// </summary>
     public ValueTask<DerivativeStateWriteResult> MarkReadyAsync(
         DerivativeReadyOutput ready,
         CancellationToken cancellationToken)
@@ -295,7 +311,7 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
                 }
 
                 state.State = "Ready";
-                state.FailureCode = null;
+                state.FailureCode = OwnershipMarker(Ownership, ready.Fence);
                 state.CacheKey = payload.Generation.CacheKey;
                 state.RepresentationStorageKey =
                     ready.Head.Identity.Key.Value;
@@ -308,6 +324,11 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
                 state.UpdatedAtUtc = ready.ReadyAtUtc;
                 return ValueTask.FromResult(true);
             },
+            (database, state, token) => PromoteAssetIfReadyAsync(
+                database,
+                state,
+                ready.ReadyAtUtc,
+                token),
             cancellationToken);
     }
 
@@ -361,6 +382,20 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
         DerivativeFence fence,
         Func<JobRow, DerivativeRequestRow, CancellationToken, ValueTask<bool>> mutate,
         CancellationToken cancellationToken) =>
+        MutateOwnedAsync(fence, mutate, afterFlushStep: null, cancellationToken);
+
+    /// <summary>
+    /// Applies a fenced mutation to the derivative row. <paramref name="afterFlushStep"/>
+    /// runs inside the same transaction once the derivative row is flushed, so
+    /// readiness evaluation observes the derivative it just published and either
+    /// both writes commit or neither does.
+    /// </summary>
+    private ValueTask<DerivativeStateWriteResult> MutateOwnedAsync(
+        DerivativeFence fence,
+        Func<JobRow, DerivativeRequestRow, CancellationToken, ValueTask<bool>> mutate,
+        Func<VistaraDbContext, DerivativeRequestRow, CancellationToken, ValueTask>?
+            afterFlushStep,
+        CancellationToken cancellationToken) =>
         WithLockedJobAsync(
             fence.TenantId,
             fence.JobLease.JobId,
@@ -371,10 +406,13 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
                     return DerivativeStateWriteResult.Stale;
                 }
 
+                TenantKey tenantId = fence.TenantId;
                 DerivativeRequestRow? state = await database
                     .Set<DerivativeRequestRow>()
                     .SingleOrDefaultAsync(
-                        row => row.JobId == fence.JobLease.JobId.Value,
+                        row =>
+                            row.TenantId == tenantId &&
+                            row.JobId == fence.JobLease.JobId.Value,
                         token);
                 if (state is null ||
                     !HasOwnership(state.FailureCode, fence) ||
@@ -385,9 +423,147 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
 
                 state.Version = checked(state.Version + 1);
                 await database.SaveChangesAsync(token);
+                if (afterFlushStep is not null)
+                {
+                    await afterFlushStep(database, state, token);
+                    await database.SaveChangesAsync(token);
+                }
+
                 return DerivativeStateWriteResult.Applied;
             },
             cancellationToken);
+
+    /// <summary>
+    /// Promotes the owning asset to <c>Ready</c> once every required standard
+    /// derivative for its current revision is visible. The asset row is locked
+    /// first so parallel derivative completions cannot each observe an
+    /// incomplete set and leave the asset stuck in <c>Processing</c>.
+    /// </summary>
+    private async ValueTask PromoteAssetIfReadyAsync(
+        VistaraDbContext database,
+        DerivativeRequestRow state,
+        DateTimeOffset readyAtUtc,
+        CancellationToken cancellationToken)
+    {
+        TenantKey tenantId = state.TenantId;
+        AssetRow? asset = await LockAssetAsync(
+            database,
+            tenantId,
+            state.AssetId,
+            cancellationToken);
+        if (asset is null ||
+            asset.Status != "Processing" ||
+            asset.CurrentRevisionId != state.RevisionId)
+        {
+            return;
+        }
+
+        Guid assetId = state.AssetId;
+        Guid revisionId = state.RevisionId;
+        List<string> readyPresets = await database
+            .Set<DerivativeRequestRow>()
+            .Where(row =>
+                row.TenantId == tenantId &&
+                row.AssetId == assetId &&
+                row.RevisionId == revisionId &&
+                row.State == "Ready")
+            .Select(row => row.PresetName)
+            .ToListAsync(cancellationToken);
+        if (!AssetReadinessPolicy.IsSatisfiedBy(readyPresets))
+        {
+            return;
+        }
+
+        DateTimeOffset changedAtUtc =
+            readyAtUtc < asset.UpdatedAtUtc ? asset.UpdatedAtUtc : readyAtUtc;
+        asset.Status = "Ready";
+        asset.UpdatedAtUtc = changedAtUtc;
+        asset.Version = checked(asset.Version + 1);
+        AppendReadyAudit(database, asset, changedAtUtc);
+        await AppendReadyEventAsync(database, asset, changedAtUtc, cancellationToken);
+    }
+
+    private async ValueTask<AssetRow?> LockAssetAsync(
+        VistaraDbContext database,
+        TenantKey tenantId,
+        Guid assetId,
+        CancellationToken cancellationToken)
+    {
+        if (_isSqlite)
+        {
+            return await database.Assets.SingleOrDefaultAsync(
+                row => row.TenantId == tenantId && row.Id == assetId,
+                cancellationToken);
+        }
+
+        return await database.Assets
+            .FromSqlRaw(
+                """
+                SELECT *
+                FROM assets
+                WHERE id = {0} AND tenant_id = {1}
+                FOR UPDATE
+                """,
+                assetId,
+                tenantId.Value)
+            .SingleOrDefaultAsync(cancellationToken);
+    }
+
+    private void AppendReadyAudit(
+        VistaraDbContext database,
+        AssetRow asset,
+        DateTimeOffset occurredAtUtc) =>
+        database.AuditEvents.Add(new AuditEventRow
+        {
+            Id = _idGenerator.NewId(),
+            TenantId = asset.TenantId,
+            ActorKind = "System",
+            ActorIdentifier = AssetReadyActor,
+            Action = AssetReadyEventType,
+            ResourceType = "asset",
+            ResourceIdentifier = asset.Id.ToString("D"),
+            BeforeJson = JsonSerializer.Serialize(
+                new Dictionary<string, string> { ["state"] = "processing" },
+                JsonOptions),
+            AfterJson = JsonSerializer.Serialize(
+                new Dictionary<string, string> { ["state"] = "ready" },
+                JsonOptions),
+            Outcome = "Succeeded",
+            OccurredAtUtc = occurredAtUtc,
+        });
+
+    private async ValueTask AppendReadyEventAsync(
+        VistaraDbContext database,
+        AssetRow asset,
+        DateTimeOffset occurredAtUtc,
+        CancellationToken cancellationToken)
+    {
+        var outbox = new OutboxRepository(database, database);
+        EventSequence sequence =
+            await outbox.ReserveSequenceAsync(cancellationToken);
+        string payload = JsonSerializer.Serialize(
+            new AssetReadyPayload(
+                asset.Id,
+                asset.CurrentRevisionId ?? Guid.Empty,
+                "ready"),
+            JsonOptions);
+        var envelope = new EventEnvelope(
+            new EventMetadata(
+                new EventId(_idGenerator.NewId()),
+                new EventTenantId(asset.TenantId.Value),
+                sequence,
+                AssetReadyEventType,
+                eventVersion: 1,
+                occurredAtUtc,
+                correlationId: asset.Id),
+            payload);
+        await outbox.AppendAsync(
+            OutboxMessage.Create(
+                new OutboxMessageId(_idGenerator.NewId()),
+                envelope,
+                occurredAtUtc),
+            cancellationToken);
+    }
 
     private bool Owns(JobRow job, DerivativeFence fence)
     {
@@ -774,4 +950,9 @@ public sealed class RelationalDerivativeStatePort : IDerivativeStatePort
     private sealed record LoadedWork(
         DerivativeWorkItem Work,
         bool IsPublic);
+
+    private sealed record AssetReadyPayload(
+        Guid AssetId,
+        Guid RevisionId,
+        string State);
 }
