@@ -1,7 +1,8 @@
 import { useCallback, useState, type FormEvent } from 'react';
-import { isStateConflict } from '../../api/versionTag';
+import { isStaleVersion, isStateConflict, versionTag } from '../../api/versionTag';
 import type {
   PlatformApiClient,
+  TenantMember,
   TenantMemberCollection,
   TenantRole,
 } from '../../api/platform';
@@ -11,7 +12,6 @@ import {
   AdminFailure,
   AdminLoading,
   AdminPage,
-  AdminPendingContract,
 } from './AdminPage';
 import { formatMoment } from './format';
 import styles from './admin.module.css';
@@ -19,7 +19,7 @@ import { useRemoteResource } from '../../app/useRemoteResource';
 
 export type AdminUsersClient = Pick<
   PlatformApiClient,
-  'listTenantMembers' | 'inviteTenantMember'
+  'listTenantMembers' | 'inviteTenantMember' | 'updateTenantMember'
 >;
 
 interface AdminUsersPageProps {
@@ -29,6 +29,13 @@ interface AdminUsersPageProps {
 }
 
 const invitableRoles: readonly TenantRole[] = [
+  'TenantAdmin',
+  'Member',
+  'Viewer',
+];
+
+const allRoles: readonly TenantRole[] = [
+  'TenantOwner',
   'TenantAdmin',
   'Member',
   'Viewer',
@@ -51,6 +58,8 @@ export function AdminUsersPage({ client, tenantId }: AdminUsersPageProps) {
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<TenantRole>('Member');
   const [inviting, setInviting] = useState(false);
+  const [roleDrafts, setRoleDrafts] = useState<Record<string, TenantRole>>({});
+  const [savingMember, setSavingMember] = useState<string>();
   const [confirmation, setConfirmation] = useState('');
   const [failure, setFailure] = useState('');
 
@@ -78,6 +87,41 @@ export function AdminUsersPage({ client, tenantId }: AdminUsersPageProps) {
       );
     } finally {
       setInviting(false);
+    }
+  }
+
+  async function saveRole(member: TenantMember) {
+    const role = roleDrafts[member.userId] ?? member.role;
+    setSavingMember(member.userId);
+    setConfirmation('');
+    setFailure('');
+
+    try {
+      await client.updateTenantMember(
+        tenantId,
+        member.userId,
+        { role },
+        { ifMatch: versionTag(member.version) },
+      );
+      setRoleDrafts((current) => {
+        const next = { ...current };
+        delete next[member.userId];
+        return next;
+      });
+      setConfirmation(
+        `${member.displayName} is now ${describeRole(role).toLowerCase()} of this workspace.`,
+      );
+      await refresh();
+    } catch (error) {
+      setFailure(
+        isStaleVersion(error)
+          ? `${member.displayName} changed somewhere else. Reload people before saving so nothing is overwritten.`
+          : isStateConflict(error)
+            ? `${member.displayName} cannot take that role right now. A workspace keeps at least one owner.`
+            : `${member.displayName} could not be updated. Nothing changed.`,
+      );
+    } finally {
+      setSavingMember(undefined);
     }
   }
 
@@ -138,7 +182,39 @@ export function AdminUsersPage({ client, tenantId }: AdminUsersPageProps) {
                     </span>
                     <span className={styles.secondaryCell}>{person.email}</span>
                   </th>
-                  <td>{describeRole(person.role)}</td>
+                  <td>
+                    <div className={styles.rowActions}>
+                      <select
+                        aria-label={`Role for ${person.displayName}`}
+                        className={styles.control}
+                        value={roleDrafts[person.userId] ?? person.role}
+                        onChange={(event) =>
+                          setRoleDrafts((current) => ({
+                            ...current,
+                            [person.userId]: event.target.value as TenantRole,
+                          }))
+                        }
+                      >
+                        {allRoles.map((value) => (
+                          <option key={value} value={value}>
+                            {describeRole(value)}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        aria-label={`Save role for ${person.displayName}`}
+                        className={styles.secondaryButton}
+                        disabled={
+                          (roleDrafts[person.userId] ?? person.role) ===
+                            person.role || savingMember === person.userId
+                        }
+                        type="button"
+                        onClick={() => void saveRole(person)}
+                      >
+                        {savingMember === person.userId ? 'Saving…' : 'Save'}
+                      </button>
+                    </div>
+                  </td>
                   <td>
                     <span className={styles.badge} data-status={person.status}>
                       {statusLabels[person.status] ?? person.status}
@@ -201,13 +277,6 @@ export function AdminUsersPage({ client, tenantId }: AdminUsersPageProps) {
         </form>
       ) : null}
 
-      <AdminPendingContract
-        title="Role and membership changes"
-        description="Roles are set when an invitation is sent. Changing a role or suspending a member needs a versioned member route."
-        contract={
-          'PATCH /api/v1/tenants/{tenantId}/members/{userId} — If-Match: "v{version}", body { role?, status? } → 200 TenantMember, 412 stale, 409 conflict'
-        }
-      />
     </AdminPage>
   );
 }

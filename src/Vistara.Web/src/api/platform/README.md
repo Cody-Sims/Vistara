@@ -21,15 +21,23 @@ Every route below is implemented on the API branch
 | `GET /api/v1/tenants/{tenantId}/members` | — | `{ items: TenantMember[] }` | `/admin/users` |
 | `POST /api/v1/tenants/{tenantId}/members` | `{ email, role }` | `TenantMember` | `/admin/users` |
 | `GET /api/v1/api-keys` | — | `{ items: ApiKeySummary[] }` | `/settings` |
-| `POST /api/v1/api-keys` | `{ scopes?, expiresAt? }` | `{ key, secret }` | `/settings` |
+| `POST /api/v1/api-keys` | `{ scopes, expiresAt? }` | `{ key, secret }` | `/settings` |
 | `DELETE /api/v1/api-keys/{keyId}` | — | `204` | `/settings` |
-| `GET /api/v1/jobs/{jobId}` | — | `JobStatus` | `/admin/jobs` |
+| `GET /api/v1/jobs/{jobId}` | — | `JobStatus` | job lookup |
+| `GET /api/v1/jobs` | `states`, `type`, `limit`, `cursor` | `{ items, nextCursor? }` | `/admin/jobs` |
+| `POST /api/v1/jobs/{jobId}/retry` | `If-Match` | `JobStatus` | `/admin/jobs` |
+| `POST /api/v1/jobs/{jobId}/cancel` | `If-Match` | `JobStatus` | `/admin/jobs` |
+| `GET /api/v1/me/preferences` | — | `UserPreferences` | `/settings` |
+| `PATCH /api/v1/me/preferences` | `If-Match`, merge patch | `UserPreferences` | `/settings` |
+| `PATCH /api/v1/tenants/{tenantId}/members/{userId}` | `If-Match`, `{ role?, status? }` | `TenantMember` | `/admin/users` |
 
 ## Conventions the client relies on
 
-- The antiforgery token is returned by `POST /api/v1/auth/login` as `csrfToken`
-  and is sent on unsafe requests in the header named by `csrfHeaderName`
-  (`X-Vistara-CSRF` by default). The token is held in memory only and dropped on
+- The antiforgery token is returned by `POST /api/v1/auth/login` and by
+  `GET /api/v1/me` (for cookie sessions) as `csrfToken`, and is sent on unsafe
+  requests in the header named by `csrfHeaderName` (`X-Vistara-CSRF` by
+  default). A reloaded browser therefore reads the session once before its
+  first unsafe request. The token is held in memory only and dropped on
   sign-out; nothing is persisted.
 - Entity tags are `"v{version}"` (`src/api/versionTag.ts`).
 - `412` means a stale `If-Match`: reload the record and reapply the edit.
@@ -43,70 +51,7 @@ These screens are specified in `docs/specification.md` §11 but have no route
 yet. Each renders an honest "not available in this release" panel instead of
 calling an invented endpoint. The exact contract each screen will consume:
 
-### 1. Antiforgery token for a restored session
-
-`GET /api/v1/me` must also return the antiforgery token for the existing cookie
-session; otherwise a browser that reloads the page cannot make any unsafe
-request until the user signs in again.
-
-```jsonc
-// GET /api/v1/me  200
-{
-  "userId": "...", "email": "...", "displayName": "...",
-  "tenantId": "...", "role": "TenantAdmin",
-  "tenants": [ { "id": "...", "slug": "...", "name": "...",
-                 "role": "TenantAdmin", "membershipStatus": "Active" } ],
-  "csrfHeaderName": "X-Vistara-CSRF",
-  "csrfToken": "<token bound to the current session>"   // required addition
-}
-```
-
-### 2. Account preferences
-
-Density, reduced motion, and paged reading mode are stored on the device today.
-To follow an account they need:
-
-```jsonc
-// GET /api/v1/me/preferences  200   ETag: "v3"
-{ "density": "comfortable" | "compact",
-  "reducedMotion": false,
-  "screenReaderPagedMode": false,
-  "locale": "en-US",            // optional, BCP 47
-  "timeZone": "Europe/Berlin",  // optional, IANA
-  "version": 3 }
-
-// PATCH /api/v1/me/preferences   If-Match: "v3"
-// body: any subset of the fields above (merge patch)
-// 200 -> the full document with the new version and ETag
-// 412 -> stale If-Match          409 -> state conflict
-```
-
-### 3. Tenant member role and status changes
-
-`/admin/users` can list and invite. Changing a role or suspending a member
-needs:
-
-```jsonc
-// PATCH /api/v1/tenants/{tenantId}/members/{userId}
-// If-Match: "v{version}"   body: { "role"?: TenantRole, "status"?: MembershipStatus }
-// 200 -> TenantMember with the new version and ETag "v{version}"
-// 412 -> stale If-Match    409 -> state conflict (for example the last owner)
-```
-
-### 4. Job collection and operator actions
-
-`GET /api/v1/jobs/{jobId}` reads one job. `/admin/jobs` needs a tenant-scoped
-list plus the two operator actions:
-
-```jsonc
-// GET /api/v1/jobs?states=Failed&states=Dead&type=derivatives&limit=50&cursor=...
-// 200 -> { "items": [ JobStatus ], "nextCursor": "..." }
-
-// POST /api/v1/jobs/{jobId}/retry    If-Match: "v{version}"  -> 200 JobStatus
-// POST /api/v1/jobs/{jobId}/cancel   If-Match: "v{version}"  -> 200 JobStatus
-```
-
-### 5. Storage usage
+### 1. Storage usage
 
 `GET /api/v1/capabilities` describes configured limits, not consumption.
 `/admin/storage` needs:
@@ -121,7 +66,7 @@ list plus the two operator actions:
   "quotaBytes": 0, "pendingUploadBytes": 0 }
 ```
 
-### 6. Tenant policies
+### 2. Tenant policies
 
 ```jsonc
 // GET /api/v1/admin/policies  200  ETag: "v7"
@@ -136,7 +81,7 @@ list plus the two operator actions:
 // 200 -> the document above   412 -> stale If-Match   409 -> state conflict
 ```
 
-### 7. Audit events
+### 3. Audit events
 
 ```jsonc
 // GET /api/v1/admin/audit?outcome=denied&action=share.created&limit=50&cursor=...
@@ -150,7 +95,7 @@ list plus the two operator actions:
 //           "nextCursor": "..." }
 ```
 
-### 8. Sign-in providers
+### 4. Sign-in providers
 
 `/login` renders only the local form because the capability document has no
 authentication section. An optional single sign-on button needs:

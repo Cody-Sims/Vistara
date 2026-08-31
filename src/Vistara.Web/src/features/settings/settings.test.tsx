@@ -7,6 +7,7 @@ import type {
   ApiKeyCollection,
   CreatedApiKey,
   TenantCollection,
+  UserPreferences,
 } from '../../api/platform';
 import { resetPreferences } from '../../app/preferences';
 import { SessionProvider } from '../session';
@@ -79,12 +80,21 @@ afterEach(() => {
   }
 });
 
+const preferences: UserPreferences = {
+  density: 'comfortable',
+  reducedMotion: false,
+  screenReaderPagedMode: false,
+  version: 3,
+};
+
 function renderSettings(
   overrides: {
     listTenants?: () => Promise<TenantCollection>;
     listApiKeys?: () => Promise<ApiKeyCollection>;
     createApiKey?: () => Promise<CreatedApiKey>;
     revokeApiKey?: () => Promise<void>;
+    getPreferences?: () => Promise<{ data: UserPreferences; etag?: string }>;
+    updatePreferences?: () => Promise<{ data: UserPreferences; etag?: string }>;
     role?: 'Member' | 'TenantAdmin';
   } = {},
 ) {
@@ -98,6 +108,17 @@ function renderSettings(
     listApiKeys: vi.fn(overrides.listApiKeys ?? (async () => keys)),
     createApiKey: vi.fn(overrides.createApiKey ?? (async () => created)),
     revokeApiKey: vi.fn(overrides.revokeApiKey ?? (async () => undefined)),
+    getPreferences: vi.fn(
+      overrides.getPreferences ??
+        (async () => ({ data: preferences, etag: '"v3"' })),
+    ),
+    updatePreferences: vi.fn(
+      overrides.updatePreferences ??
+        (async () => ({
+          data: { ...preferences, version: 4 },
+          etag: '"v4"',
+        })),
+    ),
   };
   const router = createMemoryRouter(
     [{ path: '*', element: <SettingsPage client={client} /> }],
@@ -175,12 +196,58 @@ describe('settings: device preferences', () => {
     expect(document.documentElement.dataset.pagedMode).toBe('true');
   });
 
-  it('says where the preferences are stored', async () => {
-    renderSettings();
+  it('saves a reading preference to the account with its version', async () => {
+    const user = userEvent.setup();
+    const client = renderSettings();
 
+    await user.click(await screen.findByRole('radio', { name: 'Compact' }));
+
+    await waitFor(() =>
+      expect(client.updatePreferences).toHaveBeenCalledWith(
+        { density: 'compact' },
+        { ifMatch: '"v3"' },
+      ),
+    );
     expect(
-      await screen.findAllByText(/stored on this device/i),
-    ).not.toHaveLength(0);
+      await screen.findByText('Preferences saved to your account.'),
+    ).toBeInTheDocument();
+    expect(document.documentElement.dataset.density).toBe('compact');
+  });
+
+  it('keeps the device applying a preference the account could not store', async () => {
+    const user = userEvent.setup();
+    renderSettings({
+      updatePreferences: async () => {
+        throw apiError(412);
+      },
+    });
+
+    await user.click(await screen.findByRole('radio', { name: 'Compact' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'changed on another device',
+    );
+    expect(document.documentElement.dataset.density).toBe('compact');
+  });
+
+  it('applies the preferences stored for the account on arrival', async () => {
+    renderSettings({
+      getPreferences: async () => ({
+        data: {
+          density: 'compact',
+          reducedMotion: true,
+          screenReaderPagedMode: true,
+          version: 9,
+        },
+        etag: '"v9"',
+      }),
+    });
+
+    await waitFor(() =>
+      expect(document.documentElement.dataset.pagedMode).toBe('true'),
+    );
+    expect(document.documentElement.dataset.reducedMotion).toBe('true');
+    expect(document.documentElement.dataset.density).toBe('compact');
   });
 });
 
@@ -223,6 +290,19 @@ describe('settings: API keys', () => {
     expect(client.listApiKeys).toHaveBeenCalledTimes(2);
   });
 
+  it('asks for a scope before contacting the API', async () => {
+    const user = userEvent.setup();
+    const client = renderSettings();
+
+    await screen.findByRole('list', { name: 'API keys' });
+    await user.click(screen.getByRole('button', { name: 'Create API key' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'at least one scope',
+    );
+    expect(client.createApiKey).not.toHaveBeenCalled();
+  });
+
   it('keeps the list when a key cannot be created', async () => {
     const user = userEvent.setup();
     renderSettings({
@@ -232,6 +312,7 @@ describe('settings: API keys', () => {
     });
 
     await screen.findByRole('list', { name: 'API keys' });
+    await user.type(screen.getByLabelText('Scopes'), 'assets.read');
     await user.click(screen.getByRole('button', { name: 'Create API key' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(

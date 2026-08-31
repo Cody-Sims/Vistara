@@ -64,6 +64,7 @@ export function SessionProvider({
     status: mode === 'preview' ? 'preview' : 'loading',
   }));
   const request = useRef(0);
+  const [signOutIncomplete, setSignOutIncomplete] = useState(false);
 
   const applyResolved = useCallback(
     async (options: { announcePending?: boolean } = {}) => {
@@ -104,6 +105,7 @@ export function SessionProvider({
   const signIn = useCallback(
     async (credentials: LoginRequest) => {
       const session = await client.login(credentials);
+      setSignOutIncomplete(false);
       request.current += 1;
       setState({ status: 'authenticated', user: session.user });
       return session.user;
@@ -113,13 +115,16 @@ export function SessionProvider({
 
   const signOut = useCallback(async () => {
     request.current += 1;
+    let confirmed = true;
     try {
       await client.logout();
     } catch {
-      // The browser session ends locally either way; the next session read
-      // decides whether the server cookie is still valid.
+      // The browser session ends locally either way, but the server may still
+      // hold the cookie, so the visitor is told.
+      confirmed = false;
     }
 
+    setSignOutIncomplete(!confirmed);
     setState({ status: 'anonymous' });
     await (onSessionEnd?.() ?? clearAccountScopedData());
   }, [client, onSessionEnd]);
@@ -135,11 +140,12 @@ export function SessionProvider({
       canAdminister:
         state.status === 'preview' ? true : canAdminister(state.user),
       error: state.error,
+      signOutIncomplete,
       signIn,
       signOut,
       reload: () => applyResolved({ announcePending: true }),
     };
-  }, [applyResolved, signIn, signOut, state]);
+  }, [applyResolved, signIn, signOut, signOutIncomplete, state]);
 
   return (
     <SessionContext.Provider value={value}>{children}</SessionContext.Provider>

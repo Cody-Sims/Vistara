@@ -83,7 +83,7 @@ const capabilities: Capabilities = {
 const job: JobStatus = {
   id: 'job-1',
   type: 'derivatives',
-  state: 'Succeeded',
+  state: 'Completed',
   attempts: 1,
   maxAttempts: 3,
   createdAt: '2026-01-01T00:00:00Z',
@@ -122,6 +122,16 @@ const settingsClient = {
   listApiKeys: vi.fn(async () => apiKeys),
   createApiKey: vi.fn(),
   revokeApiKey: vi.fn(),
+  getPreferences: vi.fn(async () => ({
+    data: {
+      density: 'comfortable' as const,
+      reducedMotion: false,
+      screenReaderPagedMode: false,
+      version: 1,
+    },
+    etag: '"v1"',
+  })),
+  updatePreferences: vi.fn(),
 };
 
 function routed(element: React.ReactNode, entry: string) {
@@ -158,6 +168,7 @@ const pages: readonly { name: string; element: React.ReactNode }[] = [
         client={{
           listTenantMembers: async () => members,
           inviteTenantMember: vi.fn(),
+          updateTenantMember: vi.fn(),
         }}
         tenantId="tenant-a"
       />,
@@ -174,8 +185,14 @@ const pages: readonly { name: string; element: React.ReactNode }[] = [
   {
     name: 'administration jobs',
     element: routed(
-      <AdminJobsPage client={{ getJob: async () => job }} />,
-      '/admin/jobs?job=job-1',
+      <AdminJobsPage
+        client={{
+          listJobs: async () => ({ items: [job] }),
+          retryJob: vi.fn(),
+          cancelJob: vi.fn(),
+        }}
+      />,
+      '/admin/jobs',
     ),
   },
   {

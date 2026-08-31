@@ -508,3 +508,9 @@
   font-size: var(--font-size-sm);
   overflow-wrap: anywhere;
 }
+
+.hintRow {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}

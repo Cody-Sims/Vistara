@@ -21,6 +21,11 @@ export interface SessionContextValue {
   readonly role?: TenantRole;
   readonly canAdminister: boolean;
   readonly error?: unknown;
+  /**
+   * True when the last sign-out could not be confirmed by the server, so the
+   * cookie session may still be open elsewhere.
+   */
+  readonly signOutIncomplete: boolean;
   signIn(request: LoginRequest): Promise<CurrentUser>;
   signOut(): Promise<void>;
   reload(): Promise<void>;
@@ -29,6 +34,7 @@ export interface SessionContextValue {
 const anonymousSession: SessionContextValue = {
   status: 'anonymous',
   canAdminister: false,
+  signOutIncomplete: false,
   signIn: () => Promise.reject(new Error('No session provider is mounted.')),
   signOut: () => Promise.resolve(),
   reload: () => Promise.resolve(),

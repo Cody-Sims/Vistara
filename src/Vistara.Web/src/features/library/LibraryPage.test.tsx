@@ -368,4 +368,30 @@ describe('library page', () => {
       within(pages).getByRole('button', { name: 'Previous page' }),
     ).toBeEnabled();
   });
+
+  it('does not swallow an arrow key at a page boundary', async () => {
+    const user = userEvent.setup();
+    setPreferences({ screenReaderPagedMode: true });
+    const dataSource = {
+      getTimeline: vi.fn(async () => ({
+        data: page(Array.from({ length: 200 }, (_, index) => asset(index))),
+      })),
+    };
+
+    renderLibrary(dataSource);
+    await screen.findByRole('heading', { name: 'June 10, 2026' });
+
+    const links = [...document.querySelectorAll('[data-asset-link]')];
+    const last = links.at(-1) as HTMLElement;
+    last.focus();
+    const events: KeyboardEvent[] = [];
+    document.addEventListener('keydown', (event) => events.push(event), {
+      once: true,
+    });
+
+    await user.keyboard('{ArrowRight}');
+
+    expect(events[0]?.defaultPrevented).toBe(false);
+    expect(last).toHaveFocus();
+  });
 });

@@ -4,7 +4,10 @@ import type {
   ApiKeyCollection,
   PlatformApiClient,
   TenantCollection,
+  UpdateUserPreferencesRequest,
+  UserPreferences,
 } from '../../api/platform';
+import { isStaleVersion, versionTag } from '../../api/versionTag';
 import { useRemoteResource } from '../../app/useRemoteResource';
 import {
   setPreferences,
@@ -21,7 +24,12 @@ import styles from './settings.module.css';
 
 export type SettingsClient = Pick<
   PlatformApiClient,
-  'listTenants' | 'listApiKeys' | 'createApiKey' | 'revokeApiKey'
+  | 'listTenants'
+  | 'listApiKeys'
+  | 'createApiKey'
+  | 'revokeApiKey'
+  | 'getPreferences'
+  | 'updatePreferences'
 >;
 
 interface SettingsPageProps {
@@ -62,7 +70,6 @@ const densityChoices: readonly {
 export function SettingsPage({ client }: SettingsPageProps) {
   const session = useSession();
   const theme = useThemePreference();
-  const preferences = useAppPreferences();
 
   return (
     <div className={styles.page}>
@@ -70,8 +77,8 @@ export function SettingsPage({ client }: SettingsPageProps) {
         <p className={styles.eyebrow}>Your workspace</p>
         <h1>Settings</h1>
         <p className={styles.description}>
-          Appearance and reading preferences are stored on this device. Account
-          and workspace details come from the server.
+          Appearance is stored on this device. Reading preferences follow your
+          account, and workspace details come from the server.
         </p>
       </header>
 
@@ -142,79 +149,165 @@ export function SettingsPage({ client }: SettingsPageProps) {
         </fieldset>
       </section>
 
-      <section className={styles.card} aria-labelledby="settings-reading">
-        <h2 id="settings-reading">Reading and motion</h2>
-        <fieldset className={styles.choices}>
-          <legend className={styles.legend}>Grid density</legend>
-          {densityChoices.map((choice) => (
-            <label className={styles.choice} key={choice.value}>
-              <input
-                aria-describedby={`density-${choice.value}-hint`}
-                aria-label={choice.label}
-                checked={preferences.density === choice.value}
-                name="density"
-                type="radio"
-                value={choice.value}
-                onChange={() => setPreferences({ density: choice.value })}
-              />
-              <span>
-                <strong>{choice.label}</strong>
-                <span
-                  className={styles.choiceHint}
-                  id={`density-${choice.value}-hint`}
-                >
-                  {choice.hint}
-                </span>
-              </span>
-            </label>
-          ))}
-        </fieldset>
-
-        <label className={styles.toggle}>
-          <input
-            aria-describedby="reduced-motion-hint"
-            aria-label="Reduce motion"
-            checked={preferences.reducedMotion}
-            type="checkbox"
-            onChange={(event) =>
-              setPreferences({ reducedMotion: event.target.checked })
-            }
-          />
-          <span>
-            <strong>Reduce motion</strong>
-            <span className={styles.choiceHint} id="reduced-motion-hint">
-              Skip transitions and shimmering placeholders everywhere.
-            </span>
-          </span>
-        </label>
-
-        <label className={styles.toggle}>
-          <input
-            aria-describedby="paged-mode-hint"
-            aria-label="Paged library and search"
-            checked={preferences.screenReaderPagedMode}
-            type="checkbox"
-            onChange={(event) =>
-              setPreferences({ screenReaderPagedMode: event.target.checked })
-            }
-          />
-          <span>
-            <strong>Paged library and search</strong>
-            <span className={styles.choiceHint} id="paged-mode-hint">
-              Replace endless scrolling with numbered pages that can be reached
-              from the keyboard.
-            </span>
-          </span>
-        </label>
-
-        <p className={styles.hint}>
-          These choices are stored on this device. They will follow your account
-          once the preferences route is published.
-        </p>
-      </section>
+      <ReadingPreferences client={client} />
 
       <ApiKeySection client={client} />
     </div>
+  );
+}
+
+function ReadingPreferences({ client }: { readonly client: SettingsClient }) {
+  const preferences = useAppPreferences();
+  const load = useCallback(() => client.getPreferences(), [client]);
+  const { state, reload } = useRemoteResource<{
+    data: UserPreferences;
+    etag?: string;
+  }>(load);
+  const [applied, setApplied] = useState<UserPreferences>();
+  const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState('');
+  const [confirmation, setConfirmation] = useState('');
+
+  // The account's stored preferences win when they arrive or are reloaded, and
+  // are applied to the document so every view honours them immediately. A save
+  // does not re-run this, so a just-made choice is never reverted.
+  if (state.kind === 'ready' && applied !== state.value.data) {
+    setApplied(state.value.data);
+    setPreferences({
+      density: state.value.data.density,
+      reducedMotion: state.value.data.reducedMotion,
+      screenReaderPagedMode: state.value.data.screenReaderPagedMode,
+    });
+  }
+
+  async function save(patch: UpdateUserPreferencesRequest) {
+    setPreferences({
+      ...(patch.density ? { density: patch.density } : {}),
+      ...(patch.reducedMotion === undefined
+        ? {}
+        : { reducedMotion: patch.reducedMotion }),
+      ...(patch.screenReaderPagedMode === undefined
+        ? {}
+        : { screenReaderPagedMode: patch.screenReaderPagedMode }),
+    });
+
+    if (state.kind !== 'ready') {
+      return;
+    }
+
+    setSaving(true);
+    setFailure('');
+    setConfirmation('');
+    try {
+      await client.updatePreferences(patch, {
+        ifMatch: state.value.etag ?? versionTag(state.value.data.version),
+      });
+      setConfirmation('Preferences saved to your account.');
+    } catch (error) {
+      setFailure(
+        isStaleVersion(error)
+          ? 'Your preferences changed on another device. Reload them before saving again.'
+          : 'Preferences could not be saved to your account. They still apply on this device.',
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className={styles.card} aria-labelledby="settings-reading">
+      <h2 id="settings-reading">Reading and motion</h2>
+      <fieldset className={styles.choices} disabled={saving}>
+        <legend className={styles.legend}>Grid density</legend>
+        {densityChoices.map((choice) => (
+          <label className={styles.choice} key={choice.value}>
+            <input
+              aria-describedby={`density-${choice.value}-hint`}
+              aria-label={choice.label}
+              checked={preferences.density === choice.value}
+              name="density"
+              type="radio"
+              value={choice.value}
+              onChange={() => void save({ density: choice.value })}
+            />
+            <span>
+              <strong>{choice.label}</strong>
+              <span
+                className={styles.choiceHint}
+                id={`density-${choice.value}-hint`}
+              >
+                {choice.hint}
+              </span>
+            </span>
+          </label>
+        ))}
+      </fieldset>
+
+      <label className={styles.toggle}>
+        <input
+          aria-describedby="reduced-motion-hint"
+          aria-label="Reduce motion"
+          checked={preferences.reducedMotion}
+          type="checkbox"
+          onChange={(event) =>
+            void save({ reducedMotion: event.target.checked })
+          }
+        />
+        <span>
+          <strong>Reduce motion</strong>
+          <span className={styles.choiceHint} id="reduced-motion-hint">
+            Skip transitions and shimmering placeholders everywhere.
+          </span>
+        </span>
+      </label>
+
+      <label className={styles.toggle}>
+        <input
+          aria-describedby="paged-mode-hint"
+          aria-label="Paged library and search"
+          checked={preferences.screenReaderPagedMode}
+          type="checkbox"
+          onChange={(event) =>
+            void save({ screenReaderPagedMode: event.target.checked })
+          }
+        />
+        <span>
+          <strong>Paged library and search</strong>
+          <span className={styles.choiceHint} id="paged-mode-hint">
+            Replace endless scrolling with numbered pages that can be reached
+            from the keyboard.
+          </span>
+        </span>
+      </label>
+
+      <p className={styles.saveStatus} role="status" aria-live="polite">
+        {confirmation}
+      </p>
+
+      {failure ? (
+        <p className={styles.failure} role="alert">
+          {failure}
+          <button
+            className={styles.secondaryButton}
+            type="button"
+            onClick={() => {
+              setFailure('');
+              setApplied(undefined);
+              reload();
+            }}
+          >
+            Reload preferences
+          </button>
+        </p>
+      ) : null}
+
+      {state.kind === 'failed' ? (
+        <p className={styles.hint}>
+          Account preferences could not be read, so these choices are stored on
+          this device only.
+        </p>
+      ) : null}
+    </section>
   );
 }
 
@@ -279,9 +372,12 @@ function ApiKeySection({ client }: { readonly client: SettingsClient }) {
         .split(/[\s,]+/)
         .map((scope) => scope.trim())
         .filter(Boolean);
-      const result = await client.createApiKey(
-        requested.length > 0 ? { scopes: requested } : {},
-      );
+      if (requested.length === 0) {
+        setFailure('Name at least one scope for the key.');
+        return;
+      }
+
+      const result = await client.createApiKey({ scopes: requested });
       setSecret(result.secret);
       setScopes('');
       await refresh();
@@ -400,6 +496,7 @@ function ApiKeySection({ client }: { readonly client: SettingsClient }) {
 
       <form
         className={styles.inlineForm}
+        noValidate
         onSubmit={(event) => {
           event.preventDefault();
           void create();
@@ -408,15 +505,20 @@ function ApiKeySection({ client }: { readonly client: SettingsClient }) {
         <div className={styles.field}>
           <label htmlFor="api-key-scopes">Scopes</label>
           <input
+            aria-describedby="api-key-scopes-hint"
             autoComplete="off"
             className={styles.control}
             id="api-key-scopes"
             name="scopes"
             placeholder="assets.read members.manage"
+            required
             type="text"
             value={scopes}
             onChange={(event) => setScopes(event.target.value)}
           />
+          <p className={styles.hint} id="api-key-scopes-hint">
+            A key needs at least one scope. Separate several with spaces.
+          </p>
         </div>
         <button className={styles.primaryButton} disabled={busy} type="submit">
           Create API key

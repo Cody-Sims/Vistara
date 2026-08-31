@@ -77,6 +77,14 @@ export function LoginPage() {
           </p>
         ) : null}
 
+        {session.signOutIncomplete ? (
+          <p className={styles.failure} role="alert">
+            Signing out was not confirmed by the server. This device is signed
+            out, but close the browser or sign in again to be sure the session
+            ended.
+          </p>
+        ) : null}
+
         <form
           className={styles.form}
           noValidate

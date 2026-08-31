@@ -52,6 +52,9 @@ function SessionProbe() {
   return (
     <div>
       <p data-testid="status">{session.status}</p>
+      <p data-testid="signout-incomplete">
+        {String(session.signOutIncomplete)}
+      </p>
       <p data-testid="name">{session.user?.displayName ?? 'none'}</p>
       <button type="button" onClick={() => void session.signOut()}>
         Sign out
@@ -181,6 +184,23 @@ describe('session provider', () => {
       expect(screen.getByTestId('status')).toHaveTextContent('anonymous'),
     );
     expect(cleared).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('signout-incomplete')).toHaveTextContent('true');
+  });
+
+  it('confirms a clean sign-out', async () => {
+    const user = userEvent.setup();
+
+    renderWithSession(<SessionProbe />, fakeClient());
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('authenticated'),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('anonymous'),
+    );
+    expect(screen.getByTestId('signout-incomplete')).toHaveTextContent('false');
   });
 });
 

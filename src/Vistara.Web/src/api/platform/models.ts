@@ -24,6 +24,8 @@ export interface CurrentUser {
   readonly tenants: readonly TenantMembership[];
   /** Header the deployment expects the antiforgery token in. */
   readonly csrfHeaderName: string;
+  /** Token for the current cookie session; absent for non-browser principals. */
+  readonly csrfToken?: string;
 }
 
 export interface LoginRequest {
@@ -152,7 +154,8 @@ export interface ApiKeyCollection {
 }
 
 export interface CreateApiKeyRequest {
-  readonly scopes?: readonly string[];
+  /** At least one scope is required by the API. */
+  readonly scopes: readonly string[];
   readonly expiresAt?: UtcDateTime;
 }
 
@@ -160,6 +163,50 @@ export interface CreatedApiKey {
   readonly key: ApiKeySummary;
   /** Returned once; never stored by the browser. */
   readonly secret: string;
+}
+
+export type Density = 'comfortable' | 'compact';
+
+/** Response of `GET /api/v1/me/preferences`, ETag `"v{version}"`. */
+export interface UserPreferences {
+  readonly density: Density;
+  readonly reducedMotion: boolean;
+  readonly screenReaderPagedMode: boolean;
+  readonly locale?: string;
+  readonly timeZone?: string;
+  readonly version: ResourceVersion;
+}
+
+export interface UpdateUserPreferencesRequest {
+  readonly density?: Density;
+  readonly reducedMotion?: boolean;
+  readonly screenReaderPagedMode?: boolean;
+  readonly locale?: string | null;
+  readonly timeZone?: string | null;
+}
+
+export interface UpdateTenantMemberRequest {
+  readonly role?: TenantRole;
+  readonly status?: MembershipStatus;
+}
+
+export type JobState =
+  | 'Pending'
+  | 'Leased'
+  | 'RetryScheduled'
+  | 'Completed'
+  | 'DeadLettered';
+
+export interface JobQuery {
+  readonly states?: readonly JobState[];
+  readonly type?: string;
+  readonly limit?: number;
+  readonly cursor?: string;
+}
+
+export interface JobCollection {
+  readonly items: readonly JobStatus[];
+  readonly nextCursor?: string;
 }
 
 export interface JobFailure {

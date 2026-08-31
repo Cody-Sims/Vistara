@@ -276,7 +276,14 @@ export function LibraryPage({
   const priorityAssetId = viewportRows
     .flatMap(({ row }) => (row.type === 'assets' ? row.assets : []))
     .find((asset) => asset.status === 'ready')?.id;
-  const orderedIds = allAssets.map((asset) => asset.id);
+  // Arrow keys move between mounted rows. In paged mode only the current page
+  // is mounted, so the order stops at the page edge and the key falls through
+  // instead of being swallowed.
+  const orderedIds = paged
+    ? virtual.rows.flatMap(({ row }) =>
+        row.type === 'assets' ? row.assets.map((asset) => asset.id) : [],
+      )
+    : allAssets.map((asset) => asset.id);
   const selectedCount = selectionCount(selection);
   const defaultStore = useRestoration(
     address,

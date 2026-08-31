@@ -40,6 +40,7 @@ const currentUser = {
     },
   ],
   csrfHeaderName: 'X-Vistara-CSRF',
+  csrfToken: 'session-token',
 };
 
 describe('platform session client', () => {
@@ -108,6 +109,8 @@ describe('platform session client', () => {
         jsonResponse({ user: currentUser, csrfToken: 'token-4' }),
       )
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      // The ended session answers the next bootstrap with 401.
+      .mockResolvedValueOnce(problemResponse(401, 'auth.unauthenticated'))
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
     const client = new PlatformApiClient({ fetch });
 
@@ -115,8 +118,9 @@ describe('platform session client', () => {
     await client.logout();
     await client.logout();
 
+    expect(fetch.mock.calls[2]![0]).toBe('/api/v1/me');
     expect(
-      new Headers(fetch.mock.calls[2]![1]?.headers).get('X-Vistara-CSRF'),
+      new Headers(fetch.mock.calls[3]![1]?.headers).get('X-Vistara-CSRF'),
     ).toBeNull();
   });
 
@@ -208,9 +212,11 @@ describe('platform tenant administration client', () => {
   });
 
   it('manages API keys through the published routes', async () => {
-    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
-      jsonResponse({ items: [] }),
-    );
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(jsonResponse({ items: [] }))
+      .mockResolvedValueOnce(jsonResponse(currentUser))
+      .mockImplementation(async () => jsonResponse({ items: [] }));
     const client = new PlatformApiClient({ fetch });
 
     await client.listApiKeys();
@@ -218,9 +224,10 @@ describe('platform tenant administration client', () => {
     await client.revokeApiKey('key 1');
 
     expect(fetch.mock.calls[0]![0]).toBe('/api/v1/api-keys');
-    expect(fetch.mock.calls[1]![1]?.method).toBe('POST');
-    expect(fetch.mock.calls[2]![0]).toBe('/api/v1/api-keys/key%201');
-    expect(fetch.mock.calls[2]![1]?.method).toBe('DELETE');
+    expect(fetch.mock.calls[1]![0]).toBe('/api/v1/me');
+    expect(fetch.mock.calls[2]![1]?.method).toBe('POST');
+    expect(fetch.mock.calls[3]![0]).toBe('/api/v1/api-keys/key%201');
+    expect(fetch.mock.calls[3]![1]?.method).toBe('DELETE');
   });
 
   it('reads a single job by identifier', async () => {
@@ -253,19 +260,149 @@ describe('platform tenant administration client', () => {
     expect(methods.sort()).toEqual(
       [
         'antiforgeryHeaderName',
+        'cancelJob',
         'createApiKey',
         'getCapabilities',
         'getJob',
+        'getPreferences',
         'getSession',
         'inviteTenantMember',
         'listApiKeys',
+        'listJobs',
         'listTenantMembers',
         'listTenants',
         'login',
         'logout',
+        'retryJob',
         'revokeApiKey',
+        'updatePreferences',
+        'updateTenantMember',
       ].sort(),
     );
+  });
+});
+
+describe('restored browser sessions', () => {
+  it('adopts the antiforgery token published for the cookie session', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(jsonResponse(currentUser))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = new PlatformApiClient({ fetch });
+
+    await client.getSession();
+    await client.logout();
+
+    expect(
+      new Headers(fetch.mock.calls[1]![1]?.headers).get('X-Vistara-CSRF'),
+    ).toBe('session-token');
+  });
+
+  it('reads the session once before the first unsafe request after a reload', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(jsonResponse(currentUser))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = new PlatformApiClient({ fetch });
+
+    await client.revokeApiKey('key-1');
+
+    expect(fetch.mock.calls[0]![0]).toBe('/api/v1/me');
+    expect(fetch.mock.calls[1]![0]).toBe('/api/v1/api-keys/key-1');
+    expect(
+      new Headers(fetch.mock.calls[1]![1]?.headers).get('X-Vistara-CSRF'),
+    ).toBe('session-token');
+  });
+
+  it('never delays sign-in behind a session read', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      jsonResponse({ user: currentUser, csrfToken: 'login-token' }),
+    );
+    const client = new PlatformApiClient({ fetch });
+
+    await client.login({ login: 'ada@example.test', password: 'pw' });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]![0]).toBe('/api/v1/auth/login');
+  });
+});
+
+describe('versioned platform edits', () => {
+  it('sends If-Match and returns the new entity tag for preferences', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(jsonResponse(currentUser))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            density: 'compact',
+            reducedMotion: true,
+            screenReaderPagedMode: false,
+            version: 4,
+          },
+          { headers: { ETag: '"v4"', 'Content-Type': 'application/json' } },
+        ),
+      );
+    const client = new PlatformApiClient({ fetch });
+
+    const updated = await client.updatePreferences(
+      { density: 'compact' },
+      { ifMatch: versionTag(3) },
+    );
+
+    const [url, init] = fetch.mock.calls[1]!;
+    expect(url).toBe('/api/v1/me/preferences');
+    expect(init?.method).toBe('PATCH');
+    expect(new Headers(init?.headers).get('If-Match')).toBe('"v3"');
+    expect(updated.etag).toBe('"v4"');
+    expect(updated.data.density).toBe('compact');
+  });
+
+  it('changes a member with the member route and its version', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(jsonResponse(currentUser))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { userId: 'user-2', role: 'TenantAdmin', version: 5 },
+          { headers: { ETag: '"v5"', 'Content-Type': 'application/json' } },
+        ),
+      );
+    const client = new PlatformApiClient({ fetch });
+
+    await client.updateTenantMember(
+      'tenant-a',
+      'user 2',
+      { role: 'TenantAdmin' },
+      { ifMatch: versionTag(4) },
+    );
+
+    const [url, init] = fetch.mock.calls[1]!;
+    expect(url).toBe('/api/v1/tenants/tenant-a/members/user%202');
+    expect(new Headers(init?.headers).get('If-Match')).toBe('"v4"');
+  });
+
+  it('lists and acts on jobs through the job routes', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(jsonResponse({ items: [] }))
+      .mockResolvedValueOnce(jsonResponse(currentUser))
+      .mockResolvedValueOnce(jsonResponse({ id: 'job-1', version: 3 }));
+    const client = new PlatformApiClient({ fetch });
+
+    await client.listJobs({
+      states: ['DeadLettered', 'RetryScheduled'],
+      limit: 25,
+    });
+    await client.retryJob('job-1', { ifMatch: versionTag(2) });
+
+    expect(fetch.mock.calls[0]![0]).toBe(
+      '/api/v1/jobs?states=DeadLettered&states=RetryScheduled&limit=25',
+    );
+    expect(fetch.mock.calls[2]![0]).toBe('/api/v1/jobs/job-1/retry');
+    expect(
+      new Headers(fetch.mock.calls[2]![1]?.headers).get('If-Match'),
+    ).toBe('"v2"');
   });
 });
 

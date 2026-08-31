@@ -99,7 +99,11 @@ describe('administration: people', () => {
     const listTenantMembers = vi.fn(async () => ({ items: members }));
     renderRoute(
       <AdminUsersPage
-        client={{ listTenantMembers, inviteTenantMember: vi.fn() }}
+        client={{
+          listTenantMembers,
+          inviteTenantMember: vi.fn(),
+          updateTenantMember: vi.fn(),
+        }}
         tenantId="tenant-a"
       />,
     );
@@ -121,7 +125,11 @@ describe('administration: people', () => {
       .mockResolvedValueOnce({ items: members });
     renderRoute(
       <AdminUsersPage
-        client={{ listTenantMembers, inviteTenantMember: vi.fn() }}
+        client={{
+          listTenantMembers,
+          inviteTenantMember: vi.fn(),
+          updateTenantMember: vi.fn(),
+        }}
         tenantId="tenant-a"
       />,
     );
@@ -141,7 +149,11 @@ describe('administration: people', () => {
     const listTenantMembers = vi.fn(async () => ({ items: members }));
     renderRoute(
       <AdminUsersPage
-        client={{ listTenantMembers, inviteTenantMember }}
+        client={{
+          listTenantMembers,
+          inviteTenantMember,
+          updateTenantMember: vi.fn(),
+        }}
         tenantId="tenant-a"
       />,
     );
@@ -177,6 +189,7 @@ describe('administration: people', () => {
           inviteTenantMember: vi.fn(async () => {
             throw apiError(409);
           }),
+          updateTenantMember: vi.fn(),
         }}
         tenantId="tenant-a"
       />,
@@ -191,20 +204,98 @@ describe('administration: people', () => {
     );
   });
 
-  it('names the contract that role changes still need', async () => {
+  it('saves a role change with the row version', async () => {
+    const user = userEvent.setup();
+    const updateTenantMember = vi.fn(async () => ({
+      data: { ...members[1]!, role: 'TenantAdmin' as const, version: 2 },
+      etag: '"v2"',
+    }));
     renderRoute(
       <AdminUsersPage
         client={{
           listTenantMembers: vi.fn(async () => ({ items: members })),
           inviteTenantMember: vi.fn(),
+          updateTenantMember,
         }}
         tenantId="tenant-a"
       />,
     );
 
-    expect(
-      await screen.findByText(/PATCH \/api\/v1\/tenants\/\{tenantId\}\/members/),
-    ).toBeInTheDocument();
+    await user.selectOptions(
+      await screen.findByLabelText('Role for Grace Hopper'),
+      'TenantAdmin',
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Save role for Grace Hopper' }),
+    );
+
+    await waitFor(() =>
+      expect(updateTenantMember).toHaveBeenCalledWith(
+        'tenant-a',
+        'user-2',
+        { role: 'TenantAdmin' },
+        { ifMatch: '"v1"' },
+      ),
+    );
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Grace Hopper is now administrator',
+    );
+  });
+
+  it('reads 412 as a stale row that must be reloaded', async () => {
+    const user = userEvent.setup();
+    renderRoute(
+      <AdminUsersPage
+        client={{
+          listTenantMembers: vi.fn(async () => ({ items: members })),
+          inviteTenantMember: vi.fn(),
+          updateTenantMember: vi.fn(async () => {
+            throw apiError(412);
+          }),
+        }}
+        tenantId="tenant-a"
+      />,
+    );
+
+    await user.selectOptions(
+      await screen.findByLabelText('Role for Grace Hopper'),
+      'Viewer',
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Save role for Grace Hopper' }),
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'changed somewhere else',
+    );
+  });
+
+  it('reads 409 as a rule the workspace enforces', async () => {
+    const user = userEvent.setup();
+    renderRoute(
+      <AdminUsersPage
+        client={{
+          listTenantMembers: vi.fn(async () => ({ items: members })),
+          inviteTenantMember: vi.fn(),
+          updateTenantMember: vi.fn(async () => {
+            throw apiError(409);
+          }),
+        }}
+        tenantId="tenant-a"
+      />,
+    );
+
+    await user.selectOptions(
+      await screen.findByLabelText('Role for Grace Hopper'),
+      'Viewer',
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Save role for Grace Hopper' }),
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'at least one owner',
+    );
   });
 });
 
@@ -216,10 +307,7 @@ describe('administration: storage', () => {
       />,
     );
 
-    expect(
-      await screen.findByRole('heading', { name: 'Storage' }),
-    ).toBeInTheDocument();
-    expect(screen.getByText('s3')).toBeInTheDocument();
+    expect(await screen.findByText('s3')).toBeInTheDocument();
     expect(screen.getByText('4 GB')).toBeInTheDocument();
     expect(
       screen.getByText(/GET \/api\/v1\/admin\/storage/),
@@ -245,9 +333,9 @@ describe('administration: storage', () => {
 });
 
 const job: JobStatus = {
-  id: '0195f0d4-0000-7000-8000-00000000job1',
+  id: 'job-1',
   type: 'derivatives',
-  state: 'Failed',
+  state: 'DeadLettered',
   attempts: 3,
   maxAttempts: 5,
   createdAt: '2026-02-10T08:00:00Z',
@@ -257,55 +345,116 @@ const job: JobStatus = {
 };
 
 describe('administration: jobs', () => {
-  it('looks a job up by identifier and keeps it in the address', async () => {
+  const queued = {
+    id: 'job-2',
+    type: 'purge',
+    state: 'Pending' as const,
+    attempts: 0,
+    maxAttempts: 5,
+    createdAt: '2026-02-10T08:30:00Z',
+    availableAt: '2026-02-10T08:30:00Z',
+    version: 1,
+  };
+
+  it('filters the queue through the address', async () => {
     const user = userEvent.setup();
-    const getJob = vi.fn(async () => job);
+    const listJobs = vi.fn(async () => ({ items: [job, queued] }));
     const router = renderRoute(
-      <AdminJobsPage client={{ getJob }} />,
+      <AdminJobsPage
+        client={{ listJobs, retryJob: vi.fn(), cancelJob: vi.fn() }}
+      />,
       '/admin/jobs',
     );
 
-    await user.type(screen.getByLabelText('Job identifier'), 'job-1');
-    await user.click(screen.getByRole('button', { name: 'Look up job' }));
+    await screen.findByText('derivatives');
+    await user.selectOptions(screen.getByLabelText('Show jobs'), 'DeadLettered');
 
-    await waitFor(() => expect(getJob).toHaveBeenCalledWith('job-1'));
-    expect(await screen.findByText('derivatives')).toBeInTheDocument();
-    expect(screen.getByText('The decoder rejected it.')).toBeInTheDocument();
-    expect(router.state.location.search).toBe('?job=job-1');
+    await waitFor(() =>
+      expect(router.state.location.search).toBe('?state=DeadLettered'),
+    );
+    expect(listJobs).toHaveBeenLastCalledWith(
+      expect.objectContaining({ states: ['DeadLettered'] }),
+    );
   });
 
-  it('reads the job named in the address on arrival', async () => {
-    const getJob = vi.fn(async () => job);
-    renderRoute(<AdminJobsPage client={{ getJob }} />, '/admin/jobs?job=job-9');
-
-    await waitFor(() => expect(getJob).toHaveBeenCalledWith('job-9'));
-    expect(await screen.findByText('derivatives')).toBeInTheDocument();
-  });
-
-  it('separates an unknown job from an unavailable service', async () => {
+  it('retries a dead-lettered job with its version and refreshes', async () => {
     const user = userEvent.setup();
+    const retryJob = vi.fn(async () => ({ data: { ...job, state: 'Pending' } }));
+    const listJobs = vi.fn(async () => ({ items: [job, queued] }));
+    renderRoute(
+      <AdminJobsPage client={{ listJobs, retryJob, cancelJob: vi.fn() }} />,
+    );
+
+    await user.click(
+      await screen.findByRole('button', { name: 'Retry derivatives job' }),
+    );
+
+    await waitFor(() =>
+      expect(retryJob).toHaveBeenCalledWith('job-1', { ifMatch: '"v4"' }),
+    );
+    await waitFor(() => expect(listJobs).toHaveBeenCalledTimes(2));
+  });
+
+  it('cancels a queued job', async () => {
+    const user = userEvent.setup();
+    const cancelJob = vi.fn(async () => ({ data: queued }));
     renderRoute(
       <AdminJobsPage
         client={{
-          getJob: vi.fn(async () => {
-            throw apiError(404);
-          }),
+          listJobs: vi.fn(async () => ({ items: [queued] })),
+          retryJob: vi.fn(),
+          cancelJob,
         }}
       />,
     );
 
-    await user.type(screen.getByLabelText('Job identifier'), 'missing');
-    await user.click(screen.getByRole('button', { name: 'Look up job' }));
+    await user.click(
+      await screen.findByRole('button', { name: 'Cancel purge job' }),
+    );
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'No job with that identifier',
+    await waitFor(() =>
+      expect(cancelJob).toHaveBeenCalledWith('job-2', { ifMatch: '"v1"' }),
     );
   });
 
-  it('names the collection contract the queue view still needs', () => {
-    renderRoute(<AdminJobsPage client={{ getJob: vi.fn() }} />);
+  it('explains a stale retry without hiding the queue', async () => {
+    const user = userEvent.setup();
+    renderRoute(
+      <AdminJobsPage
+        client={{
+          listJobs: vi.fn(async () => ({ items: [job, queued] })),
+          retryJob: vi.fn(async () => {
+            throw apiError(412);
+          }),
+          cancelJob: vi.fn(),
+        }}
+      />,
+    );
 
-    expect(screen.getByText(/GET \/api\/v1\/jobs\?states=/)).toBeInTheDocument();
+    await user.click(
+      await screen.findByRole('button', { name: 'Retry derivatives job' }),
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'changed somewhere else',
+    );
+    expect(screen.getByText('purge')).toBeInTheDocument();
+  });
+
+  it('reports an empty queue', async () => {
+    renderRoute(
+      <AdminJobsPage
+        client={{
+          listJobs: vi.fn(async () => ({ items: [] })),
+          retryJob: vi.fn(),
+          cancelJob: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(
+      await screen.findByText('No jobs match this filter right now.'),
+    ).toBeInTheDocument();
   });
 });
 
@@ -317,10 +466,7 @@ describe('administration: policies', () => {
       />,
     );
 
-    expect(
-      await screen.findByRole('heading', { name: 'Policies' }),
-    ).toBeInTheDocument();
-    expect(screen.getByText('200')).toBeInTheDocument();
+    expect(await screen.findByText('200')).toBeInTheDocument();
     expect(
       screen.getByText(/PATCH \/api\/v1\/admin\/policies/),
     ).toBeInTheDocument();
@@ -333,7 +479,7 @@ describe('administration: policies', () => {
       />,
     );
 
-    await screen.findByRole('heading', { name: 'Policies' });
+    await screen.findByText('200');
     expect(screen.queryByRole('button', { name: 'Save policies' })).toBeNull();
   });
 });
