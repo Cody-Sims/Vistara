@@ -88,7 +88,10 @@ function curationClient(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderViewer(client = curationClient()) {
+function renderViewer(
+  client = curationClient(),
+  neighborIds?: { previous?: string; next?: string },
+) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -100,6 +103,7 @@ function renderViewer(client = curationClient()) {
           <ViewerPage
             curation={{ client: client as never, canCurate: true }}
             dataSource={client as never}
+            {...(neighborIds ? { neighborIds } : {})}
           />
         ),
       },
@@ -146,6 +150,55 @@ describe('viewer curation', () => {
     expect(
       within(panel).getByRole('button', { name: 'Remove from Summer' }),
     ).toBeEnabled();
+  });
+
+  it('closes a curation panel with Escape without leaving the viewer', async () => {
+    const { router, user } = renderViewer();
+
+    await screen.findByRole('heading', { level: 1, name: 'Mountain' });
+    await user.click(screen.getByRole('button', { name: 'Tags' }));
+    await screen.findByRole('group', { name: 'Tags' });
+    await user.keyboard('{Escape}');
+
+    await waitFor(() =>
+      expect(screen.queryByRole('group', { name: 'Tags' })).toBeNull(),
+    );
+    expect(router.state.location.pathname).toBe('/assets/asset-1');
+  });
+
+  it('keeps the viewer while a reason is being typed', async () => {
+    const { router, user } = renderViewer();
+
+    await screen.findByRole('heading', { level: 1, name: 'Mountain' });
+    await user.click(screen.getByRole('button', { name: 'Move to trash' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByLabelText('Reason (optional)'));
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(router.state.location.pathname).toBe('/assets/asset-1');
+  });
+
+  it('does not carry a trashed panel over to the next asset', async () => {
+    const client = curationClient();
+    const { router, user } = renderViewer(client, { next: 'asset-2' });
+
+    await screen.findByRole('heading', { level: 1, name: 'Mountain' });
+    await user.click(screen.getByRole('button', { name: 'Move to trash' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Move to trash' }),
+    );
+    await screen.findByRole('heading', { level: 1, name: 'Moved to trash' });
+
+    await user.keyboard('{ArrowRight}');
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe('/assets/asset-2'),
+    );
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Mountain' }),
+    ).toBeInTheDocument();
   });
 
   it('replaces the asset with a trashed confirmation that can be undone', async () => {

@@ -515,12 +515,12 @@ describe('curation actions', () => {
 
     await user.click(screen.getByRole('button', { name: 'Move to trash' }));
     const dialog = await screen.findByRole('dialog');
-    await user.tab();
-    expect(dialog).toContainElement(document.activeElement);
-    await user.tab();
-    expect(dialog).toContainElement(document.activeElement);
-    await user.tab();
-    expect(dialog).toContainElement(document.activeElement);
+    for (let step = 0; step < 3; step += 1) {
+      await user.tab();
+      expect(dialog).toContainElement(
+        document.activeElement as HTMLElement | null,
+      );
+    }
   });
 
   it('marks Escape handled so a page behind it does not act on the key', async () => {

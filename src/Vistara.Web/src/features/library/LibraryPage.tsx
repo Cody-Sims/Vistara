@@ -535,10 +535,9 @@ export function LibraryPage({
             );
             void refreshTimeline();
           }}
-          onRestored={() => {
-            setSettled([]);
-            void refreshTimeline();
-          }}
+          // The restore result belongs with the images it restored, so the
+          // surface stays until the next selection replaces it.
+          onRestored={() => void refreshTimeline()}
           {...(curation.canCurate === undefined
             ? {}
             : { canCurate: curation.canCurate })}

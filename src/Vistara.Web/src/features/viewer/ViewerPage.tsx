@@ -59,15 +59,18 @@ export function ViewerPage({
   const queryClient = useQueryClient();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const trashedRef = useRef<HTMLHeadingElement>(null);
-  const [trashed, setTrashed] = useState<
-    { readonly restorable: readonly VersionedAssetReference[] } | undefined
-  >();
+  const [trashedAsset, setTrashedAsset] = useState<{
+    readonly assetId: string;
+    readonly restorable: readonly VersionedAssetReference[];
+  }>();
   const [restoring, setRestoring] = useState(false);
   const [restoreFailed, setRestoreFailed] = useState(false);
   const returnAddress = useMemo(
     () => getViewerReturnAddress(location.state),
     [location.state],
   );
+  const trashed =
+    trashedAsset && trashedAsset.assetId === assetId ? trashedAsset : undefined;
   const query = useQuery({
     queryKey: ['asset-viewer', assetId],
     queryFn: () => {
@@ -93,9 +96,9 @@ export function ViewerPage({
 
   useEffect(() => {
     function handleKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        void navigate(returnAddress);
+      // A panel or dialog inside the viewer answers the key first and marks it
+      // handled; the viewer must not also act on it.
+      if (event.defaultPrevented) {
         return;
       }
 
@@ -104,6 +107,12 @@ export function ViewerPage({
         event.target instanceof HTMLTextAreaElement ||
         event.target instanceof HTMLSelectElement
       ) {
+        return;
+      }
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        void navigate(returnAddress);
         return;
       }
 
@@ -170,7 +179,7 @@ export function ViewerPage({
         restorable,
         globalThis.crypto?.randomUUID?.() ?? `web-${Date.now()}`,
       );
-      setTrashed(undefined);
+      setTrashedAsset(undefined);
       await queryClient.invalidateQueries({
         queryKey: ['asset-viewer', assetId],
       });
@@ -318,8 +327,8 @@ export function ViewerPage({
                 })
               }
               onTrashed={(ids, restorable) => {
-                if (ids.length > 0) {
-                  setTrashed({ restorable });
+                if (ids.length > 0 && assetId) {
+                  setTrashedAsset({ assetId, restorable });
                 }
               }}
               {...(curation.canCurate === undefined

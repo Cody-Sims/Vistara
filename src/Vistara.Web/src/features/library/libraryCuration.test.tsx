@@ -73,7 +73,14 @@ function curationClient(overrides: Record<string, unknown> = {}) {
     bulkMutateAssets: vi.fn(async () => ({
       data: [{ assetId: 'asset-0', status: 'trashed', version: 3 }],
     })),
-    restoreAssets: vi.fn(),
+    restoreAssets: vi.fn(async () => ({
+      data: {
+        jobId: 'job-1',
+        state: 'queued',
+        submittedCount: 1,
+        submittedAt: '2026-06-11T12:00:00Z',
+      },
+    })),
     ...overrides,
   };
 }
@@ -184,6 +191,29 @@ describe('library curation', () => {
         screen.getByRole('group', { name: 'Curation actions' }),
       ).queryByRole('button', { name: 'Undo move to trash' }),
     ).toBeNull();
+  });
+
+  it('keeps the restore result on screen after the undo', async () => {
+    const { client, user } = renderLibrary({});
+
+    await screen.findByRole('heading', { name: 'June 10, 2026' });
+    await user.click(screen.getByLabelText('Select Photo 0'));
+    await user.click(
+      screen.getByRole('button', { name: 'Move to trash' }),
+    );
+    const dialog = await screen.findByRole('dialog');
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Move to trash' }),
+    );
+    const undo = await screen.findByRole('button', {
+      name: 'Undo move to trash',
+    });
+    await user.click(undo);
+
+    await waitFor(() => expect(client.restoreAssets).toHaveBeenCalled());
+    expect(
+      await screen.findByRole('status', { name: 'Curation result' }),
+    ).toHaveTextContent('Restore queued for 1 image.');
   });
 
   it('hides the actions from a session that may not curate', async () => {
