@@ -67,7 +67,10 @@ export interface CurationActionsProps {
   readonly onRestored?: (ids: readonly string[]) => void;
   readonly createIdempotencyKey?: () => string;
   /** Waits out a rate limit; replaced in tests so they do not really wait. */
-  readonly wait?: (milliseconds: number) => Promise<void>;
+  readonly wait?: (
+    milliseconds: number,
+    signal: AbortSignal,
+  ) => Promise<void>;
 }
 
 type Panel = 'tags' | 'albums';
@@ -80,7 +83,6 @@ interface ListState<T> {
 const idle: ListState<never> = { kind: 'loading', items: [] };
 
 /** A refused batch is retried once, after the delay the API asked for. */
-const throttleRetries = 1;
 const maximumThrottleWait = 30_000;
 
 /**
@@ -96,8 +98,24 @@ function withRecord<T extends { readonly id: string }>(
     : [...items, record];
 }
 
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+/** How many reads of a stale version are in flight at once. */
+const concurrentVersionReads = 4;
+
+function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    signal.addEventListener('abort', finish);
+  });
 }
 
 function defaultKey(): string {
@@ -217,6 +235,9 @@ export function CurationActions({
   const [tags, setTags] = useState<ListState<Tag>>(idle);
   const [albums, setAlbums] = useState<ListState<AlbumSummary>>(idle);
 
+  /** Set while a rate limit is being waited out, so it can be stopped. */
+  const [waitingSeconds, setWaitingSeconds] = useState<number>();
+  const stopWaiting = useRef<AbortController>(undefined);
   /** Bumped when a finished action should take focus to its report. */
   const [focusReport, setFocusReport] = useState(0);
   const tagsTrigger = useRef<HTMLButtonElement>(null);
@@ -338,6 +359,60 @@ export function CurationActions({
   }, [focusReport]);
 
   /**
+   * One attempt, then — if the API asked the caller to slow down — one more
+   * after the delay it named. The wait can be stopped, which abandons the
+   * retry and tells the caller nothing further should be attempted.
+   */
+  async function withThrottleRetry<T>(
+    run: () => Promise<T>,
+    signal: AbortSignal,
+  ): Promise<
+    | { readonly kind: 'value'; readonly value: T }
+    | { readonly kind: 'failed'; readonly error: unknown }
+    | { readonly kind: 'throttled'; readonly error: unknown }
+  > {
+    try {
+      return { kind: 'value', value: await run() };
+    } catch (error) {
+      const seconds = retryAfterSeconds(error);
+      if (seconds === undefined) {
+        return { kind: 'failed', error };
+      }
+
+      setWaitingSeconds(seconds);
+      try {
+        await wait(Math.min(seconds * 1000, maximumThrottleWait), signal);
+      } finally {
+        setWaitingSeconds(undefined);
+      }
+
+      if (signal.aborted) {
+        return { kind: 'throttled', error };
+      }
+    }
+
+    try {
+      return { kind: 'value', value: await run() };
+    } catch (error) {
+      return retryAfterSeconds(error) === undefined
+        ? { kind: 'failed', error }
+        : { kind: 'throttled', error };
+    }
+  }
+
+  /** Runs an action with a controller the visitor can abort. */
+  function startRun(): AbortController {
+    const controller = new AbortController();
+    stopWaiting.current = controller;
+    return controller;
+  }
+
+  function endRun() {
+    stopWaiting.current = undefined;
+    setWaitingSeconds(undefined);
+  }
+
+  /**
    * Applies a versioned change to each target in turn. A selection larger than
    * one image goes through the bulk route instead, so this carries the single
    * asset a viewer, or a one-image selection, holds.
@@ -373,55 +448,67 @@ export function CurationActions({
    */
   async function runBulk(action: string, bulkAction: AssetBulkAction) {
     setBusy(true);
+    const controller = startRun();
     const results: CurationItemResult[] = [];
+    const chunks = batches(actionable);
     let refused = false;
+    let stopped = false;
 
-    for (const batch of batches(actionable)) {
-      let attempt = 0;
-      for (;;) {
-        try {
-          await client.bulkMutateAssets(
-            {
-              items: toVersionedReferences(batch),
-              action: bulkAction,
-            },
-            { idempotencyKey: createIdempotencyKey() },
-          );
-          results.push(
-            ...batch.map((target) => ({
-              id: target.id,
-              title: target.title,
-              outcome: 'queued' as const,
-            })),
-          );
-          break;
-        } catch (error) {
-          const seconds = retryAfterSeconds(error);
-          if (seconds !== undefined && attempt < throttleRetries) {
-            attempt += 1;
-            await wait(Math.min(seconds * 1000, maximumThrottleWait));
-            continue;
-          }
+    for (const batch of chunks) {
+      const item = (
+        target: AssetSummary,
+        outcome: CurationItemResult['outcome'],
+      ) => ({ id: target.id, title: target.title, outcome });
 
-          refused = true;
-          const status = statusOf(error);
-          results.push(
-            ...batch.map((target) => ({
-              id: target.id,
-              title: target.title,
-              outcome:
-                status === 404
-                  ? ('notFound' as const)
-                  : status === 409 || status === 412
-                    ? ('conflict' as const)
-                    : ('failed' as const),
-            })),
-          );
-          break;
-        }
+      if (stopped) {
+        results.push(...batch.map((target) => item(target, 'untouched')));
+        continue;
       }
+
+      const answer = await withThrottleRetry(
+        () =>
+          client.bulkMutateAssets(
+            { items: toVersionedReferences(batch), action: bulkAction },
+            { idempotencyKey: createIdempotencyKey() },
+          ),
+        controller.signal,
+      );
+
+
+      if (answer.kind === 'value') {
+        results.push(...batch.map((target) => item(target, 'queued')));
+        continue;
+      }
+
+      refused = true;
+      if (answer.kind === 'throttled') {
+        /**
+         * The API is still refusing after the delay it asked for, or the wait
+         * was stopped. Sending the batches behind this one would only repeat
+         * the wait, so they are left alone and said to be.
+         */
+        stopped = true;
+        const attempted = controller.signal.aborted ? 'untouched' : 'failed';
+        results.push(...batch.map((target) => item(target, attempted)));
+        continue;
+      }
+
+      const status = statusOf(answer.error);
+      results.push(
+        ...batch.map((target) =>
+          item(
+            target,
+            status === 404
+              ? 'notFound'
+              : status === 409 || status === 412
+                ? 'conflict'
+                : 'failed',
+          ),
+        ),
+      );
     }
 
+    endRun();
     report(action, results);
     setBusy(false);
     onCurated?.([]);
@@ -524,6 +611,7 @@ export function CurationActions({
    */
   async function changeAlbum(value: AlbumSummary, add: boolean) {
     setBusy(true);
+    const controller = startRun();
     const action = add ? `Added to ${value.name}` : `Removed from ${value.name}`;
     const call = (
       album: AlbumSummary,
@@ -541,6 +629,7 @@ export function CurationActions({
 
     let album = value;
     let committedAny = false;
+    let stopped = false;
     const results: CurationItemResult[] = [];
     const versions: AssetSummary[] = [];
 
@@ -548,44 +637,95 @@ export function CurationActions({
       const inBatch = batch.map(
         (item) => actionable.find((target) => target.id === item.id)!,
       );
-      const outcome = (value: CurationItemResult['outcome']) =>
-        inBatch.map((target) => ({
-          id: target.id,
-          title: target.title,
-          outcome: value,
-        }));
+      const outcome = (
+        value: CurationItemResult['outcome'],
+        only?: ReadonlySet<string>,
+      ) =>
+        inBatch
+          .filter((target) => only === undefined || only.has(target.id))
+          .map((target) => ({
+            id: target.id,
+            title: target.title,
+            outcome: value,
+          }));
+
+      if (stopped) {
+        results.push(...outcome('untouched'));
+        continue;
+      }
+
       let detail;
-      try {
-        detail = (await call(album, batch)).data;
-      } catch (error) {
-        if (isStaleVersion(error)) {
-          /**
-           * `412` answers a stale `If-Match` on the album and a stale version
-           * on any asset in the batch, so both are read again before the
-           * single retry: reusing the versions in hand would fail the same
-           * way.
-           */
-          try {
-            album = (await client.getAlbum(album.id)).data.album;
-            detail = (await call(album, await refreshed(batch))).data;
-          } catch {
-            results.push(...outcome('conflict'));
-            continue;
-          }
-        } else {
-          const status = statusOf(error);
+      let unreadable: ReadonlySet<string> = new Set();
+      const first = await withThrottleRetry(
+        () => call(album, batch),
+        controller.signal,
+      );
+
+      if (first.kind === 'value') {
+        detail = first.value.data;
+      } else if (first.kind === 'throttled') {
+        stopped = true;
+        results.push(
+          ...outcome(controller.signal.aborted ? 'untouched' : 'failed'),
+        );
+        continue;
+      } else if (!isStaleVersion(first.error)) {
+        const status = statusOf(first.error);
+        results.push(...outcome(status === 404 ? 'notFound' : 'failed'));
+        continue;
+      } else {
+        /**
+         * `412` answers a stale `If-Match` on the album and a stale version on
+         * any asset in the batch, so both are read again before the single
+         * retry: reusing the versions in hand would fail the same way.
+         */
+        const reload = await withThrottleRetry(
+          () => client.getAlbum(album.id),
+          controller.signal,
+        );
+        if (reload.kind !== 'value') {
+          stopped = reload.kind === 'throttled';
           results.push(
-            ...outcome(status === 404 ? 'notFound' : 'failed'),
+            ...outcome(
+              controller.signal.aborted ? 'untouched' : 'conflict',
+            ),
           );
           continue;
         }
+
+        album = reload.value.data.album;
+        const fresh = await refreshed(batch, controller.signal);
+        unreadable = new Set(fresh.unreadable);
+        if (fresh.items.length === 0) {
+          results.push(...outcome('conflict'));
+          continue;
+        }
+
+        const retry = await withThrottleRetry(
+          () => call(album, fresh.items),
+          controller.signal,
+        );
+        if (retry.kind !== 'value') {
+          stopped = retry.kind === 'throttled';
+          results.push(
+            ...outcome(controller.signal.aborted ? 'untouched' : 'conflict'),
+          );
+          continue;
+        }
+
+        detail = retry.value.data;
       }
 
       // A batch the API took is committed, whatever a later one does.
       committedAny = true;
       album = detail.album;
-      results.push(...outcome('updated'));
-      const applied = new Set(inBatch.map((target) => target.id));
+      const applied = new Set(
+        inBatch
+          .map((target) => target.id)
+          .filter((id) => !unreadable.has(id)),
+      );
+      results.push(...outcome('updated', applied));
+      results.push(...outcome('conflict', unreadable));
       for (const item of detail.items.items) {
         if (applied.has(item.asset.id)) {
           versions.push(item.asset);
@@ -604,6 +744,7 @@ export function CurationActions({
       }));
     }
 
+    endRun();
     report(action, results);
     setBusy(false);
     if (committedAny) {
@@ -611,22 +752,56 @@ export function CurationActions({
     }
   }
 
-  /** Reads the version each asset is on now, dropping any that disappeared. */
-  async function refreshed(items: readonly VersionedAssetReference[]) {
-    const current = await Promise.all(
-      items.map(async (item) => {
-        try {
-          const asset = (await client.getAsset(item.id)).data.asset;
-          return { id: asset.id, version: asset.version };
-        } catch {
-          return undefined;
-        }
-      }),
+  /**
+   * Reads the version each asset is on now. A stale album batch can hold two
+   * hundred references, so the reads are bounded and each one follows the same
+   * rate-limit discipline as everything else: one retry after the delay the
+   * API asked for. Anything still unreadable is named, so the caller reports
+   * it rather than quietly leaving it out.
+   */
+  async function refreshed(
+    items: readonly VersionedAssetReference[],
+    signal: AbortSignal,
+  ): Promise<{
+    readonly items: readonly VersionedAssetReference[];
+    readonly unreadable: readonly string[];
+  }> {
+    const current: (VersionedAssetReference | undefined)[] = new Array(
+      items.length,
+    );
+    let next = 0;
+    const worker = async () => {
+      for (let index = next++; index < items.length; index = next++) {
+        const item = items[index]!;
+        const answer = await withThrottleRetry(
+          () => client.getAsset(item.id),
+          signal,
+        );
+        current[index] =
+          answer.kind === 'value'
+            ? {
+                id: answer.value.data.asset.id,
+                version: answer.value.data.asset.version,
+              }
+            : undefined;
+      }
+    };
+
+    await Promise.all(
+      Array.from(
+        { length: Math.min(concurrentVersionReads, items.length) },
+        worker,
+      ),
     );
 
-    return current.filter(
-      (item): item is VersionedAssetReference => item !== undefined,
-    );
+    return {
+      items: current.filter(
+        (item): item is VersionedAssetReference => item !== undefined,
+      ),
+      unreadable: items
+        .filter((_, index) => current[index] === undefined)
+        .map((item) => item.id),
+    };
   }
 
   /**
@@ -793,6 +968,28 @@ export function CurationActions({
 
   const reportNode = (
     <div className={styles.report}>
+      {waitingSeconds === undefined ? null : (
+        <div className={styles.waiting}>
+          <p
+            aria-label="Curation progress"
+            aria-live="polite"
+            className={styles.summary}
+            data-tone="warning"
+            role="status"
+          >
+            {`Waiting ${
+              waitingSeconds === 1 ? '1 second' : `${waitingSeconds} seconds`
+            } because the server asked Vistara to slow down.`}
+          </p>
+          <button
+            className={styles.action}
+            onClick={() => stopWaiting.current?.abort()}
+            type="button"
+          >
+            Stop waiting
+          </button>
+        </div>
+      )}
       <p
         aria-label="Curation result"
         aria-live="polite"

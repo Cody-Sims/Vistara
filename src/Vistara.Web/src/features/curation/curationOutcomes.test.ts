@@ -102,10 +102,26 @@ describe('curation outcomes', () => {
     expect(summary.tone).toBe('warning');
   });
 
+  it('accounts for the images a stopped run never reached', () => {
+    const summary = summarizeCuration('Added to favorites', [
+      result('a', 'queued'),
+      result('b', 'failed'),
+      result('c', 'untouched'),
+      result('d', 'untouched'),
+    ]);
+
+    expect(summary.message).toBe(
+      'Added to favorites: 1 image queued. 1 image could not be updated. ' +
+        '2 images were left untouched.',
+    );
+    expect(summary.tone).toBe('warning');
+  });
+
   it('describes each outcome for the per-image list', () => {
     expect(describeOutcome('updated')).toBe('Done');
     expect(describeOutcome('refreshed')).toBe('Done after a refresh');
     expect(describeOutcome('queued')).toBe('Queued');
+    expect(describeOutcome('untouched')).toBe('Not attempted');
     expect(describeOutcome('unchanged')).toBe('Already in that state');
     expect(describeOutcome('conflict')).toBe('Changed elsewhere');
     expect(describeOutcome('notFound')).toBe('No longer available');

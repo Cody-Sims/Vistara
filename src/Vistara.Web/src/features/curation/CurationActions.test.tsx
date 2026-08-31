@@ -54,6 +54,17 @@ function detail(value: AssetSummary) {
   };
 }
 
+function throttledError(seconds: number) {
+  return new VistaraApiError(429, {
+    type: 'about:blank',
+    title: 'rate_limited',
+    status: 429,
+    code: 'rate_limited',
+    errors: {},
+    retryAfterSeconds: seconds,
+  } as never);
+}
+
 function apiError(status: number) {
   return new VistaraApiError(status, {
     type: 'about:blank',
@@ -120,7 +131,7 @@ function renderActions(
     canCurate?: boolean;
     onCurated?: () => void;
     onTrashed?: (ids: readonly string[]) => void;
-    wait?: (milliseconds: number) => Promise<void>;
+    wait?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
   } = {},
 ) {
   const client = options.client ?? makeClient();
@@ -803,22 +814,14 @@ describe('curation actions', () => {
     );
   });
 
-  it('gives up on a batch the API keeps refusing without retrying it again', async () => {
+  it('retries a refused batch once and no more', async () => {
     const many = Array.from({ length: 250 }, (_, index) =>
       asset({ id: `asset-${index}`, title: `Image ${index}` }),
     );
-    const throttled = new VistaraApiError(429, {
-      type: 'about:blank',
-      title: 'rate_limited',
-      status: 429,
-      code: 'rate_limited',
-      errors: {},
-      retryAfterSeconds: 1,
-    } as never);
     const bulkMutateAssets = vi
       .fn()
-      .mockRejectedValueOnce(throttled)
-      .mockRejectedValueOnce(throttled)
+      .mockRejectedValueOnce(throttledError(1))
+      .mockRejectedValueOnce(throttledError(1))
       .mockResolvedValue({
         data: {
           jobId: 'job-1',
@@ -835,12 +838,148 @@ describe('curation actions', () => {
 
     await user.click(screen.getByRole('button', { name: 'Favorite' }));
 
-    await waitFor(() => expect(bulkMutateAssets).toHaveBeenCalledTimes(3));
     await waitFor(() =>
       expect(
         screen.getByRole('status', { name: 'Curation result' }),
       ).toHaveTextContent(
-        'Added to favorites: 50 images queued. 200 images could not be updated.',
+        'Added to favorites: no images. 200 images could not be updated. ' +
+          '50 images were left untouched.',
+      ),
+    );
+    // One attempt and one retry, then nothing else is sent.
+    expect(bulkMutateAssets).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops the batches that follow one the API keeps refusing', async () => {
+    const many = Array.from({ length: 450 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}` }),
+    );
+    const accepted = {
+      data: {
+        jobId: 'job-1',
+        state: 'queued',
+        submittedCount: 200,
+        submittedAt: '2026-01-01T00:00:00Z',
+      },
+    };
+    const bulkMutateAssets = vi
+      .fn()
+      .mockResolvedValueOnce(accepted)
+      .mockRejectedValueOnce(throttledError(2))
+      .mockRejectedValueOnce(throttledError(2))
+      .mockResolvedValue(accepted);
+    const { user } = renderActions({
+      assets: many,
+      client: makeClient({ bulkMutateAssets }),
+      wait: async () => undefined,
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Favorite' }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent(
+        'Added to favorites: 200 images queued. ' +
+          '200 images could not be updated. ' +
+          '50 images were left untouched.',
+      ),
+    );
+    // The third batch was never sent.
+    expect(bulkMutateAssets).toHaveBeenCalledTimes(3);
+  });
+
+  it('can be told to stop waiting out a rate limit', async () => {
+    const many = Array.from({ length: 450 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}` }),
+    );
+    const bulkMutateAssets = vi.fn().mockRejectedValue(throttledError(30));
+    const { user } = renderActions({
+      assets: many,
+      client: makeClient({ bulkMutateAssets }),
+      // Only an abort ends this wait.
+      wait: (_milliseconds: number, signal: AbortSignal) =>
+        new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve());
+        }),
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Favorite' }));
+
+    const cancel = await screen.findByRole('button', {
+      name: 'Stop waiting',
+    });
+    expect(screen.getByRole('status', { name: 'Curation progress' })).toHaveTextContent(
+      'Waiting 30 seconds because the server asked Vistara to slow down.',
+    );
+    await user.click(cancel);
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent(
+        'Added to favorites: no images. 450 images were left untouched.',
+      ),
+    );
+    expect(bulkMutateAssets).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByRole('button', { name: 'Stop waiting' }),
+    ).toBeNull();
+  });
+
+  it('reads stale album versions a few at a time and respects a rate limit', async () => {
+    const many = Array.from({ length: 200 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}`, version: 3 }),
+    );
+    const addAlbumItems = vi
+      .fn()
+      .mockRejectedValueOnce(apiError(412))
+      .mockResolvedValue({
+        data: { album: { ...album, version: 9 }, items: { items: [] } },
+      });
+    let inFlight = 0;
+    let peak = 0;
+    let refusals = 0;
+    const getAsset = vi.fn(async (id: string) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight -= 1;
+      if (id === 'asset-5') {
+        refusals += 1;
+        throw throttledError(3);
+      }
+
+      return detail(asset({ id, version: 11 }));
+    });
+    const waits: number[] = [];
+    const { user } = renderActions({
+      assets: many,
+      client: makeClient({ addAlbumItems, getAsset }),
+      wait: async (milliseconds: number) => {
+        waits.push(milliseconds);
+      },
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Albums' }));
+    const panel = await screen.findByRole('group', { name: 'Albums' });
+    await user.click(within(panel).getByRole('button', { name: 'Add to Summer' }));
+
+    await waitFor(() => expect(addAlbumItems).toHaveBeenCalledTimes(2));
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(4);
+    // The refused read was retried once, after the delay it asked for.
+    expect(refusals).toBe(2);
+    expect(waits).toEqual([3000]);
+    const retry = (addAlbumItems.mock.calls[1] as unknown[])[1] as {
+      items: readonly unknown[];
+    };
+    expect(retry.items).toHaveLength(199);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent(
+        'Added to Summer: 199 images. 1 image changed elsewhere and was left alone.',
       ),
     );
   });

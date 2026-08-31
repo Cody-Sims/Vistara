@@ -7,7 +7,9 @@ export type CurationOutcome =
   | 'unchanged'
   | 'conflict'
   | 'notFound'
-  | 'failed';
+  | 'failed'
+  /** Never attempted, because the run stopped before reaching it. */
+  | 'untouched';
 
 export interface CurationItemResult {
   readonly id: string;
@@ -33,6 +35,8 @@ export function describeOutcome(outcome: CurationOutcome): string {
       return 'Done after a refresh';
     case 'queued':
       return 'Queued';
+    case 'untouched':
+      return 'Not attempted';
     case 'unchanged':
       return 'Already in that state';
     case 'conflict':
@@ -104,12 +108,17 @@ export function summarizeCuration(
     parts.push(`${images(failed)} could not be updated.`);
   }
 
+  const untouched = count('untouched');
+  if (untouched > 0) {
+    parts.push(`${images(untouched)} ${were(untouched)} left untouched.`);
+  }
+
   return {
     message: parts.join(' '),
     tone:
       done + queued === 0 && results.length > 0
         ? 'danger'
-        : conflict + missing + failed + unchanged > 0
+        : conflict + missing + failed + unchanged + untouched > 0
           ? 'warning'
           : 'success',
   };
