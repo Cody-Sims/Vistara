@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Text;
@@ -29,6 +30,22 @@ namespace Vistara.IntegrationTests.Auth.Cookies;
 public sealed class CookieSessionRuntimeTests
 {
     private const string Password = "correct-horse-battery-staple";
+
+    /// <summary>
+    /// The canonical base64url encoding of thirty-two zero bytes. It satisfies
+    /// the session token format exactly, so nothing but a routing miss can
+    /// reject it, and no issued session can ever carry it.
+    /// </summary>
+    private const string UnroutedSessionToken =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    /// <summary>
+    /// Forty-three base64url characters that are not the canonical encoding of
+    /// any thirty-two byte value: the final character carries bits that a
+    /// canonical encoding leaves clear.
+    /// </summary>
+    private const string NoncanonicalSessionToken =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     [Fact]
     public async Task Cookie_issued_by_login_authenticates_the_next_request()
@@ -82,22 +99,81 @@ public sealed class CookieSessionRuntimeTests
         Assert.Equal(0, await host.CountRevokedSessionsAsync());
     }
 
+    /// <summary>
+    /// A well-formed token that owns no routing row must be rejected by the
+    /// routing lookup itself, not by the format gate. The executed SQL is
+    /// captured to prove the tenant routing table really was consulted and
+    /// that the miss stopped the request before any session row was read.
+    /// </summary>
     [Fact]
-    public async Task Cookie_authentication_rejects_an_unknown_session_token()
+    public async Task Cookie_authentication_rejects_a_well_formed_token_that_owns_no_route()
+    {
+        await using CookieRuntimeHost host = await CookieRuntimeHost.CreateAsync();
+        await host.ProvisionAsync("repro-workspace", "repro.owner@vistara.invalid");
+        string cookie = await host.LoginAsync("repro.owner@vistara.invalid");
+        Assert.Equal(1, await host.CountCookieSessionRoutesAsync());
+
+        host.ClearExecutedSql();
+        TestResponse unrouted = await host.SendAsync(
+            "GET",
+            "/api/v1/me",
+            UnroutedSessionToken);
+        IReadOnlyList<string> executed = host.ExecutedSql();
+        TestResponse live = await host.SendAsync("GET", "/api/v1/me", cookie);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, unrouted.StatusCode);
+        Assert.Equal("cookie_auth.invalid_session", unrouted.ProblemCode());
+        Assert.Contains(
+            executed,
+            statement =>
+                statement.Contains("authentication_routes", StringComparison.Ordinal) &&
+                statement.Contains("lookup_digest", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            executed,
+            statement => statement.Contains("cookie_sessions", StringComparison.Ordinal));
+        Assert.Equal(HttpStatusCode.OK, live.StatusCode);
+        Assert.Equal(1, await host.CountLiveSessionsAsync());
+        Assert.Equal(0, await host.CountRevokedSessionsAsync());
+        Assert.Equal(1, await host.CountCookieSessionRoutesAsync());
+    }
+
+    /// <summary>
+    /// A token that is not a canonical session token must be refused by the
+    /// format gate, so a caller cannot probe the tenant routing table with
+    /// arbitrary cookie values.
+    /// </summary>
+    [Theory]
+    [InlineData(NoncanonicalSessionToken)]
+    [InlineData("short-token")]
+    [InlineData("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.")]
+    public async Task Cookie_authentication_rejects_a_malformed_token_without_routing(
+        string malformedToken)
     {
         await using CookieRuntimeHost host = await CookieRuntimeHost.CreateAsync();
         await host.ProvisionAsync("repro-workspace", "repro.owner@vistara.invalid");
         string cookie = await host.LoginAsync("repro.owner@vistara.invalid");
 
-        TestResponse forged = await host.SendAsync(
+        host.ClearExecutedSql();
+        TestResponse malformed = await host.SendAsync(
             "GET",
             "/api/v1/me",
-            new string('a', 43));
+            malformedToken);
+        IReadOnlyList<string> executed = host.ExecutedSql();
         TestResponse live = await host.SendAsync("GET", "/api/v1/me", cookie);
 
-        Assert.Equal(HttpStatusCode.Unauthorized, forged.StatusCode);
-        Assert.Equal("cookie_auth.invalid_session", forged.ProblemCode());
+        Assert.Equal(HttpStatusCode.Unauthorized, malformed.StatusCode);
+        Assert.Equal("cookie_auth.invalid_session", malformed.ProblemCode());
+        Assert.NotEmpty(executed);
+        Assert.DoesNotContain(
+            executed,
+            statement =>
+                statement.Contains("authentication_routes", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            executed,
+            statement => statement.Contains("cookie_sessions", StringComparison.Ordinal));
         Assert.Equal(HttpStatusCode.OK, live.StatusCode);
+        Assert.Equal(1, await host.CountLiveSessionsAsync());
+        Assert.Equal(0, await host.CountRevokedSessionsAsync());
     }
 
     [Fact]
@@ -189,21 +265,27 @@ public sealed class CookieSessionRuntimeTests
     /// </summary>
     private sealed class CookieRuntimeHost : IAsyncDisposable
     {
+        private const string CommandCategory =
+            "Microsoft.EntityFrameworkCore.Database.Command";
+
         private readonly SqliteConnection _anchor;
         private readonly WebApplication _app;
         private readonly RequestDelegate _pipeline;
         private readonly string _connectionString;
+        private readonly ExecutedSqlRecorder _sql;
 
         private CookieRuntimeHost(
             SqliteConnection anchor,
             WebApplication app,
             RequestDelegate pipeline,
-            string connectionString)
+            string connectionString,
+            ExecutedSqlRecorder sql)
         {
             _anchor = anchor;
             _app = app;
             _pipeline = pipeline;
             _connectionString = connectionString;
+            _sql = sql;
         }
 
         internal static async Task<CookieRuntimeHost> CreateAsync()
@@ -223,6 +305,7 @@ public sealed class CookieSessionRuntimeTests
                     CancellationToken.None);
             }
 
+            var sql = new ExecutedSqlRecorder();
             WebApplicationBuilder builder = WebApplication.CreateBuilder();
             builder.Configuration.Sources.Clear();
             builder.Configuration.AddInMemoryCollection(
@@ -233,6 +316,8 @@ public sealed class CookieSessionRuntimeTests
                 });
             builder.Logging.ClearProviders();
             builder.Logging.SetMinimumLevel(LogLevel.Warning);
+            builder.Logging.AddProvider(sql);
+            builder.Logging.AddFilter(CommandCategory, LogLevel.Information);
             builder.Services.AddVistaraApiRuntime(builder.Configuration);
             builder.Services.AddVistaraApiPlatform(builder.Configuration);
             builder.Services.AddVistaraApiPersistence(builder.Configuration);
@@ -242,8 +327,13 @@ public sealed class CookieSessionRuntimeTests
             app.UseVistaraPlatform();
             app.MapVistaraPlatformSurface();
             RequestDelegate pipeline = ((IApplicationBuilder)app).Build();
-            return new CookieRuntimeHost(anchor, app, pipeline, connectionString);
+            return new CookieRuntimeHost(anchor, app, pipeline, connectionString, sql);
         }
+
+        /// <summary>Every statement the host has run since the last clear.</summary>
+        internal IReadOnlyList<string> ExecutedSql() => _sql.Statements;
+
+        internal void ClearExecutedSql() => _sql.Clear();
 
         internal async Task<Guid> ProvisionAsync(string slug, string email)
         {
@@ -351,6 +441,12 @@ public sealed class CookieSessionRuntimeTests
             CountAsync(
                 "SELECT COUNT(*) FROM cookie_sessions WHERE revoked_at_utc IS NOT NULL");
 
+        /// <summary>Counts the tenant routing rows that browser sessions own.</summary>
+        internal Task<int> CountCookieSessionRoutesAsync() =>
+            CountAsync(
+                "SELECT COUNT(*) FROM authentication_routes " +
+                "WHERE kind = 'CookieSession'");
+
         internal Task<TestResponse> PostJsonAsync(
             string path,
             string body,
@@ -433,6 +529,46 @@ public sealed class CookieSessionRuntimeTests
         {
             await _app.DisposeAsync();
             await _anchor.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Records the SQL the host actually executes, so a test can prove which
+    /// tables a request read rather than inferring it from the status code.
+    /// </summary>
+    private sealed class ExecutedSqlRecorder : ILoggerProvider
+    {
+        private readonly ConcurrentQueue<string> _statements = new();
+
+        internal IReadOnlyList<string> Statements => [.. _statements];
+
+        internal void Clear() => _statements.Clear();
+
+        public ILogger CreateLogger(string categoryName) =>
+            new RecordingLogger(_statements);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class RecordingLogger(ConcurrentQueue<string> statements)
+            : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception? exception,
+                Func<TState, Exception?, string> formatter)
+            {
+                ArgumentNullException.ThrowIfNull(formatter);
+                statements.Enqueue(formatter(state, exception));
+            }
         }
     }
 
