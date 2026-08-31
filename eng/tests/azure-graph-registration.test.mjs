@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { parse as parseYaml } from 'yaml';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(HERE, '../..');
@@ -12,12 +13,25 @@ const FIXTURES = resolve(HERE, 'fixtures/azure-graph-registration');
 const MODULE_PATH = resolve(REPOSITORY_ROOT, 'deploy/azure/infra/entra/app-registration.bicep');
 const BICEP_CONFIG_PATH = resolve(REPOSITORY_ROOT, 'deploy/azure/bicepconfig.json');
 const BUILD_FIXTURE_PATH = resolve(FIXTURES, 'app-registration.build.json');
+const WORKFLOW_PATH = resolve(REPOSITORY_ROOT, '.github/workflows/repository-tooling.yml');
+const RELEASE_RUNBOOK_PATH = resolve(REPOSITORY_ROOT, 'docs/operations/release-runbook.md');
 
 const MODULE_SOURCE = readFileSync(MODULE_PATH, 'utf8');
 const BICEP_CONFIG = JSON.parse(readFileSync(BICEP_CONFIG_PATH, 'utf8'));
 const TEMPLATE = JSON.parse(readFileSync(BUILD_FIXTURE_PATH, 'utf8'));
 const GRAPH_PERMISSIONS = JSON.parse(readFileSync(resolve(FIXTURES, 'microsoft-graph-delegated-permissions.json'), 'utf8'));
 const HOSTED_ROUTES = JSON.parse(readFileSync(resolve(FIXTURES, 'hosted-oidc-routes.json'), 'utf8'));
+const WORKFLOW_SOURCE = readFileSync(WORKFLOW_PATH, 'utf8');
+const WORKFLOW = parseYaml(WORKFLOW_SOURCE);
+const RELEASE_RUNBOOK = readFileSync(RELEASE_RUNBOOK_PATH, 'utf8');
+
+const WORKFLOW_NAME = 'Repository tooling';
+const VALIDATOR_STEP = 'Test repository validators';
+const BICEP_STEP = 'Install Bicep';
+const BICEP_CLI_ENV = 'VISTARA_BICEP_CLI';
+const AZURE_PATH_FILTER = 'deploy/azure/**';
+// `CI` is set to the string `true` by GitHub Actions on every runner.
+const RUNNING_IN_CI = process.env.CI === 'true' || process.env.CI === '1';
 
 const GRAPH_EXTENSION_ALIAS = 'microsoftGraphV1';
 const GRAPH_EXTENSION_REFERENCE = 'br:mcr.microsoft.com/bicep/extensions/microsoftgraph/v1.0:1.0.0';
@@ -265,22 +279,19 @@ function resolveBicepCli() {
 }
 
 const BICEP_CLI = resolveBicepCli();
-const BICEP_SKIP = 'no Bicep CLI found; set VISTARA_BICEP_CLI (see eng/tests/fixtures/azure-graph-registration/README.md)';
+const BICEP_SKIP = `no Bicep CLI found; set ${BICEP_CLI_ENV} (see eng/tests/fixtures/azure-graph-registration/README.md)`;
 
-function withoutGenerator(template) {
-  const { metadata, ...rest } = template;
-  const { _generator, ...remainingMetadata } = metadata ?? {};
-  return Object.keys(remainingMetadata).length > 0 ? { ...rest, metadata: remainingMetadata } : rest;
-}
-
-// ---------------------------------------------------------------------------
-// Bicep CLI: build, lint, and fixture drift.
-// ---------------------------------------------------------------------------
-
-test('the Bicep CLI builds the module and the committed template matches', (t) => {
+/**
+ * Resolves the Bicep CLI or fails the calling test. Under CI the CLI is a hard
+ * requirement — `.github/workflows/repository-tooling.yml` installs the pinned
+ * version and exports `VISTARA_BICEP_CLI`, so a missing or mismatched CLI means
+ * the gate broke, not that it is unavailable.
+ */
+function requireBicepCli(t) {
   if (!BICEP_CLI) {
+    assert.ok(!RUNNING_IN_CI, `${BICEP_SKIP}. CI must never skip the Bicep gate.`);
     t.skip(BICEP_SKIP);
-    return;
+    return null;
   }
 
   const version = spawnSync(BICEP_CLI, ['--version'], { encoding: 'utf8' });
@@ -294,7 +305,34 @@ test('the Bicep CLI builds the module and the committed template matches', (t) =
   const pinned = pinnedMajor * 1e6 + pinnedMinor * 1e3 + pinnedPatch;
   assert.ok(ordered >= pinned, `Bicep ${PINNED_BICEP_VERSION} or newer is required, found ${parsed[0]}`);
 
-  const build = spawnSync(BICEP_CLI, ['build', '--stdout', MODULE_PATH], { encoding: 'utf8', cwd: REPOSITORY_ROOT });
+  if (RUNNING_IN_CI) {
+    assert.equal(
+      parsed[0],
+      PINNED_BICEP_VERSION,
+      `CI must run the pinned Bicep ${PINNED_BICEP_VERSION}; the workflow installs it and the committed template is built with it`,
+    );
+  }
+
+  return BICEP_CLI;
+}
+
+function withoutGenerator(template) {
+  const { metadata, ...rest } = template;
+  const { _generator, ...remainingMetadata } = metadata ?? {};
+  return Object.keys(remainingMetadata).length > 0 ? { ...rest, metadata: remainingMetadata } : rest;
+}
+
+// ---------------------------------------------------------------------------
+// Bicep CLI: build, lint, and fixture drift.
+// ---------------------------------------------------------------------------
+
+test('the Bicep CLI builds the module and the committed template matches', (t) => {
+  const cli = requireBicepCli(t);
+  if (!cli) {
+    return;
+  }
+
+  const build = spawnSync(cli, ['build', '--stdout', MODULE_PATH], { encoding: 'utf8', cwd: REPOSITORY_ROOT });
   assert.equal(build.status, 0, `bicep build failed:\n${build.stderr}`);
   assert.equal(build.stderr.trim(), '', `bicep build emitted diagnostics:\n${build.stderr}`);
 
@@ -306,14 +344,30 @@ test('the Bicep CLI builds the module and the committed template matches', (t) =
 });
 
 test('the Bicep CLI lints the module with no diagnostics', (t) => {
-  if (!BICEP_CLI) {
-    t.skip(BICEP_SKIP);
+  const cli = requireBicepCli(t);
+  if (!cli) {
     return;
   }
 
-  const lint = spawnSync(BICEP_CLI, ['lint', MODULE_PATH], { encoding: 'utf8', cwd: REPOSITORY_ROOT });
+  const lint = spawnSync(cli, ['lint', MODULE_PATH], { encoding: 'utf8', cwd: REPOSITORY_ROOT });
   assert.equal(lint.status, 0, `bicep lint failed:\n${lint.stdout}${lint.stderr}`);
   assert.equal(`${lint.stdout}${lint.stderr}`.trim(), '', 'bicep lint must report nothing');
+});
+
+test('the Bicep gate cannot silently skip under CI', () => {
+  if (RUNNING_IN_CI) {
+    assert.ok(BICEP_CLI, `${BICEP_SKIP}. CI must never skip the Bicep gate.`);
+    assert.ok(
+      process.env[BICEP_CLI_ENV],
+      `${BICEP_CLI_ENV} must be exported by the '${BICEP_STEP}' step before the validators run`,
+    );
+    return;
+  }
+
+  // Outside CI the skip is allowed, so assert the escape hatch names the
+  // variable the workflow exports and that resolution is deterministic.
+  assert.ok(BICEP_SKIP.includes(BICEP_CLI_ENV));
+  assert.equal(resolveBicepCli(), BICEP_CLI, 'CLI resolution must be deterministic');
 });
 
 test('the committed template was produced by the pinned Bicep version', () => {
@@ -700,4 +754,158 @@ test('the module documents why replacing the reply-URL list is safe', () => {
   const header = MODULE_SOURCE.slice(0, MODULE_SOURCE.indexOf('targetScope'));
   assert.match(header, /Redirect-list ownership/);
   assert.match(header, /scope-discriminated/);
+});
+
+// ---------------------------------------------------------------------------
+// CI wiring: `.github/workflows/repository-tooling.yml`.
+// ---------------------------------------------------------------------------
+
+/** Matches a GitHub Actions path filter against a repository-relative path. */
+function pathFilterMatches(filter, path) {
+  const pattern = filter
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    // `**/` spans zero or more directories; a bare `**` spans any characters.
+    .replaceAll('**/', '\u0000')
+    .replaceAll('**', '\u0001')
+    .replace(/\*/g, '[^/]*')
+    .replaceAll('\u0000', '(?:.*/)?')
+    .replaceAll('\u0001', '.*');
+  return new RegExp(`^${pattern}$`).test(path);
+}
+
+function triggers(path) {
+  const push = WORKFLOW.on.push.paths.some((filter) => pathFilterMatches(filter, path));
+  const pullRequest = WORKFLOW.on.pull_request.paths.some((filter) => pathFilterMatches(filter, path));
+  assert.equal(push, pullRequest, `push and pull_request filters disagree about ${path}`);
+  return push;
+}
+
+function workflowSteps() {
+  return WORKFLOW.jobs.validate.steps;
+}
+
+test('the path filter helper matches GitHub Actions semantics', () => {
+  // Guards the assertions below against a permissive matcher.
+  assert.equal(pathFilterMatches('deploy/azure/**', 'deploy/azure/bicepconfig.json'), true);
+  assert.equal(pathFilterMatches('deploy/azure/**', 'deploy/azure/infra/entra/app-registration.bicep'), true);
+  assert.equal(pathFilterMatches('deploy/azure/**', 'deploy/compose.postgres.yml'), false);
+  assert.equal(pathFilterMatches('deploy/azure/**', 'deployment/azure/thing.bicep'), false);
+  assert.equal(pathFilterMatches('**/AGENTS.md', 'src/AGENTS.md'), true);
+  assert.equal(pathFilterMatches('**/AGENTS.md', 'AGENTS.md'), true);
+  assert.equal(pathFilterMatches('eng/**', 'eng/tests/azure-graph-registration.test.mjs'), true);
+  assert.equal(pathFilterMatches('eng/**', 'engine/thing.mjs'), false);
+});
+
+test('changes under deploy/azure trigger the repository tooling workflow', () => {
+  assert.equal(WORKFLOW.name, WORKFLOW_NAME);
+
+  for (const changed of [
+    'deploy/azure/bicepconfig.json',
+    'deploy/azure/infra/entra/app-registration.bicep',
+    'deploy/azure/infra/main.bicep',
+    'deploy/azure/azure.yaml',
+    'eng/tests/azure-graph-registration.test.mjs',
+    'eng/tests/fixtures/azure-graph-registration/app-registration.build.json',
+    '.github/workflows/repository-tooling.yml',
+  ]) {
+    assert.equal(triggers(changed), true, `${changed} must trigger ${WORKFLOW_NAME}`);
+  }
+});
+
+test('the Azure path filter stays scoped to deploy/azure', () => {
+  for (const paths of [WORKFLOW.on.push.paths, WORKFLOW.on.pull_request.paths]) {
+    assert.ok(paths.includes(AZURE_PATH_FILTER), `the filter list must include ${AZURE_PATH_FILTER}`);
+    for (const filter of paths) {
+      assert.ok(
+        !/^deploy\/(\*|\*\*)/.test(filter),
+        `'${filter}' is broader than ${AZURE_PATH_FILTER}; the Compose topologies are gated by deployment-gates.yml`,
+      );
+    }
+  }
+
+  // Compose and container changes must not pull this job in.
+  for (const changed of [
+    'deploy/compose.postgres.yml',
+    'deploy/containers/api.Dockerfile',
+    'deploy/nginx/vistara.conf',
+    'src/Vistara.Api/Program.cs',
+  ]) {
+    assert.equal(triggers(changed), false, `${changed} must not trigger ${WORKFLOW_NAME}`);
+  }
+});
+
+test('the push and pull request filters are identical', () => {
+  assert.deepEqual(WORKFLOW.on.push.paths, WORKFLOW.on.pull_request.paths);
+  assert.deepEqual(WORKFLOW.on.push.branches, ['main']);
+});
+
+test('the workflow installs the pinned Bicep and exports the CLI before the validators run', () => {
+  const steps = workflowSteps();
+  const bicepIndex = steps.findIndex((step) => step.name === BICEP_STEP);
+  const validatorIndex = steps.findIndex((step) => step.name === VALIDATOR_STEP);
+
+  assert.ok(bicepIndex >= 0, `the workflow must have an '${BICEP_STEP}' step`);
+  assert.ok(validatorIndex >= 0, `the workflow must have a '${VALIDATOR_STEP}' step`);
+  assert.ok(bicepIndex < validatorIndex, `'${BICEP_STEP}' must run before '${VALIDATOR_STEP}'`);
+
+  const install = steps[bicepIndex];
+  assert.equal(install.env.BICEP_VERSION, PINNED_BICEP_VERSION, 'the workflow must install the pinned Bicep');
+  assert.match(install.env.BICEP_SHA256, /^[0-9a-f]{64}$/, 'the download must be checksum verified');
+  assert.match(install.run, /set -euo pipefail/, 'the install script must fail fast');
+  assert.match(install.run, /sha256sum --check/, 'the download must be checksum verified');
+  assert.ok(
+    install.run.includes('"https://github.com/Azure/bicep/releases/download/v${BICEP_VERSION}/bicep-linux-x64"'),
+    'the download URL must be exactly the pinned linux-x64 asset for the version in env',
+  );
+  assert.match(install.run, /--proto '=https' --tlsv1\.2/, 'the download must be HTTPS only');
+  assert.ok(
+    install.run.includes(`"$binary" --version | grep --fixed-strings "Bicep CLI version \${BICEP_VERSION} "`),
+    'the installed CLI version must be verified, not assumed',
+  );
+  assert.ok(
+    install.run.includes(`echo "${BICEP_CLI_ENV}=$binary" >> "$GITHUB_ENV"`),
+    `${BICEP_CLI_ENV} must be exported to the job environment`,
+  );
+
+  assert.equal(steps[validatorIndex].run, 'node --test eng/tests/*.test.mjs');
+});
+
+test('the workflow keeps its security posture while gaining the Bicep step', () => {
+  assert.deepEqual(WORKFLOW.permissions, { contents: 'read' });
+  assert.deepEqual(WORKFLOW.jobs.validate.permissions, { contents: 'read' });
+  assert.ok(Number.isInteger(WORKFLOW.jobs.validate['timeout-minutes']));
+  assert.ok(WORKFLOW.concurrency?.group);
+
+  for (const step of workflowSteps()) {
+    if (step.uses) {
+      assert.match(step.uses, /@[0-9a-f]{40}$/, `${step.name} must pin its action to a commit SHA`);
+    }
+    assert.ok(!('secrets' in (step.env ?? {})), `${step.name} must not consume secrets`);
+  }
+});
+
+test('the workflow documents its filters and stays advisory', () => {
+  const header = WORKFLOW_SOURCE.slice(0, WORKFLOW_SOURCE.indexOf('\non:'));
+
+  for (const filter of WORKFLOW.on.pull_request.paths) {
+    assert.ok(header.includes(filter), `the header must document the '${filter}' filter`);
+  }
+  assert.match(header, /path filtered/i);
+  assert.match(header, /advisory/i);
+  assert.match(header, /Do not add it to branch protection/);
+  assert.ok(header.includes('deployment-gates.yml'), 'the header must say what covers the rest of deploy/**');
+  assert.ok(header.includes('docs/operations/release-runbook.md'), 'the header must point at the branch-protection table');
+
+  // The runbook guidance this workflow depends on must survive.
+  const doNotRequire = RELEASE_RUNBOOK.slice(RELEASE_RUNBOOK.indexOf('Do not mark these as required'));
+  assert.ok(doNotRequire.length > 0, 'the runbook must keep its do-not-require list');
+  assert.ok(
+    doNotRequire.includes('`Validate repository tooling` (`repository-tooling.yml`)'),
+    'the runbook must keep repository-tooling out of branch protection while it is path filtered',
+  );
+  assert.equal(
+    WORKFLOW.jobs.validate.name,
+    'Validate repository tooling',
+    'renaming the job silently retires the runbook entry',
+  );
 });

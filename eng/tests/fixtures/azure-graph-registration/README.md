@@ -13,12 +13,22 @@ verifies `deploy/azure/infra/entra/app-registration.bicep` (HB-09).
 
 The test resolves a Bicep CLI from `$VISTARA_BICEP_CLI`, then `bicep` on `PATH`.
 When one is found it rebuilds and re-lints the module and fails on any drift
-from `app-registration.build.json`; when none is found those two checks report
-as skipped and every other assertion still runs against the committed build.
+from `app-registration.build.json`; when none is found those checks report as
+skipped and every other assertion still runs against the committed build.
+
+That skip is local-only. When `CI` is set the build, lint, and gate tests fail
+instead of skipping if no CLI is found or if its version is not the pinned
+`0.46.1`. `.github/workflows/repository-tooling.yml` installs that exact
+version, verifies its checksum and reported version, and exports
+`VISTARA_BICEP_CLI` before the validator suite runs, and the workflow is
+triggered by `deploy/azure/**` on both push and pull request.
 
 ```bash
 # Full run, including the Bicep 0.46.1 build, lint, and drift checks.
 VISTARA_BICEP_CLI="$(command -v bicep)" node --test eng/tests/azure-graph-registration.test.mjs
+
+# Exactly what CI runs.
+CI=true VISTARA_BICEP_CLI="$(command -v bicep)" node --test eng/tests/azure-graph-registration.test.mjs
 
 # Fixture-only run, no Bicep CLI and no network required.
 node --test eng/tests/azure-graph-registration.test.mjs

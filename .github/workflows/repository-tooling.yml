@@ -1,5 +1,19 @@
 name: Repository tooling
 
+# Path filters, kept identical on push and pull_request:
+#   .github/**, .shadow/**, eng/**, AGENTS.md, **/AGENTS.md, package.json,
+#   package-lock.json, deploy/azure/**
+#
+# `deploy/azure/**` is scoped deliberately: only the Azure hosted-bootstrap
+# infrastructure is verified here (`eng/tests/azure-graph-registration.test.mjs`
+# builds and lints the Bicep). The Compose topologies under the rest of
+# `deploy/**` are gated by `deployment-gates.yml`, so a broader `deploy/**`
+# filter would run this job for changes it does not check.
+#
+# Because this workflow is path filtered it reports nothing on unrelated pull
+# requests and must stay advisory. Do not add it to branch protection; see the
+# branch-protection table in `docs/operations/release-runbook.md`.
+
 on:
   workflow_dispatch:
   push:
@@ -13,6 +27,7 @@ on:
       - "**/AGENTS.md"
       - package.json
       - package-lock.json
+      - deploy/azure/**
   pull_request:
     paths:
       - .github/**
@@ -22,6 +37,7 @@ on:
       - "**/AGENTS.md"
       - package.json
       - package-lock.json
+      - deploy/azure/**
 
 permissions:
   contents: read
@@ -59,6 +75,30 @@ jobs:
 
       - name: Validate agent workflows
         run: node eng/validate-agent-workflows.mjs
+
+      # `eng/tests/azure-graph-registration.test.mjs` builds and lints
+      # `deploy/azure/infra/entra/app-registration.bicep` against the pinned
+      # Microsoft Graph Bicep extension. It refuses to skip that gate when
+      # `CI` is set, so this step must run before the validator suite and must
+      # export `VISTARA_BICEP_CLI`.
+      - name: Install Bicep
+        env:
+          BICEP_VERSION: 0.46.1
+          BICEP_SHA256: 3e011d629ea4311b7a7dd8f0040ab2b1a072ea4ff5d02cb75e0e55a9a6703fb9
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary_directory="$RUNNER_TEMP/bicep"
+          binary="$binary_directory/bicep"
+          mkdir -p "$binary_directory"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            --output "$binary" \
+            "https://github.com/Azure/bicep/releases/download/v${BICEP_VERSION}/bicep-linux-x64"
+          echo "${BICEP_SHA256}  ${binary}" | sha256sum --check
+          chmod +x "$binary"
+          "$binary" --version | grep --fixed-strings "Bicep CLI version ${BICEP_VERSION} "
+          echo "VISTARA_BICEP_CLI=$binary" >> "$GITHUB_ENV"
 
       - name: Test repository validators
         run: node --test eng/tests/*.test.mjs
