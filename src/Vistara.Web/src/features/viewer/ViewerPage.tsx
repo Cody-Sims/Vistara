@@ -158,12 +158,15 @@ export function ViewerPage({
   const { asset, metadata } = detail;
   const capturedAt = metadata.capturedAt ?? asset.capturedAt;
 
-  async function undoTrash(restorable: readonly VersionedAssetReference[]) {
+  async function undoTrash(
+    client: CurationClient,
+    restorable: readonly VersionedAssetReference[],
+  ) {
     setRestoring(true);
     setRestoreFailed(false);
     try {
       await restoreTrashedAssets(
-        curation!.client,
+        client,
         restorable,
         globalThis.crypto?.randomUUID?.() ?? `web-${Date.now()}`,
       );
@@ -178,7 +181,7 @@ export function ViewerPage({
     }
   }
 
-  if (trashed) {
+  if (trashed && curation) {
     return (
       <section className={styles.statePanel} aria-labelledby="asset-trashed">
         <h1 id="asset-trashed" ref={trashedRef} tabIndex={-1}>
@@ -195,7 +198,7 @@ export function ViewerPage({
         {trashed.restorable.length > 0 ? (
           <button
             disabled={restoring}
-            onClick={() => void undoTrash(trashed.restorable)}
+            onClick={() => void undoTrash(curation.client, trashed.restorable)}
             type="button"
           >
             Undo move to trash
