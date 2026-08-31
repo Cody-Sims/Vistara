@@ -7,6 +7,7 @@ using Vistara.Application.Tenancy;
 using Vistara.Domain.Common;
 using Vistara.Domain.Identity;
 using Vistara.Domain.Tenancy;
+using Vistara.Persistence.Identity;
 using Vistara.Persistence.Tenancy;
 
 namespace Vistara.Api.Composition.Platform;
@@ -17,6 +18,7 @@ namespace Vistara.Api.Composition.Platform;
 /// </summary>
 internal sealed class PlatformTenantDirectoryAdapter(
     RelationalTenantDirectory directory,
+    RelationalIdentityCatalog catalog,
     IUserRepository users,
     ITenantMembershipRepository memberships,
     IdentityFactory identities,
@@ -27,11 +29,15 @@ internal sealed class PlatformTenantDirectoryAdapter(
 {
     public async ValueTask<IReadOnlyList<TenantMembershipView>> ListTenantsForUserAsync(
         Guid userId,
+        Guid? restrictToTenantId,
         CancellationToken cancellationToken)
     {
         IReadOnlyList<PersistedTenantMembership> persisted =
-            await directory.ListForUserAsync(userId, cancellationToken);
+            await catalog.ListMembershipsAsync(userId, cancellationToken);
         return persisted
+            .Where(membership =>
+                restrictToTenantId is not { } tenantId ||
+                membership.TenantId == tenantId)
             .Select(membership => new TenantMembershipView(
                 membership.TenantId,
                 membership.Slug,

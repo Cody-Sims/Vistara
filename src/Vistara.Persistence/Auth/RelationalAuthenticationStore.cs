@@ -251,6 +251,23 @@ public sealed class RelationalAuthenticationStore(
         }
     }
 
+    /// <summary>
+    /// Resolves which tenant owns a browser session without requiring a tenant
+    /// scope, so a sign-in can retire a session that belongs to another tenant.
+    /// The routing table is deliberately tenant independent.
+    /// </summary>
+    public async ValueTask<Guid?> FindCookieSessionTenantAsync(
+        string sessionTokenDigest,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionTokenDigest);
+        PersistedAuthenticationRoute? route = await FindRouteAsync(
+            AuthenticationRouteKinds.CookieSession,
+            CookieLookupDigest(sessionTokenDigest),
+            cancellationToken);
+        return route?.TenantId;
+    }
+
     public async ValueTask<PersistedCookieSession?> FindCookieSessionAsync(
         string sessionTokenDigest,
         CancellationToken cancellationToken)

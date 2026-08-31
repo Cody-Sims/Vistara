@@ -1,4 +1,3 @@
-using Microsoft.EntityFrameworkCore;
 using Vistara.Api.Features.Account;
 using Vistara.Application.Common;
 using Vistara.Application.Common.Auditing;
@@ -8,7 +7,6 @@ using Vistara.Auth.Cookies;
 using Vistara.Domain.Common;
 using Vistara.Domain.Identity;
 using Vistara.Domain.Tenancy;
-using Vistara.Persistence;
 using Vistara.Persistence.Identity;
 using Vistara.Persistence.Tenancy;
 
@@ -61,15 +59,16 @@ internal sealed class PlatformLocalCredentialVerifier(
 
 /// <summary>
 /// Bridges the browser session surface onto the existing cookie session
-/// manager, credential verifier, tenant directory, and membership repository.
+/// manager. Sign-in resolves memberships with one indexed identity-catalog
+/// query and issues the session through a manager bound explicitly to the
+/// selected tenant, so it works with no ambient tenant scope and when an
+/// existing cookie belongs to a different tenant.
 /// </summary>
 internal sealed class PlatformBrowserSessionAdapter(
     ILocalCredentialVerifier verifier,
-    CookieSessionManager sessions,
-    RelationalTenantDirectory directory,
+    PlatformLoginSessionFactory sessionFactory,
     RelationalIdentityCatalog catalog,
-    ITenantMembershipRepository memberships,
-    IMutableTenantScope tenantScope) : IBrowserSessionPort
+    IClock clock) : IBrowserSessionPort
 {
     public async ValueTask<Result<BrowserSessionResult>> LoginAsync(
         BrowserLoginCommand command,
@@ -89,7 +88,7 @@ internal sealed class PlatformBrowserSessionAdapter(
         }
 
         IReadOnlyList<PersistedTenantMembership> candidates =
-            await directory.ListForUserAsync(user.Id.Value, cancellationToken);
+            await catalog.ListMembershipsAsync(user.Id.Value, cancellationToken);
         PersistedTenantMembership? selected = Select(candidates, command.TenantId);
         if (selected is null)
         {
@@ -97,8 +96,11 @@ internal sealed class PlatformBrowserSessionAdapter(
                 CookieAuthErrors.TenantUnavailable);
         }
 
-        tenantScope.Establish(selected.TenantId);
-        TenantMembership? membership = await memberships.FindAsync(
+        await RetireSessionAsync(command.ExistingSessionToken, cancellationToken);
+
+        await using TenantScopedSessions scoped =
+            sessionFactory.Create(selected.TenantId);
+        TenantMembership? membership = await scoped.Memberships.FindAsync(
             new TenantId(selected.TenantId),
             user.Id,
             cancellationToken);
@@ -108,13 +110,19 @@ internal sealed class PlatformBrowserSessionAdapter(
                 CookieAuthErrors.TenantUnavailable);
         }
 
-        IssuedBrowserSession issued = await sessions.IssueAsync(
+        IssuedBrowserSession issued = await scoped.Sessions.IssueAsync(
             user,
             membership,
-            command.ExistingSessionToken,
+            existingSessionToken: null,
             cancellationToken);
         return Result.Success(new BrowserSessionResult(
-            Describe(user, selected.TenantId, membership.Role.ToString(), candidates),
+            Describe(
+                user.Id.Value,
+                user.Email.Value,
+                user.DisplayName,
+                selected.TenantId,
+                membership.Role.ToString(),
+                candidates),
             issued.Cookie.ToSetCookieHeader(),
             issued.AntiforgeryToken));
     }
@@ -123,14 +131,14 @@ internal sealed class PlatformBrowserSessionAdapter(
         string? sessionToken,
         CancellationToken cancellationToken)
     {
-        BrowserCookie cookie =
-            await sessions.LogoutAsync(sessionToken, cancellationToken);
-        return cookie.ToSetCookieHeader();
+        await RetireSessionAsync(sessionToken, cancellationToken);
+        return sessionFactory.CreateDeletionCookie().ToSetCookieHeader();
     }
 
     public async ValueTask<Result<CurrentUserView>> DescribeAsync(
         Guid tenantId,
         Guid userId,
+        bool includeOtherTenants,
         CancellationToken cancellationToken)
     {
         PersistedIdentitySummary? summary =
@@ -140,44 +148,70 @@ internal sealed class PlatformBrowserSessionAdapter(
             return Result.Failure<CurrentUserView>(CookieAuthErrors.InvalidSession);
         }
 
-        IReadOnlyList<PersistedTenantMembership> candidates =
-            await directory.ListForUserAsync(userId, cancellationToken);
-        PersistedTenantMembership? current = candidates
+        IReadOnlyList<PersistedTenantMembership> memberships =
+            await catalog.ListMembershipsAsync(userId, cancellationToken);
+        PersistedTenantMembership? current = memberships
             .SingleOrDefault(candidate => candidate.TenantId == tenantId);
-        return Result.Success(new CurrentUserView(
+        IReadOnlyList<PersistedTenantMembership> visible = includeOtherTenants
+            ? memberships
+            : memberships
+                .Where(candidate => candidate.TenantId == tenantId)
+                .ToArray();
+        return Result.Success(Describe(
             summary.UserId,
             summary.Email,
             summary.DisplayName,
             current is null ? null : tenantId,
             current?.Role,
-            candidates
-                .Select(candidate => new CurrentUserTenantView(
-                    candidate.TenantId,
-                    candidate.Slug,
-                    candidate.Name,
-                    candidate.Role,
-                    candidate.MembershipStatus))
-                .ToArray()));
+            visible));
+    }
+
+    private async ValueTask RetireSessionAsync(
+        string? sessionToken,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sessionToken))
+        {
+            return;
+        }
+
+        string digest = CookieTokenCryptography.ComputeDigest(sessionToken);
+
+        Guid? owner =
+            await sessionFactory.FindSessionTenantAsync(digest, cancellationToken);
+        if (owner is not { } tenantId)
+        {
+            return;
+        }
+
+        // The retired session may belong to a different tenant than the one
+        // being signed in to, so it is revoked through a store bound to its own
+        // tenant rather than through the ambient request scope.
+        await sessionFactory
+            .CreateStore(tenantId)
+            .RevokeCookieSessionAsync(digest, clock.UtcNow, cancellationToken);
     }
 
     private static CurrentUserView Describe(
-        User user,
-        Guid tenantId,
-        string role,
-        IReadOnlyList<PersistedTenantMembership> candidates) =>
+        Guid userId,
+        string email,
+        string displayName,
+        Guid? tenantId,
+        string? role,
+        IReadOnlyList<PersistedTenantMembership> memberships) =>
         new(
-            user.Id.Value,
-            user.Email.Value,
-            user.DisplayName,
+            userId,
+            email,
+            displayName,
             tenantId,
             role,
-            candidates
-                .Select(candidate => new CurrentUserTenantView(
-                    candidate.TenantId,
-                    candidate.Slug,
-                    candidate.Name,
-                    candidate.Role,
-                    candidate.MembershipStatus))
+            memberships
+                .Select(membership => new CurrentUserTenantView(
+                    membership.TenantId,
+                    membership.Slug,
+                    membership.Name,
+                    membership.Role,
+                    membership.MembershipStatus))
                 .ToArray());
 
     private static PersistedTenantMembership? Select(
@@ -200,19 +234,17 @@ internal sealed class PlatformBrowserSessionAdapter(
 }
 
 /// <summary>
-/// Provisions the first tenant owner exactly once. The route fails closed as
-/// soon as any identity exists, so it cannot be replayed to escalate.
+/// Provisions the first tenant owner exactly once. Every row is written inside
+/// one serializable transaction that also claims a database-enforced singleton
+/// marker, so concurrent attempts with distinct slugs and emails still produce
+/// a single winner and a failed attempt leaves nothing behind.
 /// </summary>
 internal sealed class PlatformFirstOwnerProvisioningAdapter(
-    RelationalIdentityCatalog catalog,
-    ITenantRepository tenants,
-    IUserRepository users,
-    ITenantMembershipRepository memberships,
+    RelationalFirstOwnerProvisioningStore store,
     TenantFactory tenantFactory,
     IdentityFactory identityFactory,
     ILocalPasswordHasher hasher,
-    IAuditWriter audit,
-    IMutableTenantScope tenantScope,
+    IFirstOwnerProvisioningGuard guard,
     IUuid7Generator ids,
     IClock clock) : IFirstOwnerProvisioningPort
 {
@@ -228,11 +260,6 @@ internal sealed class PlatformFirstOwnerProvisioningAdapter(
             return Result.Failure<ProvisionedOwnerView>(ResultError.Validation(
                 "setup.weak_password",
                 $"The owner password must contain at least {hasher.MinimumPasswordLength} characters."));
-        }
-
-        if (await catalog.HasAnyUserAsync(cancellationToken))
-        {
-            return Result.Failure<ProvisionedOwnerView>(AlreadyProvisioned);
         }
 
         Result<Tenant> tenantResult =
@@ -264,29 +291,11 @@ internal sealed class PlatformFirstOwnerProvisioningAdapter(
             return Result.Failure<ProvisionedOwnerView>(membershipResult.Error!);
         }
 
-        Result activated = membership.Activate(clock.UtcNow);
+        DateTimeOffset now = clock.UtcNow;
+        Result activated = membership.Activate(now);
         if (activated.IsFailure)
         {
             return Result.Failure<ProvisionedOwnerView>(activated.Error!);
-        }
-
-        tenantScope.Establish(tenant.Id.Value);
-        string passwordHash = hasher.Hash(command.Password);
-        try
-        {
-            await tenants.AddAsync(tenant, cancellationToken);
-            await users.AddAsync(user, cancellationToken);
-            await memberships.AddAsync(membership, cancellationToken);
-            await catalog.SetPasswordAsync(
-                user.LocalIdentities[0].Id.Value,
-                user.Id.Value,
-                passwordHash,
-                clock.UtcNow,
-                cancellationToken);
-        }
-        catch (DbUpdateException)
-        {
-            return Result.Failure<ProvisionedOwnerView>(AlreadyProvisioned);
         }
 
         Result<AuditChangeSummary> after = AuditChangeSummary.Create(
@@ -294,32 +303,47 @@ internal sealed class PlatformFirstOwnerProvisioningAdapter(
             AuditField.Plain("tenantSlug", tenant.Slug.Value),
             AuditField.Plain("role", TenantRole.TenantOwner.ToString()),
         ]);
-        await audit.AppendAsync(
-            new AuditRecord(
-                new AuditEventId(ids.NewId()),
-                new AuditTenantId(tenant.Id.Value),
-                new AuditActor(AuditActorKind.System, "first-owner-provisioning"),
-                "tenant.owner.provisioned",
-                new AuditResource("tenant", tenant.Id.Value.ToString("D")),
-                AuditChangeSummary.Empty,
-                after.TryGetValue(out AuditChangeSummary? summary)
-                    ? summary
-                    : AuditChangeSummary.Empty,
-                AuditOutcome.Succeeded,
-                clock.UtcNow),
+        var audit = new AuditRecord(
+            new AuditEventId(ids.NewId()),
+            new AuditTenantId(tenant.Id.Value),
+            new AuditActor(AuditActorKind.System, "first-owner-provisioning"),
+            "tenant.owner.provisioned",
+            new AuditResource("tenant", tenant.Id.Value.ToString("D")),
+            AuditChangeSummary.Empty,
+            after.TryGetValue(out AuditChangeSummary? summary)
+                ? summary
+                : AuditChangeSummary.Empty,
+            AuditOutcome.Succeeded,
+            now);
+
+        FirstOwnerProvisioningStatus status = await store.ProvisionAsync(
+            new FirstOwnerProvisioningRequest(
+                tenant,
+                user,
+                membership,
+                user.LocalIdentities[0].Id.Value,
+                hasher.Hash(command.Password),
+                audit),
+            guard.BeforeCommitAsync,
             cancellationToken);
-
-        return Result.Success(new ProvisionedOwnerView(
-            tenant.Id.Value,
-            tenant.Slug.Value,
-            tenant.Name,
-            user.Id.Value,
-            user.Email.Value,
-            user.DisplayName,
-            TenantRole.TenantOwner.ToString()));
+        return status switch
+        {
+            FirstOwnerProvisioningStatus.Provisioned => Result.Success(
+                new ProvisionedOwnerView(
+                    tenant.Id.Value,
+                    tenant.Slug.Value,
+                    tenant.Name,
+                    user.Id.Value,
+                    user.Email.Value,
+                    user.DisplayName,
+                    TenantRole.TenantOwner.ToString())),
+            FirstOwnerProvisioningStatus.AlreadyProvisioned =>
+                Result.Failure<ProvisionedOwnerView>(ResultError.Conflict(
+                    "setup.already_provisioned",
+                    "The platform already has an owner and cannot be provisioned again.")),
+            _ => Result.Failure<ProvisionedOwnerView>(ResultError.Conflict(
+                "setup.provisioning_contended",
+                "A concurrent provisioning attempt is in progress; retry the request.")),
+        };
     }
-
-    private static ResultError AlreadyProvisioned => ResultError.Conflict(
-        "setup.already_provisioned",
-        "The platform already has an owner and cannot be provisioned again.");
 }

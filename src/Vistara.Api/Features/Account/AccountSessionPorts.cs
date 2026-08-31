@@ -43,9 +43,15 @@ public interface IBrowserSessionPort
         string? sessionToken,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Describes the current principal. <paramref name="includeOtherTenants"/>
+    /// must be false for tenant-bound credentials so an API key cannot
+    /// enumerate its owner's other tenants.
+    /// </summary>
     ValueTask<Result<CurrentUserView>> DescribeAsync(
         Guid tenantId,
         Guid userId,
+        bool includeOtherTenants,
         CancellationToken cancellationToken);
 }
 
@@ -74,4 +80,20 @@ public interface IFirstOwnerProvisioningPort
     ValueTask<Result<ProvisionedOwnerView>> ProvisionAsync(
         FirstOwnerProvisioningCommand command,
         CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Runs inside the first-owner provisioning transaction immediately before it
+/// commits. The default implementation does nothing; a host may substitute one
+/// to assert or exercise rollback behaviour.
+/// </summary>
+public interface IFirstOwnerProvisioningGuard
+{
+    ValueTask BeforeCommitAsync(CancellationToken cancellationToken);
+}
+
+public sealed class NoOpFirstOwnerProvisioningGuard : IFirstOwnerProvisioningGuard
+{
+    public ValueTask BeforeCommitAsync(CancellationToken cancellationToken) =>
+        ValueTask.CompletedTask;
 }

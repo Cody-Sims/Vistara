@@ -1,7 +1,9 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Vistara.Domain.Identity;
 using Vistara.Persistence.Model;
 using Vistara.Persistence.Repositories;
+using Vistara.Persistence.Tenancy;
 
 namespace Vistara.Persistence.Identity;
 
@@ -23,11 +25,58 @@ public sealed record PersistedIdentitySummary(
 /// </summary>
 public sealed class RelationalIdentityCatalog(IdentityCatalogDbContext context)
 {
+    private const string PostgreSqlProviderName =
+        "Npgsql.EntityFrameworkCore.PostgreSQL";
+
     private readonly IdentityCatalogDbContext _context =
         context ?? throw new ArgumentNullException(nameof(context));
 
     public async ValueTask<bool> HasAnyUserAsync(CancellationToken cancellationToken) =>
         await _context.Users.AsNoTracking().AnyAsync(cancellationToken);
+
+    /// <summary>
+    /// Resolves every tenant membership of one principal with a single indexed
+    /// query. There is no per-tenant probing and no global tenant enumeration,
+    /// so the cost is proportional to the principal's own memberships.
+    /// PostgreSQL grants the read through the transaction-local
+    /// identity_directory policy; every other access stays tenant isolated.
+    /// </summary>
+    public async ValueTask<IReadOnlyList<PersistedTenantMembership>> ListMembershipsAsync(
+        Guid userId,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        IDbContextTransaction transaction =
+            await _context.Database.BeginTransactionAsync(cancellationToken);
+        await using (transaction.ConfigureAwait(false))
+        {
+            if (_context.Database.ProviderName == PostgreSqlProviderName)
+            {
+                _ = await _context.Database.ExecuteSqlRawAsync(
+                    "SELECT set_config('vistara.identity_directory', 'on', true);",
+                    cancellationToken);
+            }
+
+            PersistedTenantMembership[] memberships = await (
+                from membership in _context.TenantMemberships.AsNoTracking()
+                join tenant in _context.Tenants.AsNoTracking()
+                    on membership.TenantId equals tenant.Id
+                where membership.UserId == userId
+                orderby tenant.Slug
+                select new PersistedTenantMembership(
+                    tenant.Id.Value,
+                    tenant.Slug,
+                    tenant.Name,
+                    tenant.Status,
+                    membership.Role,
+                    membership.Status,
+                    membership.JoinedAtUtc,
+                    membership.Version))
+                .ToArrayAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return memberships;
+        }
+    }
 
     public async ValueTask<PersistedLocalCredential?> FindCredentialAsync(
         string normalizedLogin,
