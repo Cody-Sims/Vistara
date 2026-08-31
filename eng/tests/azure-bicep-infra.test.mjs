@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -18,6 +18,42 @@ const CONFIG_CONTRACT = JSON.parse(
 
 /** Minimum Bicep compiler the hosted bootstrap preflight accepts. */
 const BICEP_MINIMUM_VERSION = '0.36.1';
+
+/**
+ * Compiler `.github/workflows/repository-tooling.yml` installs. CI must run
+ * exactly this one so the diagnostics this gate reads are the diagnostics the
+ * committed template was written against.
+ */
+const PINNED_BICEP_VERSION = '0.46.1';
+
+const BICEP_CLI_ENV = 'VISTARA_BICEP_CLI';
+const RUNNING_IN_CI = process.env.CI === 'true' || process.env.CI === '1';
+
+/**
+ * Resolves the Bicep CLI the same way the Graph registration gate does, so a
+ * composed run configures both gates through one variable. `BICEP` stays
+ * supported for a local checkout that already exports it.
+ */
+function resolveBicepCli() {
+  for (const candidate of [process.env[BICEP_CLI_ENV], process.env.BICEP]) {
+    if (candidate && existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  for (const directory of (process.env.PATH ?? '').split(delimiter)) {
+    if (directory && existsSync(join(directory, 'bicep'))) {
+      return join(directory, 'bicep');
+    }
+  }
+
+  return null;
+}
+
+const BICEP_CLI = resolveBicepCli();
+const BICEP_SKIP =
+  `no Bicep CLI found; set ${BICEP_CLI_ENV} to the pinned `
+  + `Bicep ${PINNED_BICEP_VERSION} binary`;
 
 function moduleSource(name) {
   return readFileSync(resolve(MODULES, name), 'utf8');
@@ -671,29 +707,33 @@ test('only the pepper is delivered through a container secret reference', () => 
 });
 
 test('the pinned bicep compiler builds and lints the template', (t) => {
-  const bicep = process.env.BICEP ?? 'bicep';
-  const probe = spawnSync(bicep, ['--version'], { encoding: 'utf8' });
-  if (probe.error || probe.status !== 0) {
-    // CI provisions a pinned compiler, so an unavailable binary there is a
-    // failure rather than a silently green run.
-    assert.ok(
-      !process.env.CI,
-      `bicep is required in CI but '${bicep}' could not be executed: `
-        + `${probe.error?.message ?? `exit ${probe.status}`}`,
-    );
-    t.skip(`bicep binary not available (${bicep})`);
+  if (!BICEP_CLI) {
+    // CI installs the pinned compiler and exports VISTARA_BICEP_CLI, so an
+    // unresolvable binary there means the gate broke rather than that the
+    // compiler is unavailable.
+    assert.ok(!RUNNING_IN_CI, `${BICEP_SKIP}. CI must never skip the Bicep gate.`);
+    t.skip(BICEP_SKIP);
     return;
   }
 
-  const version = /(\d+\.\d+\.\d+)/.exec(probe.stdout)?.[1];
+  const probe = spawnSync(BICEP_CLI, ['--version'], { encoding: 'utf8' });
+  assert.equal(probe.status, 0, probe.stderr);
+  const version = /\d+\.\d+\.\d+/.exec(probe.stdout)?.[0];
   assert.ok(version, `could not read a version from '${probe.stdout.trim()}'`);
   assert.ok(
     compareVersions(version, BICEP_MINIMUM_VERSION) >= 0,
-    `bicep ${version} is older than the pinned minimum ${BICEP_MINIMUM_VERSION}`,
+    `bicep ${version} is older than the preflight minimum ${BICEP_MINIMUM_VERSION}`,
   );
+  if (RUNNING_IN_CI) {
+    assert.equal(
+      version,
+      PINNED_BICEP_VERSION,
+      `CI must run the pinned Bicep ${PINNED_BICEP_VERSION}, found ${version}`,
+    );
+  }
 
   const build = spawnSync(
-    bicep,
+    BICEP_CLI,
     ['build', '--stdout', resolve(INFRA, 'main.bicep')],
     { encoding: 'utf8' },
   );
@@ -713,7 +753,7 @@ test('the pinned bicep compiler builds and lints the template', (t) => {
   assert.equal((rendered.match(/listKeys\(/g) ?? []).length, 1);
 
   for (const module of EXPECTED_MODULES) {
-    const lint = spawnSync(bicep, ['lint', resolve(MODULES, module)], {
+    const lint = spawnSync(BICEP_CLI, ['lint', resolve(MODULES, module)], {
       encoding: 'utf8',
     });
     assert.equal(lint.status, 0, lint.stderr);
@@ -723,4 +763,16 @@ test('the pinned bicep compiler builds and lints the template', (t) => {
       `bicep lint reported diagnostics for ${module}:\n${lint.stderr}`,
     );
   }
+});
+
+test('the Bicep gate reads the same CLI variable as the Graph gate', () => {
+  const source = readFileSync(
+    resolve(HERE, 'azure-bicep-infra.test.mjs'),
+    'utf8',
+  );
+  assert.match(source, /process\.env\[BICEP_CLI_ENV\]/);
+  assert.equal(BICEP_CLI_ENV, 'VISTARA_BICEP_CLI');
+  assert.equal(PINNED_BICEP_VERSION, '0.46.1');
+  // CI is the string the workflow sets, not any truthy value.
+  assert.match(source, /process\.env\.CI === 'true' \|\| process\.env\.CI === '1'/);
 });

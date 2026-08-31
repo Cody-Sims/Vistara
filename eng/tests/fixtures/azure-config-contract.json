@@ -171,8 +171,7 @@
       "sourceFile": "src/Vistara.Api/Composition/Security/DataProtectionComposition.cs",
       "optionsType": "SecurityDataProtectionOptions",
       "property": "Enabled",
-      "required": true,
-      "pendingOwner": "HB-06"
+      "required": true
     },
     {
       "name": "Security__DataProtection__ApplicationDiscriminator",
@@ -181,8 +180,7 @@
       "sourceFile": "src/Vistara.Api/Composition/Security/DataProtectionComposition.cs",
       "optionsType": "SecurityDataProtectionOptions",
       "property": "ApplicationDiscriminator",
-      "required": true,
-      "pendingOwner": "HB-06"
+      "required": true
     },
     {
       "name": "Security__DataProtection__BlobServiceUri",
@@ -191,8 +189,7 @@
       "sourceFile": "src/Vistara.Api/Composition/Security/DataProtectionComposition.cs",
       "optionsType": "SecurityDataProtectionOptions",
       "property": "BlobServiceUri",
-      "required": true,
-      "pendingOwner": "HB-06"
+      "required": true
     },
     {
       "name": "Security__DataProtection__BlobContainerName",
@@ -201,8 +198,7 @@
       "sourceFile": "src/Vistara.Api/Composition/Security/DataProtectionComposition.cs",
       "optionsType": "SecurityDataProtectionOptions",
       "property": "BlobContainerName",
-      "required": true,
-      "pendingOwner": "HB-06"
+      "required": true
     },
     {
       "name": "Security__DataProtection__KeyBlobName",
@@ -211,8 +207,7 @@
       "sourceFile": "src/Vistara.Api/Composition/Security/DataProtectionComposition.cs",
       "optionsType": "SecurityDataProtectionOptions",
       "property": "KeyBlobName",
-      "required": true,
-      "pendingOwner": "HB-06"
+      "required": true
     },
     {
       "name": "Security__DataProtection__KeyVaultKeyIdentifier",
@@ -221,8 +216,7 @@
       "sourceFile": "src/Vistara.Api/Composition/Security/DataProtectionComposition.cs",
       "optionsType": "SecurityDataProtectionOptions",
       "property": "KeyVaultKeyIdentifier",
-      "required": true,
-      "pendingOwner": "HB-06"
+      "required": true
     },
     {
       "name": "Security__DataProtection__ManagedIdentityClientId",
@@ -231,8 +225,7 @@
       "sourceFile": "src/Vistara.Api/Composition/Security/DataProtectionComposition.cs",
       "optionsType": "SecurityDataProtectionOptions",
       "property": "ManagedIdentityClientId",
-      "required": true,
-      "pendingOwner": "HB-06"
+      "required": true
     },
     {
       "name": "Platform__Authentication__ApiKeys__CurrentPepperVersion",
@@ -570,8 +563,7 @@
       "sourceFile": "src/Vistara.Api/Composition/Media/MediaComposition.cs",
       "optionsType": "MediaAzureOptions",
       "property": "ManagedIdentityClientId",
-      "required": true,
-      "pendingOwner": "HB-07"
+      "required": true
     },
     {
       "name": "Media__Imaging__Provider",
