@@ -136,7 +136,7 @@ public static class PlatformUploadServiceCollectionExtensions
             .GetRequiredService<IPlatformApiKeyAuthenticator>();
         _ = scope.ServiceProvider
             .GetRequiredService<IPlatformBearerAuthenticator>();
-        _ = scope.ServiceProvider.GetRequiredService<CookieSessionManager>();
+        _ = scope.ServiceProvider.GetRequiredService<PlatformLoginSessionFactory>();
         _ = scope.ServiceProvider.GetRequiredService<ApiKeyAuthenticator>();
         _ = scope.ServiceProvider.GetRequiredService<JwtAuthenticator>();
         _ = scope.ServiceProvider

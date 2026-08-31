@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Vistara.Api.Features.Derivatives;
 using Vistara.Api.Features.Events;
@@ -107,19 +108,23 @@ public static class PlatformServiceCollectionExtensions
         services.TryAddSingleton<IJwtMetadataSigningKeyResolver,
             PlatformJwtMetadataSigningKeyResolver>();
         services.TryAddSingleton<PlatformDerivativePresetCatalog>();
+
+        // Browser sessions are always built through the login session factory,
+        // which binds one explicit tenant. A cookie session manager fed by the
+        // ambient request scope cannot work here: authentication runs before
+        // any tenant context exists, and it would resolve no tenant at all.
+        // The factory is registered through a delegate so a composition root
+        // without persistence still builds, exactly as before.
         services.TryAddScoped(static provider =>
-            new CookieSessionManager(
+            new PlatformLoginSessionFactory(
+                provider.GetRequiredService<TenantDbContextFactory>(),
+                provider.GetRequiredService<AuthenticationCatalogDbContext>(),
+                provider.GetRequiredService<JwtRevocationCatalogDbContext>(),
                 provider.GetRequiredService<IClock>(),
                 provider.GetRequiredService<IUuid7Generator>(),
                 provider.GetRequiredService<ICookieTokenSource>(),
-                provider.GetRequiredService<IUserRepository>(),
-                provider.GetRequiredService<ITenantMembershipRepository>(),
-                provider.GetRequiredService<ICookieSessionStore>(),
                 provider.GetRequiredService<CookieAuthOptions>(),
-                provider.GetRequiredService<ICookieAuthAuditSink>()));
-        services.TryAddScoped(static provider =>
-            new Vistara.Auth.Cookies.CookieAuthenticationHandler(
-                provider.GetRequiredService<CookieSessionManager>()));
+                provider.GetRequiredService<ILogger<PlatformCookieAuthAuditSink>>()));
         services.TryAddScoped(static provider =>
             new ApiKeyAuthenticator(
                 provider.GetRequiredService<IClock>(),

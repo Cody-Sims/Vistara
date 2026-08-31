@@ -392,24 +392,49 @@ internal sealed class PlatformAnonymousAuthenticationHandler(
 internal sealed class DefaultPlatformCookieAuthenticator(IServiceProvider services) :
     IPlatformCookieAuthenticator
 {
+    /// <summary>
+    /// Authenticates a browser cookie against the tenant that owns the
+    /// session. The owning tenant is resolved first from the tenant-independent
+    /// routing table, because no tenant scope exists yet when authentication
+    /// runs; the user, membership, and tenant are then validated inside a scope
+    /// fixed to that tenant, so a cookie can neither read another tenant's rows
+    /// nor move the request onto a tenant it does not belong to.
+    /// </summary>
     public async ValueTask<PlatformCredentialResult> AuthenticateCookieAsync(
         string sessionToken,
         CancellationToken cancellationToken)
     {
         try
         {
-            Vistara.Auth.Cookies.CookieAuthenticationHandler? handler =
-                services.GetService<Vistara.Auth.Cookies.CookieAuthenticationHandler>();
-            if (handler is null)
+            PlatformLoginSessionFactory? sessions =
+                services.GetService<PlatformLoginSessionFactory>();
+            if (sessions is null)
             {
                 return PlatformCredentialResult.Invalid("authentication.unavailable");
             }
 
+            if (!CookieTokenCryptography.TryComputeSessionDigest(
+                    sessionToken,
+                    out string digest))
+            {
+                return PlatformCredentialResult.Invalid("cookie_auth.invalid_session");
+            }
+
+            Guid? owner = await sessions.FindSessionTenantAsync(
+                digest,
+                cancellationToken);
+            if (owner is not { } tenantId)
+            {
+                return PlatformCredentialResult.Invalid("cookie_auth.invalid_session");
+            }
+
+            await using TenantScopedSessions scoped = sessions.Create(tenantId);
             Vistara.Domain.Common.Result<AuthenticatedBrowserSession> result =
-                await handler.AuthenticateAsync(sessionToken, cancellationToken);
+                await scoped.Sessions.AuthenticateAsync(sessionToken, cancellationToken);
             if (!result.TryGetValue(out AuthenticatedBrowserSession? session) ||
                 session.Principal.TenantId is null ||
-                session.Principal.Role is null)
+                session.Principal.Role is null ||
+                session.Principal.TenantId.Value.Value != tenantId)
             {
                 return PlatformCredentialResult.Invalid(
                     result.Error?.Code ?? "cookie_auth.invalid_session");
