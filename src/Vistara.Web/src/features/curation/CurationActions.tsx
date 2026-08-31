@@ -77,6 +77,9 @@ const idle: ListState<never> = { kind: 'loading', items: [] };
 /** The API accepts at most 200 references in one batch. */
 const maximumBatch = 200;
 
+/** How many single-asset changes are in flight at once. */
+const concurrentAssetChanges = 4;
+
 function batches<T>(items: readonly T[]): readonly (readonly T[])[] {
   const chunks: T[][] = [];
   for (let index = 0; index < items.length; index += maximumBatch) {
@@ -322,20 +325,35 @@ export function CurationActions({
     (undoButton.current ?? summaryRef.current)?.focus();
   }, [focusReport]);
 
+  /**
+   * Favourites and tags are one versioned change per asset, so they are sent a
+   * few at a time rather than one after another; the report still follows the
+   * order the images were selected in.
+   */
   async function runOverTargets(
     action: string,
     run: (target: AssetSummary) => Promise<ApiResponse<AssetDetail>>,
   ) {
     setBusy(true);
-    const results: CurationItemResult[] = [];
-    const updated: AssetSummary[] = [];
-    for (const target of targets) {
-      const outcome = await applyToAsset(client, target, run);
-      results.push(outcome.result);
-      if (outcome.asset) {
-        updated.push(outcome.asset);
+    const outcomes: { result: CurationItemResult; asset?: AssetSummary }[] =
+      new Array(targets.length);
+    let next = 0;
+    const worker = async () => {
+      for (let index = next++; index < targets.length; index = next++) {
+        outcomes[index] = await applyToAsset(client, targets[index]!, run);
       }
-    }
+    };
+
+    await Promise.all(
+      Array.from(
+        { length: Math.min(concurrentAssetChanges, targets.length) },
+        worker,
+      ),
+    );
+    const results = outcomes.map((outcome) => outcome.result);
+    const updated = outcomes
+      .map((outcome) => outcome.asset)
+      .filter((asset): asset is AssetSummary => asset !== undefined);
 
     report(action, results);
     setBusy(false);

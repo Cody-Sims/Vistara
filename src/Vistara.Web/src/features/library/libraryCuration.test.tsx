@@ -216,6 +216,45 @@ describe('library curation', () => {
     ).toHaveTextContent('Restore queued for 1 image.');
   });
 
+  it('keeps the result and the undo when only some images could be trashed', async () => {
+    const client = curationClient({
+      bulkMutateAssets: vi.fn(async () => ({
+        data: [
+          { assetId: 'asset-0', status: 'trashed', version: 3 },
+          {
+            assetId: 'asset-1',
+            status: 'versionConflict',
+            errorCode: 'lifecycle.version_conflict',
+          },
+        ],
+      })),
+    });
+    const { user } = renderLibrary({ client });
+
+    await screen.findByRole('heading', { name: 'June 10, 2026' });
+    await user.click(screen.getByLabelText('Select Photo 0'));
+    await user.click(screen.getByLabelText('Select Photo 1'));
+    await user.click(screen.getByRole('button', { name: 'Move to trash' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Move to trash' }),
+    );
+
+    // Photo 1 stayed behind, and what happened to both is still on screen.
+    await waitFor(() =>
+      expect(screen.getByLabelText('Select Photo 1')).toBeChecked(),
+    );
+    expect(screen.getByLabelText('Select Photo 0')).not.toBeChecked();
+    expect(
+      screen.getByRole('status', { name: 'Curation result' }),
+    ).toHaveTextContent(
+      'Moved to trash: 1 image. 1 image changed elsewhere and was left alone.',
+    );
+    expect(
+      screen.getByRole('button', { name: 'Undo move to trash' }),
+    ).toBeInTheDocument();
+  });
+
   it('hides the actions from a session that may not curate', async () => {
     const { user } = renderLibrary({ canCurate: false });
 

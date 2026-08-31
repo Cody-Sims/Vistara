@@ -262,6 +262,36 @@ describe('curation actions', () => {
     expect(outcomes).toHaveTextContent('Could not be updated');
   });
 
+  it('keeps several single-asset changes in flight but reports them in order', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const addAssetTag = vi.fn(async (id: string) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight -= 1;
+      return detail(asset({ id }));
+    });
+    const many = Array.from({ length: 12 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}` }),
+    );
+    const { user } = renderActions({
+      assets: many,
+      client: makeClient({ addAssetTag }),
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Tags' }));
+    const panel = await screen.findByRole('group', { name: 'Tags' });
+    await user.click(within(panel).getByRole('button', { name: /Coast/ }));
+
+    await waitFor(() => expect(addAssetTag).toHaveBeenCalledTimes(12));
+    expect(peak).toBeGreaterThan(1);
+    const outcomes = screen.getByRole('list', { name: 'Result for each image' });
+    const rows = within(outcomes).getAllByRole('listitem');
+    expect(rows[0]).toHaveTextContent('Image 0');
+    expect(rows[11]).toHaveTextContent('Image 11');
+  });
+
   it('creates a tag and applies it in the same step', async () => {
     const { client, user } = renderActions();
 
