@@ -8,19 +8,10 @@ import {
   useParams,
   useSearchParams,
 } from 'react-router-dom';
-import {
-  AdminAuditPage,
-  AdminJobsPage,
-  AdminPoliciesPage,
-  AdminStoragePage,
-  AdminUsersPage,
-} from '../../features/admin';
 import { AlbumDetailView, AlbumsView } from '../../features/albums';
 import { FavoritesView } from '../../features/favorites';
 import { LibraryPage } from '../../features/library';
 import { SearchView } from '../../features/search';
-import { useSession } from '../../features/session';
-import { SettingsPage } from '../../features/settings';
 import { PublicShareView, ShareManager } from '../../features/shares';
 import { TagsView } from '../../features/tags';
 import { TrashManager } from '../../features/trash';
@@ -31,7 +22,7 @@ import {
   UploadQueueView,
 } from '../../features/uploads';
 import { ViewerPage } from '../../features/viewer';
-import { galleryClient, platformClient } from '../apiClients';
+import { galleryClient } from '../apiClients';
 import styles from './galleryRoutes.module.css';
 
 const client = galleryClient;
@@ -144,35 +135,6 @@ export function LibraryRoute() {
   }, [location.pathname, location.search]);
 
   return <LibraryPage dataSource={client} />;
-}
-
-export function AdminUsersRoute() {
-  const { user } = useSession();
-  return user?.tenantId ? (
-    <AdminUsersPage client={platformClient} tenantId={user.tenantId} />
-  ) : (
-    <p role="status">This session is not scoped to a workspace.</p>
-  );
-}
-
-export function AdminStorageRoute() {
-  return <AdminStoragePage client={platformClient} />;
-}
-
-export function AdminJobsRoute() {
-  return <AdminJobsPage client={platformClient} />;
-}
-
-export function AdminPoliciesRoute() {
-  return <AdminPoliciesPage client={platformClient} />;
-}
-
-export function AdminAuditRoute() {
-  return <AdminAuditPage />;
-}
-
-export function SettingsRoute() {
-  return <SettingsPage client={platformClient} />;
 }
 
 export function SearchRoute() {

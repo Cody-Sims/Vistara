@@ -1,11 +1,6 @@
-import type { ReactNode } from 'react';
+import type { ComponentType, ReactNode } from 'react';
 import { Navigate, type RouteObject } from 'react-router-dom';
-import {
-  LoginPage,
-  RequireAdministration,
-  RequireSession,
-  SetupPage,
-} from '../../features/session';
+import { LoginPage, RequireSession } from '../../features/session';
 import { platformClient } from '../apiClients';
 import { ApplicationFrame } from '../ApplicationFrame';
 import {
@@ -14,11 +9,6 @@ import {
 } from '../ShellPages';
 import {
   AccessibleNotFoundRoute,
-  AdminAuditRoute,
-  AdminJobsRoute,
-  AdminPoliciesRoute,
-  AdminStorageRoute,
-  AdminUsersRoute,
   AlbumRoute,
   AlbumsRoute,
   FavoritesRoute,
@@ -26,7 +16,6 @@ import {
   PublicShareRoute,
   RoutePlaceholderPage,
   SearchRoute,
-  SettingsRoute,
   SharesRoute,
   TagsRoute,
   TrashRoute,
@@ -40,12 +29,21 @@ export function galleryRoutes(
   liveFeatures = true,
 ): RouteObject[] {
   const preview = !liveFeatures || staticPreview;
-  const administrative = (title: string, element: ReactNode) =>
-    preview ? (
-      <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
-    ) : (
-      <RequireAdministration>{element}</RequireAdministration>
-    );
+  /**
+   * Screens that only a signed-in operator reaches are loaded on demand, so
+   * sign-in, first-run setup, and a public share never pay for them.
+   */
+  const deferred = (
+    title: string,
+    load: () => Promise<{ Component: ComponentType }>,
+  ): RouteObject =>
+    preview
+      ? {
+          element: (
+            <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
+          ),
+        }
+      : { lazy: load };
   const guarded = (title: string, element: ReactNode) =>
     preview ? (
       <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
@@ -122,7 +120,9 @@ export function galleryRoutes(
         },
         {
           path: 'settings',
-          element: guarded('Settings', <SettingsRoute />),
+          ...deferred('Settings', async () => ({
+            Component: (await import('./deferredScreens')).SettingsScreen,
+          })),
         },
         {
           path: 'admin',
@@ -130,23 +130,33 @@ export function galleryRoutes(
         },
         {
           path: 'admin/users',
-          element: administrative('People', <AdminUsersRoute />),
+          ...deferred('People', async () => ({
+            Component: (await import('./deferredScreens')).AdminUsersScreen,
+          })),
         },
         {
           path: 'admin/storage',
-          element: administrative('Storage', <AdminStorageRoute />),
+          ...deferred('Storage', async () => ({
+            Component: (await import('./deferredScreens')).AdminStorageScreen,
+          })),
         },
         {
           path: 'admin/jobs',
-          element: administrative('Jobs', <AdminJobsRoute />),
+          ...deferred('Jobs', async () => ({
+            Component: (await import('./deferredScreens')).AdminJobsScreen,
+          })),
         },
         {
           path: 'admin/policies',
-          element: administrative('Policies', <AdminPoliciesRoute />),
+          ...deferred('Policies', async () => ({
+            Component: (await import('./deferredScreens')).AdminPoliciesScreen,
+          })),
         },
         {
           path: 'admin/audit',
-          element: administrative('Audit log', <AdminAuditRoute />),
+          ...deferred('Audit log', async () => ({
+            Component: (await import('./deferredScreens')).AdminAuditScreen,
+          })),
         },
         ...additionalRoutes,
         {
@@ -168,15 +178,9 @@ export function galleryRoutes(
     {
       path: '/setup',
       errorElement: <RouteErrorBoundary />,
-      element:
-        staticPreview || !liveFeatures ? (
-          <RoutePlaceholderPage
-            title="Set up Vistara"
-            staticPreview={staticPreview}
-          />
-        ) : (
-          <SetupPage client={platformClient} />
-        ),
+      ...deferred('Set up Vistara', async () => ({
+        Component: (await import('./deferredScreens')).SetupScreen,
+      })),
     },
     {
       path: '/s/:token',

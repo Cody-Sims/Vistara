@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { resolveConfig } from 'vite';
@@ -39,8 +39,53 @@ describe('Vite build artifacts', () => {
         target.base,
       );
     }
+
+    expectRouteChunks(production.root, production.build.outDir);
   }, 120_000);
 });
+
+/**
+ * The entry a visitor downloads to sign in must not carry the administration
+ * and cloud setup screens, which only a signed-in owner ever opens.
+ */
+function expectRouteChunks(root: string, outDir: string) {
+  const artifactRoot = resolve(root, outDir);
+  const html = readFileSync(resolve(artifactRoot, 'index.html'), 'utf8');
+  const entry = [...html.matchAll(assetReference)]
+    .map((match) => match.groups?.path)
+    .find((path) => path?.endsWith('.js'));
+
+  expect(entry).toBeDefined();
+  const entrySource = readFileSync(
+    resolve(artifactRoot, entry!.replace(/^\//, '')),
+    'utf8',
+  );
+
+  // Text that only the deferred screens contain.
+  for (const marker of [
+    'Connect storage',
+    'vistara-storage-',
+    'VISTARA_STORAGE__S3__BUCKET',
+    'Create workspace and owner',
+    'people in this workspace',
+  ]) {
+    expect(entrySource).not.toContain(marker);
+  }
+
+  const chunkDirectory = resolve(artifactRoot, 'assets');
+  const chunks = readdirSync(chunkDirectory).filter((name) =>
+    name.endsWith('.js'),
+  );
+  expect(chunks.length).toBeGreaterThan(1);
+
+  const carriesAssistant = chunks.filter((name) =>
+    readFileSync(resolve(chunkDirectory, name), 'utf8').includes(
+      'VISTARA_STORAGE__S3__BUCKET',
+    ),
+  );
+  expect(carriesAssistant).toHaveLength(1);
+  expect(carriesAssistant[0]).not.toBe(entry?.split('/').at(-1));
+}
 
 function expectShellOnlyServiceWorker(
   root: string,

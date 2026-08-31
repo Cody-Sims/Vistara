@@ -15,7 +15,8 @@ import {
   AdminUsersPage,
 } from '../features/admin';
 import { SearchView } from '../features/search';
-import { LoginPage, SessionProvider, SetupPage } from '../features/session';
+import { LoginPage, SessionProvider } from '../features/session';
+import { SetupPage } from '../features/session/SetupPage';
 import { currentUser } from '../features/session/sessionTestData';
 import { SettingsPage } from '../features/settings';
 import { auditAccessibilityTree } from './audit';

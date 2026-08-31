@@ -6,7 +6,9 @@ export {
 } from './accountData';
 export { RequireAdministration, RequireSession } from './guards';
 export { LoginPage } from './LoginPage';
-export { SetupPage, type SetupClient } from './SetupPage';
+// SetupPage is deliberately absent: it is only reached through the deferred
+// route module, so exporting it here would pull first-run setup into the
+// entry every visitor downloads.
 export { isValidSlug, slugify } from './workspaceSlug';
 export { activeMembership, canAdminister, describeRole } from './roles';
 export { safeDestination } from './safeDestination';

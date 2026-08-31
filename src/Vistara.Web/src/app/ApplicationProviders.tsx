@@ -1,7 +1,9 @@
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
 import { RouterProvider, type RouterProviderProps } from 'react-router-dom';
-import { clearStorageDraft } from '../features/admin';
+// Imported from the module rather than the feature barrel, so the entry does
+// not pull the administration screens in behind it.
+import { clearStorageDraft } from '../features/admin/storageDraft';
 import {
   clearAccountScopedData,
   SessionProvider,
