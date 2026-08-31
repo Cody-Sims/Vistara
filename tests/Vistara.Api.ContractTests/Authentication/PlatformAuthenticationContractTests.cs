@@ -9,6 +9,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Vistara.Api.Composition.Platform;
+using Vistara.Api.Composition.Runtime;
 using Vistara.Api.Features.Media;
 using Vistara.Auth.Cookies;
 using Vistara.Contracts.Media;
@@ -457,6 +458,7 @@ public sealed class PlatformAuthenticationContractTests
 
             builder.Services.AddSingleton<IMediaDeliveryApplicationPort>(
                 new PublicMediaApplicationPort());
+            builder.Services.AddVistaraApiRuntime(builder.Configuration);
             builder.Services.AddVistaraApiPlatform(builder.Configuration);
 
             WebApplication app = builder.Build();

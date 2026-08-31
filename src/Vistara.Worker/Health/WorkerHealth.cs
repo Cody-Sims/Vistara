@@ -32,7 +32,14 @@ public static class WorkerHealthServiceCollectionExtensions
         services.TryAddEnumerable(Probe<WorkerSchemaHealthProbe>());
         services.TryAddEnumerable(Probe<WorkerStorageHealthProbe>());
         services.TryAddEnumerable(Probe<WorkerQueueHealthProbe>());
-        services.TryAddScoped<SafeHealthEvaluator>();
+        services.TryAddSingleton(new HealthEvaluationOptions());
+        services.TryAddSingleton<HealthReportCache>();
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddScoped(static provider => new SafeHealthEvaluator(
+            provider.GetServices<IHealthDependencyProbe>(),
+            provider.GetRequiredService<HealthEvaluationOptions>(),
+            provider.GetRequiredService<HealthReportCache>(),
+            provider.GetRequiredService<TimeProvider>()));
         services.TryAddScoped<WorkerHealthService>();
         bool hasCustomJobObserver = services.Any(descriptor =>
             descriptor.ServiceType == typeof(IJobRuntimeObserver) &&

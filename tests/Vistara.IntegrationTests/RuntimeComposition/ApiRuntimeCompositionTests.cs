@@ -11,6 +11,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Vistara.Api.Composition.Gallery;
 using Vistara.Api.Composition.Media;
 using Vistara.Api.Composition.Platform;
+using Vistara.Api.Composition.Runtime;
 using Vistara.Api.Features.Derivatives;
 using Vistara.Api.Features.Events;
 using Vistara.Api.Features.Media;
@@ -106,6 +107,7 @@ public sealed class ApiRuntimeCompositionTests
                 new FakeMediaRuntimeDependencies());
             builder.Services.AddSingleton<IPlatformRateLimitHook>(
                 new DependencyFailingRateLimitHook());
+            builder.Services.AddVistaraApiRuntime(builder.Configuration);
             builder.Services.AddVistaraApiPlatform(builder.Configuration);
             builder.Services.AddVistaraApiPersistence(builder.Configuration);
             builder.Services.AddVistaraMedia(builder.Configuration);
@@ -140,22 +142,21 @@ public sealed class ApiRuntimeCompositionTests
 
             (int liveStatus, string liveBody) =
                 await SendAsync(app, "/health/live");
-            Assert.Equal(StatusCodes.Status200OK, liveStatus);
-            Assert.Contains("\"name\":\"process\"", liveBody, StringComparison.Ordinal);
-            Assert.DoesNotContain(
-                "\"name\":\"database\"",
-                liveBody,
-                StringComparison.Ordinal);
+            Assert.Equal(StatusCodes.Status204NoContent, liveStatus);
+            Assert.Empty(liveBody);
 
             (int readyStatus, string readyBody) =
                 await SendAsync(app, "/health/ready");
-            Assert.Equal(StatusCodes.Status503ServiceUnavailable, readyStatus);
-            Assert.DoesNotContain(databasePath, readyBody, StringComparison.Ordinal);
-            Assert.DoesNotContain(mediaRoot, readyBody, StringComparison.Ordinal);
-
             (int startupStatus, string startupBody) =
                 await SendAsync(app, "/health/startup");
-            Assert.Equal(StatusCodes.Status503ServiceUnavailable, startupStatus);
+            Assert.Equal(
+                StatusCodes.Status500InternalServerError,
+                readyStatus);
+            Assert.Equal(
+                StatusCodes.Status500InternalServerError,
+                startupStatus);
+            Assert.DoesNotContain(databasePath, readyBody, StringComparison.Ordinal);
+            Assert.DoesNotContain(mediaRoot, readyBody, StringComparison.Ordinal);
             Assert.DoesNotContain(databasePath, startupBody, StringComparison.Ordinal);
             Assert.DoesNotContain(mediaRoot, startupBody, StringComparison.Ordinal);
         }

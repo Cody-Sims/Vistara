@@ -16,7 +16,7 @@ namespace Vistara.IntegrationTests.Health;
 public sealed class HealthEvaluationTests
 {
     [Fact]
-    public async Task Liveness_route_is_anonymous_and_returns_process_health()
+    public async Task Liveness_route_is_anonymous_and_returns_no_content()
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.Services.AddVistaraApiHealth();
@@ -47,9 +47,10 @@ public sealed class HealthEvaluationTests
         string body = await new StreamReader(context.Response.Body)
             .ReadToEndAsync(CancellationToken.None);
 
-        Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
-        Assert.Contains("\"name\":\"process\"", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"name\":\"database\"", body, StringComparison.Ordinal);
+        Assert.Equal(StatusCodes.Status204NoContent, context.Response.StatusCode);
+        Assert.Empty(body);
+        Assert.Equal(0, context.Response.ContentLength);
+        Assert.Equal("no-store", context.Response.Headers.CacheControl);
     }
 
     [Fact]

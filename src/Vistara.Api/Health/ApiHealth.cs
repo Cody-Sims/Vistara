@@ -26,7 +26,14 @@ public static class ApiHealthServiceCollectionExtensions
         services.TryAddEnumerable(Probe<ApiSchemaHealthProbe>());
         services.TryAddEnumerable(Probe<ApiStorageHealthProbe>());
         services.TryAddEnumerable(Probe<ApiQueueHealthProbe>());
-        services.TryAddScoped<SafeHealthEvaluator>();
+        services.TryAddSingleton(new HealthEvaluationOptions());
+        services.TryAddSingleton<HealthReportCache>();
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddScoped(static provider => new SafeHealthEvaluator(
+            provider.GetServices<IHealthDependencyProbe>(),
+            provider.GetRequiredService<HealthEvaluationOptions>(),
+            provider.GetRequiredService<HealthReportCache>(),
+            provider.GetRequiredService<TimeProvider>()));
         services.TryAddScoped<ApiHealthService>();
         return services;
     }
@@ -43,9 +50,11 @@ public static class ApiHealthEndpointRouteBuilderExtensions
         endpoints.MapVistaraApiHealthEndpoints(includeLiveness: true);
 
     /// <summary>
-    /// Maps the health routes. Hosts whose route table already owns
-    /// <c>/health/live</c> map the dependency routes only; liveness is still
-    /// answered by <see cref="ApiHealthApplicationBuilderExtensions.UseVistaraApiHealth"/>.
+    /// Maps the health routes. Liveness answers <c>204 No Content</c> with no
+    /// body because container health checks assert exactly that. Hosts whose
+    /// route table already owns <c>/health/live</c> map the dependency routes
+    /// only; liveness is still answered ahead of the pipeline by
+    /// <see cref="ApiHealthApplicationBuilderExtensions.UseVistaraApiHealth"/>.
     /// </summary>
     public static IEndpointRouteBuilder MapVistaraApiHealthEndpoints(
         this IEndpointRouteBuilder endpoints,
@@ -56,9 +65,11 @@ public static class ApiHealthEndpointRouteBuilderExtensions
         {
             endpoints.MapGet(
                     "/health/live",
-                    static (HttpContext context) => Write(
-                        context,
-                        HealthEndpointKind.Liveness))
+                    static (HttpContext context) =>
+                    {
+                        ApiLiveness.Write(context);
+                        return Task.CompletedTask;
+                    })
                 .AllowAnonymous();
         }
 
@@ -80,17 +91,32 @@ public static class ApiHealthEndpointRouteBuilderExtensions
     private static Task Write(
         HttpContext context,
         HealthEndpointKind endpoint) =>
-        ApiHealthService
-            .Resolve(context.RequestServices)
+        context.RequestServices
+            .GetRequiredService<ApiHealthService>()
             .WriteAsync(context, endpoint, context.RequestAborted);
+}
+
+internal static class ApiLiveness
+{
+    internal static void Write(HttpContext context)
+    {
+        context.Response.StatusCode = StatusCodes.Status204NoContent;
+        context.Response.ContentLength = 0;
+        context.Response.Headers.CacheControl = "no-store";
+    }
+
+    internal static bool Matches(HttpRequest request) =>
+        HttpMethods.IsGet(request.Method) &&
+        request.Path.Equals("/health/live", StringComparison.OrdinalIgnoreCase);
 }
 
 public static class ApiHealthApplicationBuilderExtensions
 {
     /// <summary>
-    /// Answers the health paths ahead of rate limiting, authentication, and
-    /// tenant resolution so probes keep working while dependencies are
-    /// degraded, and advertises the dependency routes on the route table.
+    /// Answers liveness ahead of rate limiting, authentication, and tenant
+    /// resolution so a saturated or degraded instance is never reported dead,
+    /// and maps readiness and startup as ordinary governed endpoints so their
+    /// dependency probes stay behind the rate limiter.
     /// </summary>
     public static IApplicationBuilder UseVistaraApiHealth(
         this IApplicationBuilder application)
@@ -101,11 +127,11 @@ public static class ApiHealthApplicationBuilderExtensions
             endpoints.MapVistaraApiHealthEndpoints(includeLiveness: false);
         }
 
-        return application.UseMiddleware<ApiHealthMiddleware>();
+        return application.UseMiddleware<ApiLivenessMiddleware>();
     }
 }
 
-internal sealed class ApiHealthMiddleware(RequestDelegate next)
+internal sealed class ApiLivenessMiddleware(RequestDelegate next)
 {
     private readonly RequestDelegate _next =
         next ?? throw new ArgumentNullException(nameof(next));
@@ -113,39 +139,13 @@ internal sealed class ApiHealthMiddleware(RequestDelegate next)
     public Task InvokeAsync(HttpContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        if (!HttpMethods.IsGet(context.Request.Method) ||
-            !TryResolve(context.Request.Path, out HealthEndpointKind endpoint))
+        if (!ApiLiveness.Matches(context.Request))
         {
             return _next(context);
         }
 
-        return ApiHealthService
-            .Resolve(context.RequestServices)
-            .WriteAsync(context, endpoint, context.RequestAborted);
-    }
-
-    private static bool TryResolve(PathString path, out HealthEndpointKind endpoint)
-    {
-        if (path.Equals("/health/live", StringComparison.OrdinalIgnoreCase))
-        {
-            endpoint = HealthEndpointKind.Liveness;
-            return true;
-        }
-
-        if (path.Equals("/health/ready", StringComparison.OrdinalIgnoreCase))
-        {
-            endpoint = HealthEndpointKind.Readiness;
-            return true;
-        }
-
-        if (path.Equals("/health/startup", StringComparison.OrdinalIgnoreCase))
-        {
-            endpoint = HealthEndpointKind.Startup;
-            return true;
-        }
-
-        endpoint = default;
-        return false;
+        ApiLiveness.Write(context);
+        return Task.CompletedTask;
     }
 }
 
@@ -247,20 +247,6 @@ public sealed class ApiHealthService(SafeHealthEvaluator evaluator)
 {
     private readonly SafeHealthEvaluator _evaluator =
         evaluator ?? throw new ArgumentNullException(nameof(evaluator));
-
-    /// <summary>
-    /// Resolves the composed health service, or an evaluator over whatever
-    /// probes are registered, so health never fails with a server error when
-    /// runtime composition is incomplete.
-    /// </summary>
-    internal static ApiHealthService Resolve(IServiceProvider services)
-    {
-        ArgumentNullException.ThrowIfNull(services);
-        return services.GetService<ApiHealthService>() ??
-            new ApiHealthService(
-                new SafeHealthEvaluator(
-                    services.GetServices<IHealthDependencyProbe>()));
-    }
 
     public async Task WriteAsync(
         HttpContext context,

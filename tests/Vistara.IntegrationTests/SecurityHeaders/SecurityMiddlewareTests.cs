@@ -12,6 +12,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Vistara.Api.Composition.Platform;
+using Vistara.Api.Composition.Runtime;
 using Vistara.Api.Composition.Security;
 using Vistara.Auth.Cookies;
 using Xunit;
@@ -927,6 +928,7 @@ public sealed class SecurityMiddlewareTests
             builder.Services.AddVistaraApiSecurity(
                 builder.Configuration,
                 builder.Environment);
+            builder.Services.AddVistaraApiRuntime(builder.Configuration);
             builder.Services.AddVistaraApiPlatform(builder.Configuration);
 
             WebApplication app = builder.Build();

@@ -8,6 +8,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
 using Vistara.Api.Composition.Gallery;
 using Vistara.Api.Composition.Platform;
+using Vistara.Api.Composition.Runtime;
 using Vistara.Api.OpenApi.Gallery;
 using Vistara.Application.Common.Imaging;
 using Vistara.Application.Common.Storage;
@@ -63,6 +64,7 @@ builder.Services.AddDataProtection().UseEphemeralDataProtectionProvider();
 builder.Services.AddSingleton<
     ApiMedia.IMediaRuntimeDependencies,
     TestMediaRuntimeDependencies>();
+builder.Services.AddVistaraApiRuntime(builder.Configuration);
 builder.Services.AddVistaraApiPlatform(builder.Configuration);
 builder.Services.AddVistaraApiPersistence(builder.Configuration);
 ApiMedia.MediaServiceCollectionExtensions.AddVistaraMedia(
