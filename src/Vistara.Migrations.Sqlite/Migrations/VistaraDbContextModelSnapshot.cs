@@ -1713,6 +1713,39 @@ namespace Vistara.Migrations.Sqlite.Migrations
                     b.ToTable("local_identities", (string)null);
                 });
 
+            modelBuilder.Entity("Vistara.Persistence.Model.PlatformBootstrapRow", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("id");
+
+                    b.Property<Guid>("OwnerTenantId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("owner_tenant_id");
+
+                    b.Property<Guid>("OwnerUserId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("owner_user_id");
+
+                    b.Property<DateTime>("ProvisionedAtUtc")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("provisioned_at_utc");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("version");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("platform_bootstrap", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_platform_bootstrap_singleton", "\"id\" = 1");
+
+                            t.HasCheckConstraint("ck_platform_bootstrap_version", "\"version\" >= 1");
+                        });
+                });
+
             modelBuilder.Entity("Vistara.Persistence.Model.PurgeBatchItemRow", b =>
                 {
                     b.Property<Guid>("TenantId")

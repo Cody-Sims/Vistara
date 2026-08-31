@@ -59,6 +59,7 @@ public sealed class PersistenceModelTests
                 "local_identities",
                 "outbox_messages",
                 "outbox_sequences",
+                "platform_bootstrap",
                 "public_derivative_routes",
                 "purge_batch_items",
                 "purge_batches",

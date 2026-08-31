@@ -6,6 +6,18 @@ public static class PostgresTenantRowSecurity
 {
     public const string TenantSettingName = "vistara.tenant_id";
     public const string MigrationSettingName = "vistara.migration_id";
+    public const string IdentityDirectorySettingName = "vistara.identity_directory";
+
+    /// <summary>
+    /// Tables that an authenticated principal may read across tenants strictly
+    /// to resolve its own memberships during sign-in and profile reads.
+    /// </summary>
+    public static IReadOnlyList<string> IdentityDirectoryTables { get; } =
+        Array.AsReadOnly<string>(
+        [
+            "tenant_memberships",
+            "tenants",
+        ]);
 
     private static IReadOnlyList<string> InitialTenantOwnedTables { get; } =
         Array.AsReadOnly<string>(
@@ -115,6 +127,45 @@ public static class PostgresTenantRowSecurity
                             current_setting('{TenantSettingName}', true),
                             '')::uuid);
                 """);
+        }
+    }
+
+    /// <summary>
+    /// Adds a permissive, read-only policy that is active only while the
+    /// identity-directory setting is set inside the current transaction. It
+    /// lets one indexed query resolve a principal's memberships without
+    /// probing every tenant, while all other access stays tenant isolated.
+    /// </summary>
+    public static void EnableIdentityDirectory(MigrationBuilder migrationBuilder)
+    {
+        ArgumentNullException.ThrowIfNull(migrationBuilder);
+
+        foreach (string table in IdentityDirectoryTables)
+        {
+            ValidateIdentifier(table);
+            migrationBuilder.Sql(
+                $"""
+                CREATE POLICY "identity_directory" ON "{table}"
+                    AS PERMISSIVE
+                    FOR SELECT
+                    TO PUBLIC
+                    USING (
+                        current_setting(
+                            '{IdentityDirectorySettingName}',
+                            true) = 'on');
+                """);
+        }
+    }
+
+    public static void DisableIdentityDirectory(MigrationBuilder migrationBuilder)
+    {
+        ArgumentNullException.ThrowIfNull(migrationBuilder);
+
+        foreach (string table in IdentityDirectoryTables)
+        {
+            ValidateIdentifier(table);
+            migrationBuilder.Sql(
+                $"""DROP POLICY IF EXISTS "identity_directory" ON "{table}";""");
         }
     }
 

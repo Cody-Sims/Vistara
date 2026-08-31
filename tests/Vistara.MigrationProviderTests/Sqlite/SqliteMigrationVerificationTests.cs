@@ -28,6 +28,8 @@ public sealed class SqliteMigrationVerificationTests
         "20260830101756_AddSharingPersistence";
     private const string LocalCredentialsMigration =
         "20260830233106_AddLocalCredentials";
+    private const string PlatformBootstrapMigration =
+        "20260831000511_AddPlatformBootstrap";
 
     private static readonly string[] ExpectedMigrations =
     [
@@ -39,6 +41,7 @@ public sealed class SqliteMigrationVerificationTests
         WorkerTenantCatalogMigration,
         SharingPersistenceMigration,
         LocalCredentialsMigration,
+        PlatformBootstrapMigration,
     ];
 
     private static readonly string[] ExpectedTables =
@@ -69,6 +72,7 @@ public sealed class SqliteMigrationVerificationTests
         "local_identities",
         "outbox_messages",
         "outbox_sequences",
+        "platform_bootstrap",
         "public_derivative_routes",
         "purge_batch_items",
         "purge_batches",
@@ -172,6 +176,10 @@ public sealed class SqliteMigrationVerificationTests
             script,
             StringComparison.Ordinal);
         Assert.Contains(
+            PlatformBootstrapMigration,
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "CREATE TEMP TABLE legacy_upload_job_decisions",
             script,
             StringComparison.Ordinal);
@@ -194,7 +202,7 @@ public sealed class SqliteMigrationVerificationTests
         IMigrator migrator = context.GetService<IMigrator>();
 
         string rollback = migrator.GenerateScript(
-            LocalCredentialsMigration,
+            PlatformBootstrapMigration,
             Migration.InitialDatabase);
         foreach (string table in ExpectedTables)
         {

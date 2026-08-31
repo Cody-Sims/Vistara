@@ -40,6 +40,10 @@ internal static class MigrationTestSupport
         "20260830233106_AddLocalCredentials";
     internal const string PostgresLocalCredentialsMigration =
         "20260830233131_AddLocalCredentials";
+    internal const string SqlitePlatformBootstrapMigration =
+        "20260831000511_AddPlatformBootstrap";
+    internal const string PostgresPlatformBootstrapMigration =
+        "20260831000526_AddPlatformBootstrap";
 
     internal static readonly string[] SqliteMigrations =
     [
@@ -51,6 +55,7 @@ internal static class MigrationTestSupport
         SqliteWorkerTenantCatalogMigration,
         SqliteSharingPersistenceMigration,
         SqliteLocalCredentialsMigration,
+        SqlitePlatformBootstrapMigration,
     ];
 
     internal static readonly string[] PostgresMigrations =
@@ -63,6 +68,7 @@ internal static class MigrationTestSupport
         PostgresWorkerTenantCatalogMigration,
         PostgresSharingPersistenceMigration,
         PostgresLocalCredentialsMigration,
+        PostgresPlatformBootstrapMigration,
     ];
 
     private static readonly Guid TenantId =

@@ -38,6 +38,23 @@ public sealed class LocalIdentityRow
     public DateTimeOffset LinkedAtUtc { get; set; }
 }
 
+/// <summary>
+/// A database-enforced singleton marker proving that first-owner provisioning
+/// has already produced a winner. The primary key is pinned to
+/// <see cref="SingletonId"/> so concurrent bootstrap attempts with distinct
+/// slugs and emails still collide on one unique key.
+/// </summary>
+public sealed class PlatformBootstrapRow
+{
+    public const int SingletonId = 1;
+
+    public int Id { get; set; } = SingletonId;
+    public Guid OwnerTenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public DateTimeOffset ProvisionedAtUtc { get; set; }
+    public long Version { get; set; }
+}
+
 public sealed class LocalCredentialRow
 {
     public Guid LocalIdentityId { get; set; }

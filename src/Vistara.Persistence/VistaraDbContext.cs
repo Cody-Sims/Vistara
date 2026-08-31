@@ -38,6 +38,7 @@ public sealed class VistaraDbContext(
     public DbSet<UserRow> Users => Set<UserRow>();
     public DbSet<LocalIdentityRow> LocalIdentities => Set<LocalIdentityRow>();
     public DbSet<LocalCredentialRow> LocalCredentials => Set<LocalCredentialRow>();
+    public DbSet<PlatformBootstrapRow> PlatformBootstrap => Set<PlatformBootstrapRow>();
     public DbSet<ExternalIdentityRow> ExternalIdentities => Set<ExternalIdentityRow>();
     public DbSet<TenantMembershipRow> TenantMemberships => Set<TenantMembershipRow>();
     public DbSet<AuthSessionRow> AuthSessions => Set<AuthSessionRow>();
@@ -165,6 +166,22 @@ public sealed class VistaraDbContext(
                 .WithMany()
                 .HasForeignKey(row => row.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<PlatformBootstrapRow>(entity =>
+        {
+            entity.ToTable("platform_bootstrap", table =>
+            {
+                table.HasCheckConstraint(
+                    "ck_platform_bootstrap_singleton",
+                    "\"id\" = 1");
+                table.HasCheckConstraint(
+                    "ck_platform_bootstrap_version",
+                    "\"version\" >= 1");
+            });
+            entity.HasKey(row => row.Id);
+            entity.Property(row => row.Id).ValueGeneratedNever();
+            entity.Property(row => row.Version).IsConcurrencyToken();
         });
 
         modelBuilder.Entity<LocalCredentialRow>(entity =>

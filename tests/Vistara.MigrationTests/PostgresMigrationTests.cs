@@ -47,6 +47,17 @@ public sealed partial class PostgresMigrationTests
             MigrationTestSupport.PostgresLocalCredentialsMigration,
             script,
             StringComparison.Ordinal);
+        Assert.Contains(
+            MigrationTestSupport.PostgresPlatformBootstrapMigration,
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "CREATE POLICY \"identity_directory\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            PostgresTenantRowSecurity.IdentityDirectoryTables.Count,
+            MigrationTestSupport.Count(script, "CREATE POLICY \"identity_directory\""));
         Assert.Contains("__EFMigrationsHistory", script, StringComparison.Ordinal);
         Assert.Contains("DO $EF$", script, StringComparison.Ordinal);
         Assert.Contains("uuid", script, StringComparison.Ordinal);
