@@ -18,14 +18,21 @@ internal static class OidcBoundedContent
         using Stream stream = await content
             .ReadAsStreamAsync(cancellationToken)
             .ConfigureAwait(false);
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(maximumBytes + 1);
+
+        // ArrayPool rounds a rent up to its bucket size, so the rented array is
+        // routinely far larger than the ceiling. Every read must be clamped to
+        // the ceiling rather than to buffer.Length, or a hostile provider could
+        // stream a whole bucket past the limit in one read before the loop
+        // condition is ever re-evaluated.
+        int ceiling = maximumBytes + 1;
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(ceiling);
         try
         {
             int total = 0;
-            while (total <= maximumBytes)
+            while (total < ceiling)
             {
                 int read = await stream
-                    .ReadAsync(buffer.AsMemory(total, buffer.Length - total), cancellationToken)
+                    .ReadAsync(buffer.AsMemory(total, ceiling - total), cancellationToken)
                     .ConfigureAwait(false);
                 if (read == 0)
                 {

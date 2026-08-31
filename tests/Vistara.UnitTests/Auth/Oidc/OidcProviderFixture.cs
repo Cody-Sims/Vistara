@@ -86,7 +86,8 @@ internal sealed class OidcProviderFixture : IDisposable
         string? issuer = null,
         string? authorizationEndpoint = null,
         string? tokenEndpoint = null,
-        string? jwksUri = null) =>
+        string? jwksUri = null,
+        string? padding = null) =>
         $$"""
         {
           "issuer": "{{issuer ?? Options.ExpectedIssuer}}",
@@ -95,7 +96,8 @@ internal sealed class OidcProviderFixture : IDisposable
           "jwks_uri": "{{jwksUri ?? JwksUri.AbsoluteUri}}",
           "response_types_supported": ["code"],
           "subject_types_supported": ["pairwise"],
-          "id_token_signing_alg_values_supported": ["RS256"]
+          "id_token_signing_alg_values_supported": ["RS256"],
+          "vistara_padding": "{{padding ?? string.Empty}}"
         }
         """;
 
@@ -240,6 +242,22 @@ internal sealed class OidcHttpTestTransport : HttpMessageHandler
         return response;
     }
 
+    /// <summary>
+    /// Produces an endless body through a stream that records the largest read
+    /// the reader ever asks for, so a test can prove the ceiling is applied to
+    /// each read rather than to the rented ArrayPool bucket.
+    /// </summary>
+    internal static (HttpResponseMessage Response, RepeatingStream Recorder) RecordedEndlessStream()
+    {
+        var stream = new RepeatingStream(EndlessStreamCeiling);
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(stream),
+        };
+        response.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        return (response, stream);
+    }
+
     protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request,
         CancellationToken cancellationToken)
@@ -286,12 +304,16 @@ internal sealed class OidcHttpTestTransport : HttpMessageHandler
     /// Produces an unbounded-looking body with no content length so a reader
     /// must enforce its own byte ceiling rather than trusting the provider.
     /// </summary>
-    private sealed class RepeatingStream : Stream
+    internal sealed class RepeatingStream : Stream
     {
         private readonly int _ceiling;
         private int _produced;
 
         internal RepeatingStream(int ceiling) => _ceiling = ceiling;
+
+        internal int LargestRequestedRead { get; private set; }
+
+        internal int TotalBytesRead => _produced;
 
         public override bool CanRead => true;
 
@@ -313,6 +335,7 @@ internal sealed class OidcHttpTestTransport : HttpMessageHandler
 
         public override int Read(Span<byte> buffer)
         {
+            LargestRequestedRead = Math.Max(LargestRequestedRead, buffer.Length);
             if (_produced >= _ceiling)
             {
                 return 0;

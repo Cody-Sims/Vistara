@@ -7,8 +7,8 @@ namespace Vistara.UnitTests.Auth.Oidc;
 
 public sealed class OidcTokenClientTests
 {
-    private const string AuthorizationCode = "0.AXkAauthorization-code-value";
-    private const string CodeVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    private const string AuthorizationCode = OidcCredentialStubs.AuthorizationCode;
+    private const string CodeVerifier = OidcCredentialStubs.CodeVerifier;
 
     [Fact]
     public async Task Token_exchange_posts_the_code_verifier_and_a_managed_identity_assertion()
@@ -16,7 +16,7 @@ public sealed class OidcTokenClientTests
         using var provider = new OidcProviderFixture();
         provider.Transport.TokenResponse = () =>
             OidcHttpTestTransport.Json(TokenResponseJson());
-        var assertions = new StubClientAssertionProvider("federated-assertion");
+        var assertions = new OidcCredentialStubs.StubClientAssertionProvider("federated-assertion");
         OidcTokenClient client = CreateClient(provider, assertions);
 
         Result<OidcTokenSet> result = await client.RedeemAuthorizationCodeAsync(
@@ -49,8 +49,8 @@ public sealed class OidcTokenClientTests
             OidcHttpTestTransport.Json(TokenResponseJson());
         OidcTokenClient client = CreateClient(
             provider,
-            new StubClientAssertionProvider(null),
-            new StubClientSecretProvider("fallback-secret"));
+            new OidcCredentialStubs.StubClientAssertionProvider(null),
+            new OidcCredentialStubs.StubClientSecretProvider("fallback-secret"));
 
         Result<OidcTokenSet> result = await client.RedeemAuthorizationCodeAsync(
             new OidcAuthorizationCodeRedemption(AuthorizationCode, CodeVerifier),
@@ -72,8 +72,8 @@ public sealed class OidcTokenClientTests
             OidcHttpTestTransport.Json(TokenResponseJson());
         OidcTokenClient client = CreateClient(
             provider,
-            new StubClientAssertionProvider("federated-assertion"),
-            new StubClientSecretProvider("fallback-secret"));
+            new OidcCredentialStubs.StubClientAssertionProvider("federated-assertion"),
+            new OidcCredentialStubs.StubClientSecretProvider("fallback-secret"));
 
         _ = await client.RedeemAuthorizationCodeAsync(
             new OidcAuthorizationCodeRedemption(AuthorizationCode, CodeVerifier),
@@ -89,7 +89,7 @@ public sealed class OidcTokenClientTests
     public async Task Token_exchange_reports_an_unavailable_credential_rather_than_going_anonymous()
     {
         using var provider = new OidcProviderFixture();
-        OidcTokenClient client = CreateClient(provider, new StubClientAssertionProvider(null));
+        OidcTokenClient client = CreateClient(provider, new OidcCredentialStubs.StubClientAssertionProvider(null));
 
         Result<OidcTokenSet> result = await client.RedeemAuthorizationCodeAsync(
             new OidcAuthorizationCodeRedemption(AuthorizationCode, CodeVerifier),
@@ -108,8 +108,8 @@ public sealed class OidcTokenClientTests
             OidcHttpTestTransport.Json(TokenResponseJson());
         OidcTokenClient client = CreateClient(
             provider,
-            new StubClientAssertionProvider(null, faults: true),
-            new StubClientSecretProvider("fallback-secret"));
+            new OidcCredentialStubs.StubClientAssertionProvider(null, faults: true),
+            new OidcCredentialStubs.StubClientSecretProvider("fallback-secret"));
 
         Result<OidcTokenSet> result = await client.RedeemAuthorizationCodeAsync(
             new OidcAuthorizationCodeRedemption(AuthorizationCode, CodeVerifier),
@@ -372,7 +372,7 @@ public sealed class OidcTokenClientTests
     {
         using var provider = new OidcProviderFixture();
         var credentials = new OidcClientCredentialResolver(
-            new StubClientAssertionProvider("assertion"),
+            new OidcCredentialStubs.StubClientAssertionProvider("assertion"),
             null);
 
         Assert.Throws<ArgumentNullException>(() =>
@@ -402,49 +402,5 @@ public sealed class OidcTokenClientTests
         OidcProviderFixture provider,
         IOidcClientAssertionProvider? assertionProvider = null,
         IOidcClientSecretProvider? secretProvider = null) =>
-        new(
-            provider.HttpClient,
-            provider.Options,
-            new OidcClientCredentialResolver(
-                assertionProvider ?? new StubClientAssertionProvider("federated-assertion"),
-                secretProvider),
-            provider.Clock);
-
-    private sealed class StubClientAssertionProvider : IOidcClientAssertionProvider
-    {
-        private readonly string? _assertion;
-        private readonly bool _faults;
-
-        internal StubClientAssertionProvider(string? assertion, bool faults = false)
-        {
-            _assertion = assertion;
-            _faults = faults;
-        }
-
-        internal Uri? RequestedAudience { get; private set; }
-
-        public ValueTask<OidcClientAssertion?> GetAssertionAsync(
-            Uri tokenEndpoint,
-            CancellationToken cancellationToken)
-        {
-            RequestedAudience = tokenEndpoint;
-            if (_faults)
-            {
-                throw new InvalidOperationException("managed identity unavailable");
-            }
-
-            return ValueTask.FromResult(
-                _assertion is null ? null : new OidcClientAssertion(_assertion));
-        }
-    }
-
-    private sealed class StubClientSecretProvider : IOidcClientSecretProvider
-    {
-        private readonly string? _secret;
-
-        internal StubClientSecretProvider(string? secret) => _secret = secret;
-
-        public ValueTask<string?> GetSecretAsync(CancellationToken cancellationToken) =>
-            ValueTask.FromResult(_secret);
-    }
+        OidcCredentialStubs.CreateTokenClient(provider, assertionProvider, secretProvider);
 }
