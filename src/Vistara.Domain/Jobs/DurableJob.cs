@@ -48,7 +48,7 @@ public sealed class DurableJob
 
     public int Priority { get; }
 
-    public int MaxAttempts { get; }
+    public int MaxAttempts { get; private set; }
 
     public DateTimeOffset AvailableAtUtc { get; private set; }
 
@@ -302,6 +302,39 @@ public sealed class DurableJob
         }
 
         ScheduleAfterFailure(failure, recoveredAtUtc, retryPolicy);
+        return Result.Success();
+    }
+
+    /// <summary>
+    /// Returns a dead-lettered job to the retry queue with an explicitly
+    /// granted attempt budget. Recovery is bounded by
+    /// <paramref name="maximumAttempts"/> so a permanently failing job cannot
+    /// be revived forever, and the version advances so concurrent recovery
+    /// attempts fence against each other.
+    /// </summary>
+    public Result GrantRecoveryAttempts(
+        int additionalAttempts,
+        int maximumAttempts,
+        DateTimeOffset recoveredAtUtc)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(additionalAttempts);
+        EnsureUtc(recoveredAtUtc, nameof(recoveredAtUtc));
+
+        if (State != JobState.DeadLettered)
+        {
+            return Result.Failure(JobErrors.InvalidState);
+        }
+
+        if (MaxAttempts >= maximumAttempts)
+        {
+            return Result.Failure(JobErrors.AttemptLimitReached);
+        }
+
+        MaxAttempts = Math.Min(MaxAttempts + additionalAttempts, maximumAttempts);
+        State = JobState.RetryScheduled;
+        AvailableAtUtc = recoveredAtUtc;
+        Lease = null;
+        Version = Version.Next();
         return Result.Success();
     }
 

@@ -33,14 +33,14 @@ function asset(status: AssetSummary['status'] = 'ready'): AssetSummary {
       status === 'ready'
         ? [
             {
-              kind: 'preview',
+              kind: 'grid',
               path: '/media/moonrise-1024.webp',
               width: 1024,
               height: 683,
               contentType: 'image/webp',
             },
             {
-              kind: 'display',
+              kind: 'viewer',
               path: '/media/moonrise-2400.webp',
               width: 2400,
               height: 1600,

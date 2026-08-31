@@ -93,7 +93,7 @@ public sealed class AssetEndpointContractTests
             application,
             "GET",
             "/api/v1/assets",
-            query: "?limit=20&search=lake&statuses=Ready&contentTypes=image%2Fjpeg" +
+            query: "?limit=20&search=lake&statuses=ready&contentTypes=image%2Fjpeg" +
                 "&favorite=true&sort=title&direction=asc");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -103,11 +103,15 @@ public sealed class AssetEndpointContractTests
         Assert.Equal("lake", application.LastCriteria?.Search);
         Assert.Equal(AssetSort.Title, application.LastCriteria?.Sort);
         Assert.Equal(SortDirection.Ascending, application.LastCriteria?.Direction);
+        Assert.Equal(["Ready"], application.LastCriteria?.Statuses);
         Assert.Equal("no-store", response.Headers.CacheControl.ToString());
     }
 
     [Theory]
     [InlineData("?limit=201", "asset_query_invalid")]
+    [InlineData("?statuses=Ready", "asset_query_invalid")]
+    [InlineData("?statuses=trashed", "asset_query_invalid")]
+    [InlineData("?statuses=purged", "asset_query_invalid")]
     [InlineData("?sort=privateMetadata", "asset_query_invalid")]
     [InlineData("?filter=%7B%22gps%22%3Atrue%7D", "asset_query_invalid")]
     [InlineData("?cursor=not-a-valid-cursor", "asset_cursor_invalid")]
@@ -163,7 +167,7 @@ public sealed class AssetEndpointContractTests
                     Renditions =
                     [
                         new AssetDeliverySource(
-                            "thumbnail",
+                            "thumb",
                             "/delivery/assets/asset/rendition",
                             400,
                             300,
@@ -319,6 +323,115 @@ public sealed class AssetEndpointContractTests
         Assert.Equal(HttpStatusCode.PreconditionFailed, conflict.StatusCode);
         Assert.Equal("asset_version_conflict", conflict.ProblemCode());
         Assert.DoesNotContain("\"v4\"", conflict.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Listed_and_detailed_assets_publish_documented_enum_tokens()
+    {
+        AssetQueryItem stored = Item() with
+        {
+            Renditions =
+            [
+                new AssetDeliverySource(
+                    "thumb",
+                    "/media/pipeline/source/thumb-512.webp",
+                    512,
+                    384,
+                    "image/webp"),
+            ],
+        };
+        var application = new FakeAssetQueryService
+        {
+            PageResult = AssetQueryPageResult.Success(
+                new AssetQueryPage([stored], null)),
+            DetailResult = AssetDetailResult.Success(
+                new AssetDetail(stored, Metadata(), [])),
+        };
+
+        TestResponse list = await SendAsync(
+            new FakeAssetAuthorizationPort(),
+            application,
+            "GET",
+            "/api/v1/assets");
+        TestResponse detail = await SendAsync(
+            new FakeAssetAuthorizationPort(),
+            application,
+            "GET",
+            "/api/v1/assets/{id:guid}");
+
+        JsonElement listed = list.Json().RootElement.GetProperty("items")[0];
+        Assert.Equal("ready", listed.GetProperty("status").GetString());
+        Assert.Equal("private", listed.GetProperty("visibility").GetString());
+        Assert.Equal(
+            "thumb",
+            listed.GetProperty("renditions")[0].GetProperty("kind").GetString());
+        JsonElement detailed = detail.Json().RootElement.GetProperty("asset");
+        Assert.Equal("ready", detailed.GetProperty("status").GetString());
+        Assert.Equal("private", detailed.GetProperty("visibility").GetString());
+        Assert.DoesNotContain("\"Ready\"", list.Body, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"Private\"", list.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Update_accepts_the_documented_visibility_token_and_rejects_stored_casing()
+    {
+        var application = new FakeAssetQueryService
+        {
+            UpdateResult = AssetUpdateResult.Success(
+                new AssetDetail(Item(), Metadata(), [])),
+        };
+
+        TestResponse documented = await SendAsync(
+            new FakeAssetAuthorizationPort(),
+            application,
+            "PATCH",
+            "/api/v1/assets/{id:guid}",
+            body: """{"visibility":"tenant"}""",
+            ifMatch: "\"v3\"",
+            idempotencyKey: "visibility-1");
+        string? forwarded = application.LastPatch?.Visibility;
+        TestResponse stored = await SendAsync(
+            new FakeAssetAuthorizationPort(),
+            application,
+            "PATCH",
+            "/api/v1/assets/{id:guid}",
+            body: """{"visibility":"Tenant"}""",
+            ifMatch: "\"v3\"",
+            idempotencyKey: "visibility-2");
+
+        Assert.Equal(HttpStatusCode.OK, documented.StatusCode);
+        Assert.Equal("Tenant", forwarded);
+        Assert.Equal(HttpStatusCode.BadRequest, stored.StatusCode);
+        Assert.Equal("asset_update_invalid", stored.ProblemCode());
+    }
+
+    [Fact]
+    public async Task Documented_status_filters_reach_the_query_on_list_and_timeline()
+    {
+        var application = new FakeAssetQueryService
+        {
+            PageResult = AssetQueryPageResult.Success(
+                new AssetQueryPage([Item()], null)),
+        };
+
+        TestResponse list = await SendAsync(
+            new FakeAssetAuthorizationPort(),
+            application,
+            "GET",
+            "/api/v1/assets",
+            query: "?statuses=ready,processing");
+        IReadOnlyList<string>? listStatuses = application.LastCriteria?.Statuses;
+        TestResponse timeline = await SendAsync(
+            new FakeAssetAuthorizationPort(),
+            application,
+            "GET",
+            "/api/v1/timeline",
+            query: "?statuses=ready");
+
+        Assert.Equal(HttpStatusCode.OK, list.StatusCode);
+        Assert.Equal(["Processing", "Ready"], listStatuses);
+        Assert.Equal(HttpStatusCode.OK, timeline.StatusCode);
+        Assert.Equal(["Ready"], application.LastCriteria?.Statuses);
     }
 
     [Fact]

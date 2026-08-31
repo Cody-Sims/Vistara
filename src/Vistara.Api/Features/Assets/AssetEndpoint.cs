@@ -189,10 +189,8 @@ public static class AssetEndpoint
             var response = new SearchFacetsResponse(
                 result.Groups.Select(group => new SearchFacetGroupResponse(
                     group.Name,
-                    group.Values.Select(value => new SearchFacetValueResponse(
-                        value.Value,
-                        value.Label,
-                        value.Count)).ToArray(),
+                    group.Values.Select(value => ToFacetValue(group.Name, value))
+                        .ToArray(),
                     group.Truncated)).ToArray());
             await WriteJsonAsync(
                 context,
@@ -210,6 +208,22 @@ public static class AssetEndpoint
                 cancellationToken);
         }
     }
+
+    /// <summary>
+    /// A facet value is the exact filter argument a client sends back, so the
+    /// status facet publishes the documented <c>AssetQueryStatus</c> token and
+    /// keeps the stored enum name out of the wire; the label carries the
+    /// readable form instead.
+    /// </summary>
+    private static SearchFacetValueResponse ToFacetValue(
+        string groupName,
+        AssetFacetValue value) =>
+        string.Equals(groupName, "status", StringComparison.Ordinal)
+            ? new SearchFacetValueResponse(
+                AssetContractVocabulary.PublishQueryStatus(value.Value),
+                AssetContractVocabulary.DisplayQueryStatus(value.Value),
+                value.Count)
+            : new SearchFacetValueResponse(value.Value, value.Label, value.Count);
 
     public static async Task GetAsync(
         HttpContext context,
@@ -505,7 +519,7 @@ public static class AssetEndpoint
             criteria = AssetQueryCriteria.Create(
                 limit,
                 NullIfEmpty(context.Request.Query["search"].ToString()),
-                ReadStrings(context.Request.Query["statuses"]),
+                ReadQueryStatuses(context.Request.Query["statuses"]),
                 ReadStrings(context.Request.Query["contentTypes"]),
                 ReadGuid(context.Request.Query["albumId"]),
                 ReadGuids(context.Request.Query["tagIds"]),
@@ -544,6 +558,23 @@ public static class AssetEndpoint
         string? value = NullIfEmpty(values.ToString());
         return value is null ? null : Guid.Parse(value);
     }
+
+    /// <summary>
+    /// Mirrors the update seam: the filter accepts exactly the documented
+    /// <c>AssetQueryStatus</c> tokens and translates them to the stored enum
+    /// names, so no request-rewriting middleware has to guess at casing.
+    /// </summary>
+    private static string[]? ReadQueryStatuses(StringValues values) =>
+        ReadStrings(values)?
+            .Select(token =>
+                AssetContractVocabulary.TryReadQueryStatus(
+                    token,
+                    out string storedValue)
+                    ? storedValue
+                    : throw new ArgumentException(
+                        "The asset status filter is unsupported.",
+                        nameof(values)))
+            .ToArray();
 
     private static Guid[]? ReadGuids(StringValues values) =>
         ReadStrings(values)?.Select(Guid.Parse).ToArray();
@@ -618,7 +649,7 @@ public static class AssetEndpoint
                         break;
                     case "visibility":
                         hasVisibility = true;
-                        visibility = property.Value.GetString();
+                        visibility = ReadVisibility(property.Value.GetString());
                         break;
                     case "capturedAt":
                         hasCapturedAt = true;
@@ -661,6 +692,16 @@ public static class AssetEndpoint
             return null;
         }
     }
+
+    /// <summary>
+    /// The contract publishes and accepts the documented lower-camel visibility
+    /// tokens, while the store keeps the domain enum name, so an update is
+    /// translated once here instead of leaking either casing across the seam.
+    /// </summary>
+    private static string ReadVisibility(string? token) =>
+        AssetContractVocabulary.TryReadVisibility(token, out string storedValue)
+            ? storedValue
+            : throw new JsonException("An unsupported visibility was supplied.");
 
     private static bool TryReadIfMatch(
         StringValues values,

@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query';
-import { useEffect, useMemo, useRef } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Link,
   useLocation,
@@ -7,6 +7,12 @@ import {
   useParams,
 } from 'react-router-dom';
 import type { ApiResponse, AssetDetail } from '../../api/generated';
+import type { VersionedAssetReference } from '../../api/generated';
+import {
+  CurationActions,
+  restoreTrashedAssets,
+  type CurationClient,
+} from '../curation';
 import { buildResponsiveImage } from './responsiveImage';
 import {
   captureFocusRestorer,
@@ -18,8 +24,15 @@ export interface ViewerDataSource {
   getAsset(assetId: string): Promise<ApiResponse<AssetDetail>>;
 }
 
+export interface ViewerCuration {
+  readonly client: CurationClient;
+  /** Overrides the session scope check, for the preview and for tests. */
+  readonly canCurate?: boolean;
+}
+
 interface ViewerPageProps {
   dataSource: ViewerDataSource;
+  curation?: ViewerCuration;
   neighborIds?: {
     previous?: string;
     next?: string;
@@ -35,15 +48,39 @@ function formatBytes(bytes: number) {
   }).format(bytes / (bytes >= 1_000_000 ? 1_000_000 : 1_000));
 }
 
-export function ViewerPage({ dataSource, neighborIds }: ViewerPageProps) {
+export function ViewerPage({
+  curation,
+  dataSource,
+  neighborIds,
+}: ViewerPageProps) {
   const { assetId } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const trashedRef = useRef<HTMLHeadingElement>(null);
+  const [trashedAsset, setTrashedAsset] = useState<{
+    readonly assetId: string;
+    readonly restorable: readonly VersionedAssetReference[];
+  }>();
+  /**
+   * The restore attempt belongs to the asset it was made for, so opening
+   * another asset never inherits its failure or its pending state.
+   */
+  const [restoreAttempt, setRestoreAttempt] = useState<{
+    readonly assetId: string;
+    readonly state: 'running' | 'failed';
+  }>();
   const returnAddress = useMemo(
     () => getViewerReturnAddress(location.state),
     [location.state],
   );
+  const trashed =
+    trashedAsset && trashedAsset.assetId === assetId ? trashedAsset : undefined;
+  const attempt =
+    restoreAttempt && restoreAttempt.assetId === assetId
+      ? restoreAttempt.state
+      : undefined;
   const query = useQuery({
     queryKey: ['asset-viewer', assetId],
     queryFn: () => {
@@ -60,14 +97,18 @@ export function ViewerPage({ dataSource, neighborIds }: ViewerPageProps) {
   useEffect(() => captureFocusRestorer(), []);
 
   useEffect(() => {
-    if (detail) headingRef.current?.focus({ preventScroll: true });
-  }, [detail]);
+    if (detail && !trashed) headingRef.current?.focus({ preventScroll: true });
+  }, [detail, trashed]);
+
+  useEffect(() => {
+    if (trashed) trashedRef.current?.focus({ preventScroll: true });
+  }, [trashed]);
 
   useEffect(() => {
     function handleKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        void navigate(returnAddress);
+      // A panel or dialog inside the viewer answers the key first and marks it
+      // handled; the viewer must not also act on it.
+      if (event.defaultPrevented) {
         return;
       }
 
@@ -76,6 +117,12 @@ export function ViewerPage({ dataSource, neighborIds }: ViewerPageProps) {
         event.target instanceof HTMLTextAreaElement ||
         event.target instanceof HTMLSelectElement
       ) {
+        return;
+      }
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        void navigate(returnAddress);
         return;
       }
 
@@ -129,6 +176,63 @@ export function ViewerPage({ dataSource, neighborIds }: ViewerPageProps) {
 
   const { asset, metadata } = detail;
   const capturedAt = metadata.capturedAt ?? asset.capturedAt;
+
+  async function undoTrash(
+    client: CurationClient,
+    id: string,
+    restorable: readonly VersionedAssetReference[],
+  ) {
+    setRestoreAttempt({ assetId: id, state: 'running' });
+    try {
+      await restoreTrashedAssets(
+        client,
+        restorable,
+        () => globalThis.crypto?.randomUUID?.() ?? `web-${Date.now()}`,
+      );
+      setTrashedAsset(undefined);
+      setRestoreAttempt(undefined);
+      await queryClient.invalidateQueries({
+        queryKey: ['asset-viewer', assetId],
+      });
+    } catch {
+      setRestoreAttempt({ assetId: id, state: 'failed' });
+    }
+  }
+
+  if (trashed && curation) {
+    return (
+      <section className={styles.statePanel} aria-labelledby="asset-trashed">
+        <h1 id="asset-trashed" ref={trashedRef} tabIndex={-1}>
+          Moved to trash
+        </h1>
+        <p role="status" aria-live="polite">
+          {`${asset.title} is in Trash and can be restored until it is purged.`}
+        </p>
+        {attempt === 'failed' ? (
+          <p role="alert">
+            The restore could not be started. Open Trash to try again.
+          </p>
+        ) : null}
+        {trashed.restorable.length > 0 ? (
+          <button
+            disabled={attempt === 'running'}
+            onClick={() =>
+              void undoTrash(
+                curation.client,
+                trashed.assetId,
+                trashed.restorable,
+              )
+            }
+            type="button"
+          >
+            Undo move to trash
+          </button>
+        ) : null}
+        <Link to={returnAddress}>Back to library</Link>
+        <Link to="/trash">Open Trash</Link>
+      </section>
+    );
+  }
 
   return (
     <article className={styles.viewer} aria-labelledby="asset-title">
@@ -227,6 +331,26 @@ export function ViewerPage({ dataSource, neighborIds }: ViewerPageProps) {
               </div>
             ) : null}
           </dl>
+          {curation ? (
+            <CurationActions
+              albumIds={detail.albums.map((album) => album.id)}
+              assets={[asset]}
+              client={curation.client}
+              onCurated={() =>
+                void queryClient.invalidateQueries({
+                  queryKey: ['asset-viewer', assetId],
+                })
+              }
+              onTrashed={(ids, restorable) => {
+                if (ids.length > 0 && assetId) {
+                  setTrashedAsset({ assetId, restorable });
+                }
+              }}
+              {...(curation.canCurate === undefined
+                ? {}
+                : { canCurate: curation.canCurate })}
+            />
+          ) : null}
           {asset.tags.length > 0 ? (
             <div>
               <h2>Tags</h2>

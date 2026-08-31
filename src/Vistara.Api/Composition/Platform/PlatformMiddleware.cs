@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Vistara.Api.Composition.Runtime;
 using Vistara.Auth.Cookies;
 using Vistara.Persistence;
 
@@ -111,6 +112,7 @@ public static class PlatformApplicationBuilderExtensions
 
         app.UseMiddleware<PlatformExceptionMiddleware>();
         app.UseMiddleware<PlatformCorrelationMiddleware>();
+        app.UseVistaraApiRuntime();
         app.UseMiddleware<PlatformRateLimitMiddleware>();
         app.UseRouting();
         app.UseAuthentication();

@@ -1,0 +1,116 @@
+name: Deployment gates
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deployment-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  migration-lock:
+    name: Migration lock and idempotency
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build migration bundle image
+        run: >-
+          docker build
+          --file deploy/containers/migration.Dockerfile
+          --tag vistara-migrations:ci
+          .
+
+      - name: Run concurrent migration bundles
+        env:
+          MIGRATION_IMAGE: vistara-migrations:ci
+        run: >-
+          ./deploy/containers/tests/migration-lock.sh
+          --log-directory artifacts/migration-lock
+          --concurrency 3
+
+      - name: Upload migration bundle logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: migration-lock-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/migration-lock/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  compose-startup:
+    name: Compose startup and health
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Generate deployment credentials
+        run: ./deploy/generate-env.sh deploy/.env
+
+      - name: Build deployment images
+        run: >-
+          docker compose --env-file deploy/.env
+          --file deploy/compose.starter.yml build
+
+      - name: Validate Compose topologies
+        run: |
+          set -euo pipefail
+          # Compose merge and include semantics differ between releases, so the
+          # version that rendered these topologies must stay in the log.
+          docker compose version
+          for file in development starter postgres; do
+            docker compose --env-file deploy/.env \
+              --file "deploy/compose.$file.yml" config --quiet
+          done
+
+      - name: Start and probe the starter topology
+        run: >-
+          ./deploy/containers/tests/compose-startup.sh
+          --file deploy/compose.starter.yml
+          --env-file deploy/.env
+          --project vistara-starter-gate
+          --completed migrate
+          --service api
+          --service worker
+          --service proxy
+          --probe http://127.0.0.1:8080/health/live
+          --probe http://127.0.0.1:8080/health/ready
+          --probe http://127.0.0.1:8080/health/startup
+
+      - name: Start and probe the PostgreSQL topology
+        run: >-
+          ./deploy/containers/tests/compose-startup.sh
+          --file deploy/compose.postgres.yml
+          --env-file deploy/.env
+          --project vistara-postgres-gate
+          --completed migrate
+          --completed minio-bootstrap
+          --service postgres
+          --service minio
+          --service api
+          --service worker
+          --service proxy
+          --probe http://127.0.0.1:8080/health/live
+          --probe http://127.0.0.1:8080/health/ready
+          --probe http://127.0.0.1:8080/health/startup

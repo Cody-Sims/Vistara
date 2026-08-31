@@ -1,3 +1,5 @@
+using Vistara.Application.Gallery.Curation;
+
 namespace Vistara.Application.Gallery.Favorites;
 
 public interface IFavoriteApplication
@@ -20,14 +22,9 @@ public interface IFavoriteApplication
         CancellationToken cancellationToken);
 }
 
-public interface IFavoriteCurationStore : IFavoriteApplication
-{
-    ValueTask<IReadOnlyList<BulkCurationItemResult>> ExecuteBulkAsync(
-        CurationActor actor,
-        BulkCurationRequest request,
-        DateTimeOffset now,
-        CancellationToken cancellationToken);
-}
+public interface IFavoriteCurationStore :
+    IFavoriteApplication,
+    IGalleryCurationBulkExecutor;
 
 public sealed class FavoriteApplication(IFavoriteCurationStore store) : IFavoriteApplication
 {
@@ -95,23 +92,6 @@ public sealed class FavoriteApplication(IFavoriteCurationStore store) : IFavorit
     private static bool IsCurationAction(BulkCurationAction action)
     {
         ArgumentNullException.ThrowIfNull(action);
-        return action.Kind switch
-        {
-            "addTag" or "removeTag" =>
-                action.TagId is { } tagId &&
-                CurationValidation.IsUuid7(tagId) &&
-                action.AlbumId is null &&
-                action.Favorite is null,
-            "addToAlbum" or "removeFromAlbum" =>
-                action.AlbumId is { } albumId &&
-                CurationValidation.IsUuid7(albumId) &&
-                action.TagId is null &&
-                action.Favorite is null,
-            "setFavorite" =>
-                action.Favorite is not null &&
-                action.TagId is null &&
-                action.AlbumId is null,
-            _ => false,
-        };
+        return GalleryCurationBulkValidation.IsSupportedAction(action);
     }
 }

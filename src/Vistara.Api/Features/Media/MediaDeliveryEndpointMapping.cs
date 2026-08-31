@@ -2,6 +2,11 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Vistara.Api.Features.Shares;
+using Vistara.Application.Common;
+using Vistara.Application.Sharing;
+using Vistara.Auth.Sharing;
+using Vistara.Persistence;
 
 namespace Vistara.Api.Features.Media;
 
@@ -55,6 +60,23 @@ public static class MediaDeliveryEndpointMapping
                         .GetRequiredService<IMediaDeliveryApplicationPort>(),
                     cancellationToken));
         endpoints.MapMethods(
+            "/delivery/assets/{assetId:guid}/{renditionId:guid}",
+            GetAndHeadMethods,
+            (
+                Guid assetId,
+                Guid renditionId,
+                HttpContext context,
+                CancellationToken cancellationToken) =>
+                MediaDeliveryEndpoint.AssetRenditionAsync(
+                    context,
+                    assetId,
+                    renditionId,
+                    context.RequestServices
+                        .GetRequiredService<IMediaDeliveryAuthorizationPort>(),
+                    context.RequestServices
+                        .GetRequiredService<IMediaDeliveryApplicationPort>(),
+                    cancellationToken));
+        endpoints.MapMethods(
             "/api/v1/assets/{assetId:guid}/original",
             GetAndHeadMethods,
             (
@@ -68,6 +90,27 @@ public static class MediaDeliveryEndpointMapping
                         .GetRequiredService<IMediaDeliveryAuthorizationPort>(),
                     context.RequestServices
                         .GetRequiredService<IMediaDeliveryApplicationPort>(),
+                    cancellationToken));
+        endpoints.MapMethods(
+            ShareRenditionRoute.Pattern,
+            GetAndHeadMethods,
+            (
+                string publicToken,
+                Guid assetId,
+                string renditionId,
+                HttpContext context,
+                CancellationToken cancellationToken) =>
+                ShareRenditionEndpoint.GetAsync(
+                    context,
+                    publicToken,
+                    assetId,
+                    renditionId,
+                    context.RequestServices.GetRequiredService<ShareService>(),
+                    context.RequestServices
+                        .GetRequiredService<ShareDeliveryGrantAuthorizationPort>(),
+                    context.RequestServices
+                        .GetRequiredService<IServiceScopeFactory>(),
+                    context.RequestServices.GetRequiredService<IClock>(),
                     cancellationToken));
 
         return endpoints;

@@ -63,13 +63,11 @@ internal sealed class GalleryShareAssetCatalog(
                     from item in context.AlbumItems.AsNoTracking()
                     join asset in context.Assets.AsNoTracking()
                         on item.AssetId equals asset.Id
-                    join revision in context.AssetRevisions.AsNoTracking()
-                        on asset.CurrentRevisionId equals revision.Id
                     where item.AlbumId == id
                     orderby item.Position, item.AssetId
                     select new ShareAssetReference(
                         item.AssetId,
-                        revision.RevisionNumber))
+                        asset.Version))
                 .Take(201)
                 .ToArrayAsync(cancellationToken);
         }
@@ -109,7 +107,7 @@ internal sealed class GalleryShareAssetCatalog(
                 .SingleOrDefaultAsync(cancellationToken);
             if (detail is null ||
                 revisionId is null ||
-                detail.Asset.RevisionNumber != reference.Revision)
+                detail.Asset.Version != reference.Version)
             {
                 return null;
             }
@@ -118,42 +116,94 @@ internal sealed class GalleryShareAssetCatalog(
                 detail.Asset.Id,
                 revisionId.Value,
                 detail.Asset.RevisionNumber,
+                detail.Asset.Version,
                 detail.Asset.Title,
                 detail.Asset.Description,
                 detail.Asset.CapturedAt,
                 detail.Asset.Width,
                 detail.Asset.Height,
                 detail.Asset.Renditions
-                    .Where(rendition => rendition.Path.StartsWith(
-                        "/media/",
-                        StringComparison.Ordinal))
-                    .Select(ToShareRendition)
+                    .Select(rendition => ToShareRendition(
+                        detail.Asset.Id,
+                        rendition))
+                    .OfType<ShareRendition>()
                     .ToArray()));
         }
 
         return snapshots;
     }
 
-    private static ShareRendition ToShareRendition(
-        AssetDeliverySource rendition) =>
-        new(
-            rendition.Kind,
-            rendition.Path,
-            rendition.Width,
-            rendition.Height,
-            rendition.ContentType,
-            ShareAccess.View);
+    /// <summary>
+    /// Captures a rendition the share can actually deliver. A public derivative
+    /// keeps its immutable <c>/media/</c> path, while a private Ready rendition
+    /// records the derivative request identifier so the share can publish a
+    /// revocable, share-scoped delivery URL instead of a path that only the
+    /// owning tenant may fetch. Anything else is not deliverable and is
+    /// dropped.
+    /// </summary>
+    private static ShareRendition? ToShareRendition(
+        Guid assetId,
+        AssetDeliverySource rendition)
+    {
+        ShareAccess required = rendition.Kind.StartsWith(
+            "download",
+            StringComparison.OrdinalIgnoreCase)
+            ? ShareAccess.DownloadRenditions
+            : ShareAccess.View;
+        if (rendition.Path.StartsWith("/media/", StringComparison.Ordinal))
+        {
+            return new(
+                rendition.Kind,
+                rendition.Path,
+                rendition.Width,
+                rendition.Height,
+                rendition.ContentType,
+                required);
+        }
+
+        return TryReadRenditionId(assetId, rendition.Path, out Guid renditionId)
+            ? new(
+                rendition.Kind,
+                rendition.Path,
+                rendition.Width,
+                rendition.Height,
+                rendition.ContentType,
+                required,
+                renditionId.ToString("D"))
+            : null;
+    }
+
+    private static bool TryReadRenditionId(
+        Guid assetId,
+        string path,
+        out Guid renditionId)
+    {
+        renditionId = default;
+        string[] segments = path.Split('/');
+        return segments.Length == 5 &&
+            segments[0].Length == 0 &&
+            string.Equals(segments[1], "delivery", StringComparison.Ordinal) &&
+            string.Equals(segments[2], "assets", StringComparison.Ordinal) &&
+            Guid.TryParse(segments[3], out Guid pathAssetId) &&
+            pathAssetId == assetId &&
+            Guid.TryParse(segments[4], out renditionId) &&
+            renditionId != Guid.Empty;
+    }
 }
 
 internal sealed class GalleryShareAuditSink(
-    VistaraDbContext context,
-    IMutableTenantScope tenantScope,
-    IUuid7Generator ids,
+    IServiceScopeFactory scopeFactory,
     IHttpContextAccessor httpContextAccessor) : IShareAuditSink
 {
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
 
+    /// <summary>
+    /// Writes the audit record in its own scope established from the audited
+    /// share's tenant. A share is read by whoever holds its link, including a
+    /// visitor signed in to a different tenant, so the record must never depend
+    /// on the caller's ambient tenant context.
+    /// </summary>
     public async ValueTask WriteAsync(
         ShareAuditEvent auditEvent,
         CancellationToken cancellationToken)
@@ -164,10 +214,17 @@ internal sealed class GalleryShareAuditSink(
             return;
         }
 
-        tenantScope.Establish(tenantId);
+        await using AsyncServiceScope scope = scopeFactory.CreateAsyncScope();
+        scope.ServiceProvider
+            .GetRequiredService<IMutableTenantScope>()
+            .Establish(tenantId);
+        VistaraDbContext context =
+            scope.ServiceProvider.GetRequiredService<VistaraDbContext>();
         context.AuditEvents.Add(new AuditEventRow
         {
-            Id = ids.NewId(),
+            Id = scope.ServiceProvider
+                .GetRequiredService<IUuid7Generator>()
+                .NewId(),
             TenantId = tenantId,
             ActorKind = ActorKind(auditEvent, httpContextAccessor.HttpContext),
             ActorIdentifier =

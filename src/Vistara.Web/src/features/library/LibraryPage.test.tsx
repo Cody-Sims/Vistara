@@ -1,8 +1,12 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  resetPreferences,
+  setPreferences,
+} from '../../app/preferences';
 import type {
   AssetSummary,
   TimelinePage,
@@ -33,14 +37,14 @@ function asset(index: number, status: AssetSummary['status'] = 'ready') {
       status === 'ready'
         ? [
             {
-              kind: 'thumbnail',
+              kind: 'thumb',
               path: `/media/${index}-512.jpg`,
               width: 512,
               height: 384,
               contentType: 'image/jpeg',
             },
             {
-              kind: 'preview',
+              kind: 'grid',
               path: `/media/${index}-1024.webp`,
               width: 1024,
               height: 768,
@@ -94,6 +98,11 @@ function renderLibrary(
   );
 }
 
+afterEach(() => {
+  resetPreferences();
+  localStorage.clear();
+});
+
 describe('library page', () => {
   it('renders a semantic virtualized timeline within DOM and image priority budgets', async () => {
     const dataSource = {
@@ -106,8 +115,12 @@ describe('library page', () => {
 
     expect(screen.getByText('Loading library…')).toBeInTheDocument();
     expect(
+      container.querySelector('[aria-busy="true"]'),
+    ).toBeInTheDocument();
+    expect(
       await screen.findByRole('heading', { name: 'June 10, 2026' }),
     ).toBeInTheDocument();
+    expect(container.querySelector('[aria-busy="true"]')).toBeNull();
 
     const images = container.querySelectorAll('img');
     expect(images.length).toBeGreaterThan(0);
@@ -321,5 +334,64 @@ describe('library page', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Could not load the library',
     );
+  });
+
+  it('replaces endless scrolling with pages in screen-reader paged mode', async () => {
+    const user = userEvent.setup();
+    setPreferences({ screenReaderPagedMode: true });
+    const dataSource = {
+      getTimeline: vi.fn(async () => ({
+        data: page(Array.from({ length: 200 }, (_, index) => asset(index))),
+      })),
+    };
+
+    renderLibrary(dataSource);
+
+    await screen.findByRole('heading', { name: 'June 10, 2026' });
+
+    const pages = screen.getByRole('navigation', { name: 'Library pages' });
+    expect(
+      within(pages).getByRole('button', { name: 'Previous page' }),
+    ).toBeDisabled();
+    expect(within(pages).getByRole('status')).toHaveTextContent('Page 1 of');
+    expect(
+      screen.queryByRole('button', { name: 'Load more images' }),
+    ).not.toBeInTheDocument();
+
+    const firstPageImages = document.querySelectorAll('img').length;
+    expect(firstPageImages).toBeGreaterThan(0);
+
+    await user.click(within(pages).getByRole('button', { name: 'Next page' }));
+
+    expect(within(pages).getByRole('status')).toHaveTextContent('Page 2 of');
+    expect(
+      within(pages).getByRole('button', { name: 'Previous page' }),
+    ).toBeEnabled();
+  });
+
+  it('does not swallow an arrow key at a page boundary', async () => {
+    const user = userEvent.setup();
+    setPreferences({ screenReaderPagedMode: true });
+    const dataSource = {
+      getTimeline: vi.fn(async () => ({
+        data: page(Array.from({ length: 200 }, (_, index) => asset(index))),
+      })),
+    };
+
+    renderLibrary(dataSource);
+    await screen.findByRole('heading', { name: 'June 10, 2026' });
+
+    const links = [...document.querySelectorAll('[data-asset-link]')];
+    const last = links.at(-1) as HTMLElement;
+    last.focus();
+    const events: KeyboardEvent[] = [];
+    document.addEventListener('keydown', (event) => events.push(event), {
+      once: true,
+    });
+
+    await user.keyboard('{ArrowRight}');
+
+    expect(events[0]?.defaultPrevented).toBe(false);
+    expect(last).toHaveFocus();
   });
 });

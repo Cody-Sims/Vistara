@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Vistara.Persistence;
 
 namespace Vistara.Migrations.Postgres;
@@ -12,8 +13,9 @@ public sealed class VistaraDbContextFactory : IDesignTimeDbContextFactory<Vistar
     public VistaraDbContext CreateDbContext(string[] args)
     {
         var optionsBuilder = new DbContextOptionsBuilder<VistaraDbContext>();
-        optionsBuilder.UseNpgsql(
-            postgres => postgres.UseVistaraMigrations());
+        optionsBuilder
+            .UseNpgsql(postgres => postgres.UseVistaraMigrations())
+            .ReplaceService<IHistoryRepository, PostgresMigrationLockHistoryRepository>();
         return new VistaraDbContext(
             optionsBuilder.Options,
             new FixedTenantScope(DesignTimeTenantId));

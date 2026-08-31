@@ -56,8 +56,12 @@ public sealed record AssetSummaryResponse(
     [property: JsonPropertyName("description")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? Description,
-    [property: JsonPropertyName("status")] string Status,
-    [property: JsonPropertyName("visibility")] string Visibility,
+    [property: JsonPropertyName("status")]
+    [property: JsonConverter(typeof(AssetStatusJsonConverter))]
+    string Status,
+    [property: JsonPropertyName("visibility")]
+    [property: JsonConverter(typeof(AssetVisibilityJsonConverter))]
+    string Visibility,
     [property: JsonPropertyName("revisionNumber")] long RevisionNumber,
     [property: JsonPropertyName("contentType")] string ContentType,
     [property: JsonPropertyName("format")] string Format,
@@ -111,7 +115,9 @@ public sealed record AssetMetadataResponse(
     IReadOnlyDictionary<string, string> SafeProperties);
 
 public sealed record AssetRenditionResponse(
-    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("kind")]
+    [property: JsonConverter(typeof(AssetRenditionKindJsonConverter))]
+    string Kind,
     // A same-origin application path, never a provider URL or storage key.
     [property: JsonPropertyName("path")] string Path,
     [property: JsonPropertyName("width")] int Width,

@@ -8,10 +8,10 @@ import {
   useParams,
   useSearchParams,
 } from 'react-router-dom';
-import { VistaraApiClient } from '../../api/generated';
 import { AlbumDetailView, AlbumsView } from '../../features/albums';
 import { FavoritesView } from '../../features/favorites';
 import { LibraryPage } from '../../features/library';
+import { SearchView } from '../../features/search';
 import { PublicShareView, ShareManager } from '../../features/shares';
 import { TagsView } from '../../features/tags';
 import { TrashManager } from '../../features/trash';
@@ -22,9 +22,10 @@ import {
   UploadQueueView,
 } from '../../features/uploads';
 import { ViewerPage } from '../../features/viewer';
+import { galleryClient } from '../apiClients';
 import styles from './galleryRoutes.module.css';
 
-const client = new VistaraApiClient();
+const client = galleryClient;
 const uploadClient = new FrozenUploadClient();
 const uploadQueue = new UploadQueue({
   client: uploadClient,
@@ -133,11 +134,15 @@ export function LibraryRoute() {
     };
   }, [location.pathname, location.search]);
 
-  return <LibraryPage dataSource={client} />;
+  return <LibraryPage curation={{ client }} dataSource={client} />;
+}
+
+export function SearchRoute() {
+  return <SearchView client={client} />;
 }
 
 export function ViewerRoute() {
-  return <ViewerPage dataSource={client} />;
+  return <ViewerPage curation={{ client }} dataSource={client} />;
 }
 
 export function UploadsRoute() {

@@ -21,6 +21,12 @@ public sealed class PostgresMigrationVerificationTests
         "20260829183622_ReconcileLegacyUploadJobQuota";
     private const string WorkerTenantCatalogMigration =
         "20260830044748_AddWorkerTenantCatalog";
+    private const string LocalCredentialsMigration =
+        "20260830233131_AddLocalCredentials";
+    private const string PlatformBootstrapMigration =
+        "20260831000526_AddPlatformBootstrap";
+    private const string UserPreferencesMigration =
+        "20260831002849_AddUserPreferences";
     private const string SharingPersistenceMigration =
         "20260830101824_AddSharingPersistence";
     private const int ReplacedCheckConstraints = 3;
@@ -35,6 +41,9 @@ public sealed class PostgresMigrationVerificationTests
         LegacyUploadQuotaMigration,
         WorkerTenantCatalogMigration,
         SharingPersistenceMigration,
+        LocalCredentialsMigration,
+        PlatformBootstrapMigration,
+        UserPreferencesMigration,
     ];
 
     [Fact]
@@ -111,6 +120,25 @@ public sealed class PostgresMigrationVerificationTests
             "tenant.quotas_json IS JSON OBJECT",
             script,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "CREATE TABLE platform_bootstrap",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ck_platform_bootstrap_singleton",
+            script,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "ALTER TABLE \"platform_bootstrap\" ENABLE ROW LEVEL SECURITY",
+            script,
+            StringComparison.Ordinal);
+        foreach (string table in PostgresTenantRowSecurity.IdentityDirectoryTables)
+        {
+            Assert.Contains(
+                $"CREATE POLICY \"identity_directory\" ON \"{table}\"",
+                script,
+                StringComparison.Ordinal);
+        }
         Assert.Equal(
             PostgresTenantRowSecurity.TenantOwnedTables.Count,
             Count(idempotentScript, "CREATE POLICY \"tenant_isolation\""));

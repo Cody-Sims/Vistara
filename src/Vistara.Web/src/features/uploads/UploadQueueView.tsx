@@ -3,6 +3,7 @@ import {
   type DragEvent,
   useEffect,
   useRef,
+  useState,
   useSyncExternalStore,
 } from 'react';
 import type { UploadQueueItem } from './uploadQueue';
@@ -20,6 +21,7 @@ export function UploadQueueView({ queue }: UploadQueueViewProps) {
     queue.getItems,
   );
   const input = useRef<HTMLInputElement>(null);
+  const [dragActive, setDragActive] = useState(false);
   const active = items.some((item) =>
     ['queued', 'hashing', 'uploading', 'paused', 'processing'].includes(item.phase),
   );
@@ -50,6 +52,7 @@ export function UploadQueueView({ queue }: UploadQueueViewProps) {
   };
   const onDrop = (event: DragEvent<HTMLButtonElement>) => {
     event.preventDefault();
+    setDragActive(false);
     add(event.dataTransfer.files);
   };
 
@@ -89,16 +92,33 @@ export function UploadQueueView({ queue }: UploadQueueViewProps) {
       />
       <button
         className={styles.dropZone}
+        data-drag-active={dragActive}
         type="button"
         onClick={choose}
-        onDragOver={(event) => event.preventDefault()}
+        onDragEnter={(event) => {
+          event.preventDefault();
+          setDragActive(true);
+        }}
+        onDragOver={(event) => {
+          event.preventDefault();
+          setDragActive(true);
+        }}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node)) {
+            setDragActive(false);
+          }
+        }}
         onDrop={onDrop}
       >
         <span className={styles.dropIcon} aria-hidden="true">
           ↑
         </span>
         <strong>Choose or drop images here</strong>
-        <span>Tap to browse on mobile</span>
+        <span>
+          {dragActive
+            ? 'Release to add these images.'
+            : 'Tap to browse on mobile'}
+        </span>
       </button>
 
       <p className={styles.liveRegion} role="status" aria-live="polite">

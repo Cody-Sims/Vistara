@@ -1,4 +1,4 @@
-import { useInfiniteQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import {
   useEffect,
   useMemo,
@@ -12,11 +12,15 @@ import {
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import type {
   ApiResponse,
-  AssetStatus,
+  AssetQueryStatus,
+  AssetSummary,
   TimelineGroup,
   TimelinePage,
   TimelineQuery,
 } from '../../api/generated';
+import { useAppPreferences } from '../../app/preferences';
+import { Skeleton } from '../../components';
+import { CurationActions, type CurationClient } from '../curation';
 import { buildResponsiveImage } from '../viewer/responsiveImage';
 import {
   defaultLibraryState,
@@ -39,6 +43,7 @@ import {
 } from './selection';
 import {
   buildTimelineRows,
+  pageTimelineRows,
   virtualizeTimelineRows,
 } from './virtualTimeline';
 import styles from './LibraryPage.module.css';
@@ -52,17 +57,25 @@ export interface LibraryLayout {
   viewportHeight: number;
 }
 
+export interface LibraryCuration {
+  readonly client: CurationClient;
+  /** Overrides the session scope check, for the preview and for tests. */
+  readonly canCurate?: boolean;
+}
+
 interface LibraryPageProps {
   dataSource: LibraryDataSource;
+  curation?: LibraryCuration;
   layout?: LibraryLayout;
   restorationStore?: ReturnType<typeof createLibraryRestorationStore>;
 }
 
-const statuses: ReadonlyArray<{ value: AssetStatus; label: string }> = [
+const statuses: ReadonlyArray<{ value: AssetQueryStatus; label: string }> = [
   { value: 'ready', label: 'Ready' },
   { value: 'processing', label: 'Processing' },
   { value: 'failed', label: 'Failed' },
 ];
+const pagedRowsPerPage = 6;
 const assetDateFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: 'medium',
 });
@@ -191,7 +204,7 @@ function useRestoration(
 
 function updateStatus(
   state: LibraryState,
-  status: AssetStatus,
+  status: AssetQueryStatus,
   checked: boolean,
 ) {
   return {
@@ -203,6 +216,7 @@ function updateStatus(
 }
 
 export function LibraryPage({
+  curation,
   dataSource,
   layout: layoutOverride,
   restorationStore,
@@ -237,7 +251,10 @@ export function LibraryPage({
     () => buildTimelineRows(page?.groups ?? [], state.view, layout.columns),
     [layout.columns, page?.groups, state.view],
   );
-  const virtual = useMemo(
+  const preferences = useAppPreferences();
+  const paged = preferences.screenReaderPagedMode;
+  const [pageNumber, setPageNumber] = useState(1);
+  const continuous = useMemo(
     () =>
       virtualizeTimelineRows(rows, {
         scrollTop,
@@ -247,23 +264,49 @@ export function LibraryPage({
       }),
     [focusedAssetId, layout.viewportHeight, rows, scrollTop],
   );
+  const pagedTimeline = useMemo(
+    () => pageTimelineRows(rows, pageNumber, pagedRowsPerPage),
+    [pageNumber, rows],
+  );
+  const virtual = paged ? pagedTimeline : continuous;
   const allAssets = useMemo(
     () => page?.groups.flatMap((group) => group.items) ?? [],
     [page?.groups],
   );
-  const viewportRows = virtual.rows.filter(
-    ({ offset, size }) =>
-      offset + size > scrollTop &&
-      offset < scrollTop + layout.viewportHeight,
-  );
+  const viewportRows = paged
+    ? virtual.rows
+    : virtual.rows.filter(
+        ({ offset, size }) =>
+          offset + size > scrollTop &&
+          offset < scrollTop + layout.viewportHeight,
+      );
   const visibleIds = viewportRows.flatMap(({ row }) =>
     row.type === 'assets' ? row.assets.map((asset) => asset.id) : [],
   );
   const priorityAssetId = viewportRows
     .flatMap(({ row }) => (row.type === 'assets' ? row.assets : []))
     .find((asset) => asset.status === 'ready')?.id;
-  const orderedIds = allAssets.map((asset) => asset.id);
+  // Arrow keys move between mounted rows. In paged mode only the current page
+  // is mounted, so the order stops at the page edge and the key falls through
+  // instead of being swallowed.
+  const orderedIds = paged
+    ? virtual.rows.flatMap(({ row }) =>
+        row.type === 'assets' ? row.assets.map((asset) => asset.id) : [],
+      )
+    : allAssets.map((asset) => asset.id);
   const selectedCount = selectionCount(selection);
+  const selectedAssets = useMemo(
+    () => allAssets.filter((asset) => isSelected(selection, asset.id)),
+    [allAssets, selection],
+  );
+  const queryClient = useQueryClient();
+  /**
+   * The assets a finished action applies to. A move to the trash removes them
+   * from the timeline, so the outcome and the undo would disappear with them;
+   * this keeps the surface on screen until the next selection.
+   */
+  const [settled, setSettled] = useState<readonly AssetSummary[]>([]);
+  const curationAssets = selectedAssets.length > 0 ? selectedAssets : settled;
   const defaultStore = useRestoration(
     address,
     focusedAssetId,
@@ -274,9 +317,15 @@ export function LibraryPage({
   );
   const activeScrollerRef = defaultStore;
 
+  /** Curation changes the timeline, so the pages in hand are read again. */
+  function refreshTimeline() {
+    return queryClient.invalidateQueries({ queryKey: ['library-timeline'] });
+  }
+
   function setState(next: LibraryState) {
     setSearchParams(libraryStateToSearchParams(next));
     setSelection(createSelectionState());
+    setSettled([]);
   }
 
   function submitSearch(event: FormEvent) {
@@ -421,9 +470,12 @@ export function LibraryPage({
       </form>
 
       {query.isPending ? (
-        <p className={styles.statePanel} role="status" aria-live="polite">
-          Loading library…
-        </p>
+        <div className={styles.statePanel} aria-busy="true">
+          <p role="status" aria-live="polite">
+            Loading library…
+          </p>
+          <Skeleton count={12} shape="tile" />
+        </div>
       ) : null}
 
       {query.isError && !page ? (
@@ -460,6 +512,38 @@ export function LibraryPage({
         </div>
       ) : null}
 
+      {curation && curationAssets.length > 0 ? (
+        <CurationActions
+          assets={curationAssets}
+          client={curation.client}
+          onCurated={() => void refreshTimeline()}
+          onTrashed={(ids) => {
+            const gone = new Set(ids);
+            setSettled(
+              selectedAssets
+                .filter((asset) => gone.has(asset.id))
+                .map((asset) => ({ ...asset, status: 'trashed' as const })),
+            );
+            setSelection(
+              ids.reduce(
+                (current, id) =>
+                  isSelected(current, id)
+                    ? toggleSelection(current, id)
+                    : current,
+                selection,
+              ),
+            );
+            void refreshTimeline();
+          }}
+          // The restore result belongs with the images it restored, so the
+          // surface stays until the next selection replaces it.
+          onRestored={() => void refreshTimeline()}
+          {...(curation.canCurate === undefined
+            ? {}
+            : { canCurate: curation.canCurate })}
+        />
+      ) : null}
+
       {page && allAssets.length > 0 ? (
         <>
           <div className={styles.selectionBar}>
@@ -490,7 +574,10 @@ export function LibraryPage({
                 </span>
                 <button
                   className={styles.controlButton}
-                  onClick={() => setSelection(createSelectionState())}
+                  onClick={() => {
+                    setSelection(createSelectionState());
+                    setSettled([]);
+                  }}
                   type="button"
                 >
                   Clear selection
@@ -499,6 +586,7 @@ export function LibraryPage({
             ) : null}
           </div>
 
+
           <div
             aria-label="Library timeline"
             className={styles.scroller}
@@ -506,6 +594,7 @@ export function LibraryPage({
               const scroller = event.currentTarget;
               setScrollTop(scroller.scrollTop);
               if (
+                !paged &&
                 query.hasNextPage &&
                 !query.isFetchingNextPage &&
                 scroller.scrollHeight -
@@ -574,13 +663,14 @@ export function LibraryPage({
                               aria-label={`Select ${asset.title}`}
                               checked={selected}
                               className={styles.selectControl}
-                              onClick={(event: MouseEvent<HTMLInputElement>) =>
+                              onClick={(event: MouseEvent<HTMLInputElement>) => {
+                                setSettled([]);
                                 setSelection(
                                   event.shiftKey
                                     ? selectRange(selection, orderedIds, asset.id)
                                     : toggleSelection(selection, asset.id),
-                                )
-                              }
+                                );
+                              }}
                               readOnly
                               type="checkbox"
                             />
@@ -642,7 +732,40 @@ export function LibraryPage({
               })}
             </ol>
           </div>
-          {query.hasNextPage ? (
+          {paged ? (
+            <nav className={styles.pager} aria-label="Library pages">
+              <button
+                className={styles.controlButton}
+                disabled={pagedTimeline.page <= 1}
+                onClick={() => setPageNumber(pagedTimeline.page - 1)}
+                type="button"
+              >
+                Previous page
+              </button>
+              <span aria-live="polite" role="status">
+                Page {pagedTimeline.page} of {pagedTimeline.pageCount}
+                {query.hasNextPage ? ' so far' : ''}
+              </span>
+              <button
+                className={styles.controlButton}
+                disabled={
+                  pagedTimeline.page >= pagedTimeline.pageCount &&
+                  !query.hasNextPage
+                }
+                onClick={() => {
+                  if (pagedTimeline.page >= pagedTimeline.pageCount) {
+                    void query.fetchNextPage();
+                  }
+
+                  setPageNumber(pagedTimeline.page + 1);
+                }}
+                type="button"
+              >
+                Next page
+              </button>
+            </nav>
+          ) : null}
+          {!paged && query.hasNextPage ? (
             <button
               className={styles.loadMore}
               disabled={query.isFetchingNextPage}

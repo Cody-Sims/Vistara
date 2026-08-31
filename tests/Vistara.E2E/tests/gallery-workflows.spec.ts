@@ -6,7 +6,9 @@ import { readRuntimeState } from '../support/state.js';
 const runtime = readRuntimeState();
 
 test.describe('integrated gallery workflows', () => {
-  test('uploads, browses, organizes, shares, restores, and preserves navigation state', async ({
+  test('uploads, browses, organizes, shares, restores, and preserves navigation state', {
+    tag: '@smoke',
+  }, async ({
     browser,
     browserName,
     page,
@@ -119,17 +121,23 @@ test.describe('integrated gallery workflows', () => {
     await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
 
     await page.getByRole('link', { name: 'Albums' }).click();
+    const albumsRegion = page.getByRole('region', { name: 'Albums' });
     const albumName = `Summer ${browserName}`;
     await page.getByLabel('Album name').fill(albumName);
     await page.getByRole('button', { name: 'Create album' }).click();
-    await expect(page.getByRole('status')).toContainText(`${albumName} was created`);
+    await expect(albumsRegion.getByRole('status')).toHaveText(
+      `${albumName} was created.`,
+    );
     await expect(page.getByText(albumName, { exact: true })).toBeVisible();
 
     await page.getByRole('link', { name: 'Tags' }).click();
+    const tagsRegion = page.getByRole('region', { name: 'Tags' });
     const tagName = `Coast ${browserName}`;
     await page.getByLabel('New tag name').fill(tagName);
     await page.getByRole('button', { name: 'Create tag' }).click();
-    await expect(page.getByRole('status')).toContainText(`${tagName} was created`);
+    await expect(tagsRegion.getByRole('status')).toHaveText(
+      `${tagName} was created.`,
+    );
 
     await page.getByRole('link', { name: 'Favorites' }).click();
     await expect(page.getByText(primaryTitle, { exact: true })).toBeVisible();
@@ -138,9 +146,44 @@ test.describe('integrated gallery workflows', () => {
       .click();
     await expect(page.getByText(primaryTitle, { exact: true })).toHaveCount(0);
 
+    // Only a Ready asset with a delivered rendition can be shared, and the
+    // share target carries the asset resource version, so both are read from
+    // the API for the image this run actually uploaded.
+    const uploadedTitle = `tiny-${browserName}.png`;
+    let shareTargetId = '';
+    let shareTargetVersion = 0;
+    await expect
+      .poll(
+        async () => {
+          const listed = await request.get(
+            `${runtime.baseUrl}/api/v1/assets?statuses=ready&limit=200`,
+            { headers: { 'X-API-Key': seeded.apiKey } },
+          );
+          if (listed.status() !== 200) return 0;
+          const page = (await listed.json()) as {
+            items: readonly {
+              id: string;
+              title: string;
+              version: number;
+              renditions: readonly unknown[];
+            }[];
+          };
+          const uploaded = page.items.find(
+            (asset) => asset.title === uploadedTitle,
+          );
+          if (!uploaded) return 0;
+          shareTargetId = uploaded.id;
+          shareTargetVersion = uploaded.version;
+          return uploaded.renditions.length;
+        },
+        { timeout: 60_000 },
+      )
+      .toBeGreaterThan(0);
     await page.goto(
-      `${runtime.baseUrl}/shared/links?assetId=${seeded.primaryAssetId}&version=1`,
+      `${runtime.baseUrl}/shared/links?assetId=${shareTargetId}` +
+        `&version=${shareTargetVersion}`,
     );
+    const sharesRegion = page.getByRole('region', { name: 'Share links' });
     const shareName = `E2E link ${browserName}`;
     await page.getByRole('button', { name: 'Create share link' }).click();
     await page.getByLabel('Link name').fill(shareName);
@@ -152,7 +195,21 @@ test.describe('integrated gallery workflows', () => {
     const publicPage = await publicContext.newPage();
     await publicPage.goto(shareUrl);
     await expect(publicPage.getByRole('heading', { name: shareName })).toBeVisible();
-    await expect(publicPage.getByText(primaryTitle, { exact: true })).toBeVisible();
+    await expect(publicPage.getByText(uploadedTitle, { exact: true })).toBeVisible();
+    // A recipient carries only the share link, so the shared image has to load
+    // from a share-scoped delivery path with no gallery credential. The E2E
+    // pipeline emits placeholder bytes that no browser decodes, so the transfer
+    // itself is the evidence.
+    const sharedImage = publicPage.getByRole('img').first();
+    await expect(sharedImage).toBeVisible();
+    const sharedSource = await sharedImage.getAttribute('src');
+    expect(sharedSource).toContain('/api/v1/public/shares/');
+    const delivered = await publicPage.request.get(
+      `${runtime.baseUrl}${sharedSource}`,
+    );
+    expect(delivered.status()).toBe(200);
+    expect(delivered.headers()['cache-control']).toBe('private,no-store');
+    expect((await delivered.body()).length).toBeGreaterThan(0);
     await publicContext.close();
 
     await page.getByRole('button', { name: 'Close without copying' }).click();
@@ -161,16 +218,21 @@ test.describe('integrated gallery workflows', () => {
       .getByRole('button', { name: 'Revoke' })
       .click();
     await page.getByRole('button', { name: 'Confirm revocation' }).click();
-    await expect(page.getByRole('status')).toContainText('was revoked');
+    await expect(sharesRegion.getByRole('status')).toHaveText(
+      `“${shareName}” was revoked.`,
+    );
 
     await page.getByRole('link', { name: 'Trash' }).click();
+    const trashRegion = page.getByRole('region', { name: 'Trash' });
     const trashTitle = `Deleted memory ${browserName}`;
     await expect(page.getByRole('article', { name: trashTitle })).toBeVisible();
     await page
       .getByRole('article', { name: trashTitle })
       .getByRole('button', { name: 'Undo deletion' })
       .click();
-    await expect(page.getByRole('status')).toContainText('Restore queued for 1 item');
+    await expect(trashRegion.getByRole('status')).toHaveText(
+      'Restore queued for 1 item.',
+    );
     await expect(page.getByRole('article', { name: trashTitle })).toHaveCount(0);
   });
 });

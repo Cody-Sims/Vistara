@@ -27,7 +27,7 @@
 .reason,
 .impact > p,
 .batch p {
-  color: var(--color-muted);
+  color: var(--color-text-muted);
 }
 
 .eyebrow {
@@ -101,7 +101,7 @@
 }
 
 .details dt {
-  color: var(--color-muted);
+  color: var(--color-text-muted);
 }
 
 .details dd {

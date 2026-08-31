@@ -81,3 +81,30 @@ docker build -f deploy/containers/api.Dockerfile .
 docker build -f deploy/containers/worker.Dockerfile .
 docker build -f deploy/containers/migration.Dockerfile .
 ```
+
+The startup, health, and migration gates that CI runs against these topologies
+can also be run locally once the images are built:
+
+```bash
+./deploy/containers/tests/compose-startup.sh \
+  --file deploy/compose.starter.yml \
+  --env-file deploy/.env \
+  --project vistara-starter-gate \
+  --completed migrate \
+  --service api --service worker --service proxy \
+  --probe http://127.0.0.1:8080/health/ready
+
+MIGRATION_IMAGE=vistara-migrations:local ./deploy/containers/tests/migration-lock.sh
+```
+
+Both scripts remove only the containers, networks, and volumes they created.
+
+## Backup, restore, and release runbooks
+
+- `deploy/backup/` holds the backup, restore, and non-destructive restore-drill
+  scripts documented in `docs/operations/backup-and-restore.md`.
+- Ordered migration rollout, release artifacts, and rollback are documented in
+  `docs/operations/release-runbook.md`.
+- Scanning coverage, secret handling, and credential rotation are documented in
+  `docs/security/security-operations.md`.
+

@@ -7,6 +7,9 @@ export interface BrowserState {
   readonly primaryAssetId: string;
   readonly trashAssetId: string;
   readonly apiKey: string;
+  /** Sign-in for the cookie session this suite opens in a real browser. */
+  readonly login: string;
+  readonly password: string;
 }
 
 export interface RuntimeState {

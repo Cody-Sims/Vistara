@@ -1,3 +1,5 @@
+import { credentialedFetch, isSameOrigin } from '../../api/credentialedFetch';
+import { sessionCredentials, type SessionCredentials } from '../../api/credentials';
 import type {
   CompletedUploadPart,
   SignedUploadRequest,
@@ -11,6 +13,8 @@ interface UploadClientOptions {
   readonly baseUrl?: string;
   readonly fetch?: typeof fetch;
   readonly xhr?: () => XMLHttpRequest;
+  /** The credential this browser session spends; shared by every client. */
+  readonly credentials?: SessionCredentials;
 }
 
 interface ApiProblem {
@@ -22,11 +26,16 @@ interface ApiProblem {
 export class FrozenUploadClient implements UploadApi, UploadTransfer {
   readonly #baseUrl: string;
   readonly #fetch: typeof fetch;
+  readonly #credentials: SessionCredentials;
   readonly #xhr: () => XMLHttpRequest;
 
   public constructor(options: UploadClientOptions = {}) {
     this.#baseUrl = options.baseUrl?.replace(/\/+$/, '') ?? '';
-    this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.#credentials = options.credentials ?? sessionCredentials;
+    // Creating, committing, aborting, and proxying an upload are unsafe
+    // requests on the cookie session, so each carries the antiforgery header
+    // the API published; the signed storage transfer never does.
+    this.#fetch = credentialedFetch(options.fetch, this.#credentials);
     this.#xhr = options.xhr ?? (() => new XMLHttpRequest());
   }
 
@@ -137,19 +146,26 @@ export class FrozenUploadClient implements UploadApi, UploadTransfer {
     });
   }
 
-  public proxy(
+  public async proxy(
     contentUrl: string,
     version: number,
     body: File,
     onProgress: (sent: number, total: number) => void,
     signal: AbortSignal,
   ) {
+    const url = `${this.#baseUrl}${contentUrl}`;
+    // The content is streamed once, so the token is settled before the
+    // transfer starts rather than replayed after a refusal.
+    const antiforgery = await this.#antiforgeryHeader(url);
     return new Promise<number>((resolve, reject) => {
       const xhr = this.#xhr();
-      xhr.open('PUT', `${this.#baseUrl}${contentUrl}`);
+      xhr.open('PUT', url);
       xhr.withCredentials = true;
       xhr.setRequestHeader('Content-Type', body.type);
       xhr.setRequestHeader('If-Match', entityTag(version));
+      if (antiforgery) {
+        xhr.setRequestHeader(antiforgery[0], antiforgery[1]);
+      }
       xhr.upload.onprogress = (event) =>
         onProgress(event.loaded, event.lengthComputable ? event.total : body.size);
       xhr.onload = () => {
@@ -169,6 +185,23 @@ export class FrozenUploadClient implements UploadApi, UploadTransfer {
       signal.addEventListener('abort', () => xhr.abort(), { once: true });
       xhr.send(body);
     });
+  }
+
+  /**
+   * The antiforgery header, spelled as the API published it, for a request the
+   * browser streams itself. Only a same-origin request to this API is ever
+   * given one.
+   */
+  async #antiforgeryHeader(
+    url: string,
+  ): Promise<readonly [string, string] | undefined> {
+    if (!isSameOrigin(url)) {
+      return undefined;
+    }
+
+    await this.#credentials.ensure();
+    const token = this.#credentials.applyTo(new Headers());
+    return token ? [this.#credentials.headerName, token] : undefined;
   }
 
   async #json<T>(path: string, init?: RequestInit) {

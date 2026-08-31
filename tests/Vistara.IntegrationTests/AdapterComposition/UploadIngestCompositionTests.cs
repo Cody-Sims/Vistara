@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Vistara.Api.Composition.Platform;
+using Vistara.Api.Composition.Runtime;
 using Vistara.Api.Features.Uploads;
 using Vistara.Application.Assets.Ingest;
 using Vistara.Application.Common.Imaging;
@@ -67,6 +68,7 @@ public sealed class UploadIngestCompositionTests
         apiBuilder.Services.AddScoped(_ => uploadApplication);
         apiBuilder.Services.AddScoped<IPlatformTenantContext>(
             _ => new FixedTenantContext(tenantId));
+        apiBuilder.Services.AddVistaraApiRuntime(apiBuilder.Configuration);
         apiBuilder.Services.AddVistaraApiPlatform(apiBuilder.Configuration);
 
         await using WebApplication api = apiBuilder.Build();

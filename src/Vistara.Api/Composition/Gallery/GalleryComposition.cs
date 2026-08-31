@@ -46,7 +46,6 @@ public static class GalleryServiceCollectionExtensions
                 policy => policy.RequireAuthenticatedUser());
         });
         services.AddHttpContextAccessor();
-        services.AddGalleryQueryNormalization();
         ServiceDescriptor? rateLimit = services.LastOrDefault(descriptor =>
             descriptor.ServiceType == typeof(IPlatformRateLimitHook));
         if (rateLimit?.ImplementationType ==
@@ -111,6 +110,10 @@ public static class GalleryServiceCollectionExtensions
         services.TryAddScoped<IShareAssetCatalog, GalleryShareAssetCatalog>();
         services.TryAddScoped<IShareAuditSink, GalleryShareAuditSink>();
         services.TryAddScoped<IShareAuthorizationPort, GalleryShareAuthorizationPort>();
+        // Registered as a concrete type so share-scoped delivery authorizes
+        // against live share policy without displacing the platform grant port
+        // that upload and owner delivery use.
+        services.TryAddScoped<ShareDeliveryGrantAuthorizationPort>();
         services.TryAddScoped<ShareService>();
 
         services.TryAddScoped<ILifecycleStore, RelationalLifecycleStore>();
@@ -135,6 +138,7 @@ public static class GalleryServiceCollectionExtensions
         _ = scoped.GetRequiredService<ITagApplication>();
         _ = scoped.GetRequiredService<IFavoriteApplication>();
         _ = scoped.GetRequiredService<IShareAuthorizationPort>();
+        _ = scoped.GetRequiredService<ShareDeliveryGrantAuthorizationPort>();
         _ = scoped.GetRequiredService<ShareService>();
         _ = scoped.GetRequiredService<ILifecycleAuthorizationPort>();
         _ = scoped.GetRequiredService<LifecycleService>();

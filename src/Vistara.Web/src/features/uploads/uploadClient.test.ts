@@ -59,12 +59,10 @@ describe('uploads frozen client boundary', () => {
     const client = new FrozenUploadClient({ fetch });
 
     const result = await client.commit('upload-1', [], 'commit-key', 1);
-    const init = fetch.mock.calls[0]![1];
+    const headers = new Headers(fetch.mock.calls[0]![1]?.headers);
 
-    expect(init?.headers).toMatchObject({
-      'Idempotency-Key': 'commit-key',
-      'If-Match': '"v1"',
-    });
+    expect(headers.get('Idempotency-Key')).toBe('commit-key');
+    expect(headers.get('If-Match')).toBe('"v1"');
     expect(result.duplicate).toBe(true);
   });
 

@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Vistara.Persistence.Derivatives;
+using Vistara.Persistence.Model;
 
 namespace Vistara.Persistence.Media;
 
@@ -132,6 +133,33 @@ public sealed class RelationalMediaCatalogStore(
             .SingleOrDefaultAsync(
                 candidate => candidate.Id == requestId,
                 cancellationToken);
+        return row is null ? null : ToMedia(row);
+    }
+
+    /// <summary>
+    /// Resolves a rendition only while its asset is servable. A trashed or
+    /// purged asset conceals every rendition URL the gallery advertised while
+    /// the asset was ready.
+    /// </summary>
+    public async ValueTask<PersistedDerivativeMedia?> FindAssetRenditionAsync(
+        Guid tenantId,
+        Guid assetId,
+        Guid renditionId,
+        CancellationToken cancellationToken)
+    {
+        EnsureTenant(tenantId);
+        TenantKey tenantKey = tenantId;
+        DerivativeRequestRow? row = await (
+            from derivative in _context.Set<DerivativeRequestRow>().AsNoTracking()
+            join asset in _context.Assets.AsNoTracking()
+                on derivative.AssetId equals asset.Id
+            where derivative.Id == renditionId &&
+                derivative.AssetId == assetId &&
+                derivative.TenantId == tenantKey &&
+                asset.TenantId == tenantKey &&
+                asset.Status == "Ready"
+            select derivative)
+            .SingleOrDefaultAsync(cancellationToken);
         return row is null ? null : ToMedia(row);
     }
 

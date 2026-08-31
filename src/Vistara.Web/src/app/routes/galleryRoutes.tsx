@@ -1,5 +1,13 @@
-import type { ReactNode } from 'react';
+import { lazy, Suspense, type ComponentType, type ReactNode } from 'react';
 import { Navigate, type RouteObject } from 'react-router-dom';
+import {
+  LoginPage,
+  RequireAdministration,
+  RequireSession,
+  type AdministrationGuardProps,
+  type SessionScope,
+} from '../../features/session';
+import { platformClient } from '../apiClients';
 import { ApplicationFrame } from '../ApplicationFrame';
 import {
   InitialLoadingPage,
@@ -13,6 +21,7 @@ import {
   LibraryRoute,
   PublicShareRoute,
   RoutePlaceholderPage,
+  SearchRoute,
   SharesRoute,
   TagsRoute,
   TrashRoute,
@@ -20,16 +29,69 @@ import {
   ViewerRoute,
 } from './GalleryRoutePages';
 
+/**
+ * The operator screens are one chunk, fetched only when a route that is
+ * already past its guard renders. Denied and signed-out accounts never ask
+ * for it.
+ */
+const deferredScreen = (
+  pick: (module: typeof import('./deferredScreens')) => ComponentType,
+) =>
+  lazy(async () => ({ default: pick(await import('./deferredScreens')) }));
+
+const AdminUsersScreen = deferredScreen((module) => module.AdminUsersScreen);
+const AdminStorageScreen = deferredScreen(
+  (module) => module.AdminStorageScreen,
+);
+const AdminJobsScreen = deferredScreen((module) => module.AdminJobsScreen);
+const AdminPoliciesScreen = deferredScreen(
+  (module) => module.AdminPoliciesScreen,
+);
+const AdminAuditScreen = deferredScreen((module) => module.AdminAuditScreen);
+const SettingsScreen = deferredScreen((module) => module.SettingsScreen);
+
 export function galleryRoutes(
   staticPreview: boolean,
   additionalRoutes: RouteObject[] = [],
   liveFeatures = true,
 ): RouteObject[] {
-  const feature = (title: string, element: ReactNode) =>
-    staticPreview || !liveFeatures ? (
+  const preview = !liveFeatures || staticPreview;
+  const deferred = (
+    title: string,
+    load: () => Promise<{ Component: ComponentType }>,
+  ): RouteObject =>
+    preview
+      ? {
+          element: (
+            <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
+          ),
+        }
+      : { lazy: load };
+  const guarded = (title: string, element: ReactNode) =>
+    preview ? (
       <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
     ) : (
-      element
+      <RequireSession>{element}</RequireSession>
+    );
+  /**
+   * A deferred screen is only imported once its guard has admitted the
+   * account, so a member who opens an administration URL is told they cannot
+   * and downloads nothing.
+   */
+  const behindGuard = (
+    title: string,
+    Guard: ComponentType<AdministrationGuardProps>,
+    Screen: ComponentType,
+    scope?: SessionScope,
+  ) =>
+    preview ? (
+      <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
+    ) : (
+      <Guard scope={scope}>
+        <Suspense fallback={<InitialLoadingPage />}>
+          <Screen />
+        </Suspense>
+      </Guard>
     );
 
   return [
@@ -45,47 +107,47 @@ export function galleryRoutes(
         },
         {
           path: 'library',
-          element: feature('Library', <LibraryRoute />),
+          element: guarded('Library', <LibraryRoute />),
         },
         {
           path: 'library/recent',
-          element: feature('Recent uploads', <LibraryRoute />),
+          element: guarded('Recent uploads', <LibraryRoute />),
         },
         {
           path: 'search',
-          element: feature('Search', <LibraryRoute />),
+          element: guarded('Search', <SearchRoute />),
         },
         {
           path: 'assets/:assetId',
-          element: feature('Asset viewer', <ViewerRoute />),
+          element: guarded('Asset viewer', <ViewerRoute />),
         },
         {
           path: 'uploads',
-          element: feature('Upload images', <UploadsRoute />),
+          element: guarded('Upload images', <UploadsRoute />),
         },
         {
           path: 'albums',
-          element: feature('Albums', <AlbumsRoute />),
+          element: guarded('Albums', <AlbumsRoute />),
         },
         {
           path: 'albums/new',
-          element: feature('New album', <AlbumsRoute />),
+          element: guarded('New album', <AlbumsRoute />),
         },
         {
           path: 'albums/:albumId',
-          element: feature('Album', <AlbumRoute />),
+          element: guarded('Album', <AlbumRoute />),
         },
         {
           path: 'tags',
-          element: feature('Tags', <TagsRoute />),
+          element: guarded('Tags', <TagsRoute />),
         },
         {
           path: 'tags/:tagId',
-          element: feature('Tag', <TagsRoute />),
+          element: guarded('Tag', <TagsRoute />),
         },
         {
           path: 'favorites',
-          element: feature('Favorites', <FavoritesRoute />),
+          element: guarded('Favorites', <FavoritesRoute />),
         },
         {
           path: 'shared/with-me',
@@ -93,11 +155,64 @@ export function galleryRoutes(
         },
         {
           path: 'shared/links',
-          element: feature('Share links', <SharesRoute />),
+          element: guarded('Share links', <SharesRoute />),
         },
         {
           path: 'trash',
-          element: feature('Trash', <TrashRoute />),
+          element: guarded('Trash', <TrashRoute />),
+        },
+        {
+          path: 'settings',
+          element: behindGuard('Settings', RequireSession, SettingsScreen),
+        },
+        {
+          path: 'admin',
+          element: <Navigate replace to="/admin/users" />,
+        },
+        {
+          path: 'admin/users',
+          element: behindGuard(
+            'People',
+            RequireAdministration,
+            AdminUsersScreen,
+            'members.manage',
+          ),
+        },
+        {
+          path: 'admin/storage',
+          element: behindGuard(
+            'Storage',
+            RequireAdministration,
+            AdminStorageScreen,
+            'quotas.manage',
+          ),
+        },
+        {
+          path: 'admin/jobs',
+          element: behindGuard(
+            'Jobs',
+            RequireAdministration,
+            AdminJobsScreen,
+            'assets.read',
+          ),
+        },
+        {
+          path: 'admin/policies',
+          element: behindGuard(
+            'Policies',
+            RequireAdministration,
+            AdminPoliciesScreen,
+            'quotas.manage',
+          ),
+        },
+        {
+          path: 'admin/audit',
+          element: behindGuard(
+            'Audit log',
+            RequireAdministration,
+            AdminAuditScreen,
+            'members.manage',
+          ),
         },
         ...additionalRoutes,
         {
@@ -105,6 +220,24 @@ export function galleryRoutes(
           element: <AccessibleNotFoundRoute />,
         },
       ],
+    },
+    {
+      path: '/login',
+      errorElement: <RouteErrorBoundary />,
+      element:
+        staticPreview || !liveFeatures ? (
+          <RoutePlaceholderPage title="Sign in" staticPreview={staticPreview} />
+        ) : (
+          <LoginPage setup={platformClient} />
+        ),
+    },
+    {
+      path: '/setup',
+      errorElement: <RouteErrorBoundary />,
+      hydrateFallbackElement: <InitialLoadingPage />,
+      ...deferred('Set up Vistara', async () => ({
+        Component: (await import('./deferredScreens')).SetupScreen,
+      })),
     },
     {
       path: '/s/:token',

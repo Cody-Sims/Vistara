@@ -1652,6 +1652,41 @@ namespace Vistara.Migrations.Postgres.Migrations
                     b.ToTable("idempotency_requests", (string)null);
                 });
 
+            modelBuilder.Entity("Vistara.Persistence.Model.LocalCredentialRow", b =>
+                {
+                    b.Property<Guid>("LocalIdentityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("local_identity_id");
+
+                    b.Property<string>("PasswordHash")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)")
+                        .HasColumnName("password_hash");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint")
+                        .HasColumnName("version");
+
+                    b.HasKey("LocalIdentityId");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("local_credentials", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_local_credentials_version", "\"version\" >= 1");
+                        });
+                });
+
             modelBuilder.Entity("Vistara.Persistence.Model.LocalIdentityRow", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1681,6 +1716,39 @@ namespace Vistara.Migrations.Postgres.Migrations
                     b.HasIndex("UserId");
 
                     b.ToTable("local_identities", (string)null);
+                });
+
+            modelBuilder.Entity("Vistara.Persistence.Model.PlatformBootstrapRow", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    b.Property<Guid>("OwnerTenantId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("owner_tenant_id");
+
+                    b.Property<Guid>("OwnerUserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("owner_user_id");
+
+                    b.Property<DateTime>("ProvisionedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("provisioned_at_utc");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint")
+                        .HasColumnName("version");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("platform_bootstrap", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_platform_bootstrap_singleton", "\"id\" = 1");
+
+                            t.HasCheckConstraint("ck_platform_bootstrap_version", "\"version\" >= 1");
+                        });
                 });
 
             modelBuilder.Entity("Vistara.Persistence.Model.PurgeBatchItemRow", b =>
@@ -2715,6 +2783,55 @@ namespace Vistara.Migrations.Postgres.Migrations
                         });
                 });
 
+            modelBuilder.Entity("Vistara.Persistence.Model.UserPreferenceRow", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<string>("Density")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("density");
+
+                    b.Property<string>("Locale")
+                        .HasMaxLength(35)
+                        .HasColumnType("character varying(35)")
+                        .HasColumnName("locale");
+
+                    b.Property<bool>("ReducedMotion")
+                        .HasColumnType("boolean")
+                        .HasColumnName("reduced_motion");
+
+                    b.Property<bool>("ScreenReaderPagedMode")
+                        .HasColumnType("boolean")
+                        .HasColumnName("screen_reader_paged_mode");
+
+                    b.Property<string>("TimeZone")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("time_zone");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint")
+                        .HasColumnName("version");
+
+                    b.HasKey("UserId");
+
+                    b.ToTable("user_preferences", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_user_preferences_density", "\"density\" IN ('comfortable','compact')");
+
+                            t.HasCheckConstraint("ck_user_preferences_version", "\"version\" >= 1");
+                        });
+                });
+
             modelBuilder.Entity("Vistara.Persistence.Model.UserRow", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3587,6 +3704,21 @@ namespace Vistara.Migrations.Postgres.Migrations
                         .OnDelete(DeleteBehavior.Cascade);
                 });
 
+            modelBuilder.Entity("Vistara.Persistence.Model.LocalCredentialRow", b =>
+                {
+                    b.HasOne("Vistara.Persistence.Model.LocalIdentityRow", null)
+                        .WithOne()
+                        .HasForeignKey("Vistara.Persistence.Model.LocalCredentialRow", "LocalIdentityId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Vistara.Persistence.Model.UserRow", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("Vistara.Persistence.Model.LocalIdentityRow", b =>
                 {
                     b.HasOne("Vistara.Persistence.Model.UserRow", null)
@@ -3774,6 +3906,15 @@ namespace Vistara.Migrations.Postgres.Migrations
                         .HasForeignKey("TenantId", "ActivatedRevisionId")
                         .HasPrincipalKey("TenantId", "Id")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("Vistara.Persistence.Model.UserPreferenceRow", b =>
+                {
+                    b.HasOne("Vistara.Persistence.Model.UserRow", null)
+                        .WithOne()
+                        .HasForeignKey("Vistara.Persistence.Model.UserPreferenceRow", "UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Vistara.Persistence.Sharing.SharingSessionRow", b =>

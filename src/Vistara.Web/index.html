@@ -1,12 +1,63 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark" data-theme-preference="system">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#171b26" />
+    <script>
+      (() => {
+        const root = document.documentElement;
+        try {
+          const saved = localStorage.getItem('vistara:theme');
+          const preference =
+            saved === 'dark' || saved === 'light' || saved === 'system'
+              ? saved
+              : 'system';
+          const systemIsDark = matchMedia(
+            '(prefers-color-scheme: dark)',
+          ).matches;
+          const theme =
+            preference === 'system'
+              ? systemIsDark
+                ? 'dark'
+                : 'light'
+              : preference;
+          root.dataset.theme = theme;
+          root.dataset.themePreference = preference;
+          root.style.colorScheme = theme;
+          const stored = JSON.parse(
+            localStorage.getItem('vistara:preferences') || '{}',
+          );
+          root.dataset.density =
+            stored.density === 'compact' ? 'compact' : 'comfortable';
+          root.dataset.reducedMotion = String(stored.reducedMotion === true);
+          root.dataset.pagedMode = String(
+            stored.screenReaderPagedMode === true,
+          );
+        } catch {
+          root.dataset.theme = 'dark';
+          root.dataset.themePreference = 'system';
+          root.style.colorScheme = 'dark';
+          root.dataset.density = 'comfortable';
+          root.dataset.reducedMotion = 'false';
+          root.dataset.pagedMode = 'false';
+        }
+      })();
+    </script>
+    <meta name="theme-color" content="#11110f" />
     <meta
       name="description"
       content="Vistara, a self-hosted image control plane and gallery."
+    />
+    <link rel="icon" href="%BASE_URL%favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="%BASE_URL%favicon.ico" sizes="32x32" />
+    <link rel="apple-touch-icon" href="%BASE_URL%apple-touch-icon.png" />
+    <link rel="manifest" href="%BASE_URL%manifest.webmanifest" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Vistara" />
+    <meta property="og:title" content="Vistara" />
+    <meta
+      property="og:description"
+      content="A self-hosted image control plane and responsive gallery. Your originals stay yours."
     />
     <title>Vistara</title>
   </head>

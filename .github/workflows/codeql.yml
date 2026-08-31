@@ -24,7 +24,7 @@ jobs:
   analyze:
     name: Analyze ${{ matrix.language }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       actions: read
       contents: read
@@ -57,6 +57,7 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           dependency-caching: false
+          queries: security-extended
 
       - name: Restore for C# analysis
         if: matrix.language == 'csharp'

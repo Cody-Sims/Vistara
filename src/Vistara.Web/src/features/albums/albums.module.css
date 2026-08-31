@@ -20,7 +20,7 @@
 
 .header p {
   max-inline-size: 34rem;
-  color: var(--color-muted);
+  color: var(--color-text-muted);
 }
 
 .eyebrow {
@@ -86,7 +86,7 @@
 
 .optional,
 .albumCard small {
-  color: var(--color-muted);
+  color: var(--color-text-muted);
   font-weight: 400;
 }
 
@@ -108,7 +108,7 @@
 
 .empty {
   border: 1px dashed var(--color-border);
-  color: var(--color-muted);
+  color: var(--color-text-muted);
   text-align: center;
 }
 

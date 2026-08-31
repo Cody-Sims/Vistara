@@ -25,6 +25,7 @@ const SKILL_KEYS = [
 const SKILL_CHILD_DIRECTORIES = new Set(['assets', 'references', 'scripts']);
 const PERMISSION_LEVELS = new Set(['none', 'read', 'write']);
 const VERSION_COMMENT = /^v\d+(?:\.\d+){0,2}(?:[-+][A-Za-z0-9.-]+)?$/;
+const DEPENDABOT_INTERVALS = new Set(['daily', 'weekly', 'monthly']);
 
 function fail(message) {
   throw new Error(message);
@@ -397,6 +398,19 @@ function boundedArtifactPath(value) {
     && !isCatchAllGlob(path));
 }
 
+function hasHiddenArtifactPath(value) {
+  if (typeof value !== 'string') return false;
+  return value
+    .split(/\r?\n/)
+    .map((path) => path.trim())
+    .filter(Boolean)
+    .some((path) => path
+      .split('/')
+      .some((segment) => segment.length > 1
+        && segment.startsWith('.')
+        && segment !== '..'));
+}
+
 function collectActionUses(workflow, document, path) {
   const uses = [];
   for (const [jobName, job] of Object.entries(workflow.jobs)) {
@@ -451,6 +465,10 @@ function validateActionUse(use, path) {
     if (!['error', 'ignore', 'warn'].includes(use.step.with?.['if-no-files-found'])) {
       fail(`${path}: artifact uploads require if-no-files-found.`);
     }
+    if (hasHiddenArtifactPath(use.step.with?.path)
+        && use.step.with?.['include-hidden-files'] !== true) {
+      fail(`${path}: artifact uploads of hidden paths require include-hidden-files.`);
+    }
   }
   if (action.name === 'actions/upload-pages-artifact') {
     if (!boundedArtifactPath(use.step.with?.path)) {
@@ -498,9 +516,21 @@ function hasRequiredPagesGuard(condition) {
     && clauses.some((clause) => refGuard.test(clause));
 }
 
+function validatePullRequestSecretIsolation(source, path) {
+  if (/secrets\s*:\s*inherit/.test(source)) {
+    fail(`${path}: pull-request workflows must not inherit secrets.`);
+  }
+  for (const match of source.matchAll(/secrets\.([A-Za-z_][A-Za-z0-9_-]*)/g)) {
+    if (match[1] !== 'GITHUB_TOKEN') {
+      fail(`${path}: pull-request workflows must not read the secret ${match[1]}.`);
+    }
+  }
+}
+
 function validateWorkflow(root, path) {
   const repositoryPath = relative(root, path);
-  const parsed = parseYaml(readFileSync(path, 'utf8'), repositoryPath);
+  const source = readFileSync(path, 'utf8');
+  const parsed = parseYaml(source, repositoryPath);
   assertObject(parsed.value, repositoryPath);
   const workflow = parsed.value;
   if (!Object.hasOwn(workflow, 'on')) fail(`${repositoryPath}: on is required.`);
@@ -512,6 +542,9 @@ function validateWorkflow(root, path) {
     fail(`${repositoryPath}: explicit top-level permissions are required.`);
   }
   validatePermissions(workflow.permissions, `${repositoryPath} permissions`);
+  if (Object.hasOwn(triggers, 'pull_request')) {
+    validatePullRequestSecretIsolation(source, repositoryPath);
+  }
   if (!Object.hasOwn(workflow, 'concurrency')) {
     fail(`${repositoryPath}: explicit concurrency is required.`);
   }
@@ -575,6 +608,50 @@ function validateWorkflow(root, path) {
   }
 }
 
+function validateDependabot(root) {
+  const repositoryPath = '.github/dependabot.yml';
+  const path = resolve(root, repositoryPath);
+  if (!existsSync(path)) {
+    fail(`${repositoryPath}: a Dependabot configuration is required.`);
+  }
+  const parsed = parseYaml(readFileSync(path, 'utf8'), repositoryPath);
+  const configuration = parsed.value;
+  assertObject(configuration, repositoryPath);
+  if (configuration.version !== 2) {
+    fail(`${repositoryPath}: version 2 is required.`);
+  }
+  if (!Array.isArray(configuration.updates) || configuration.updates.length === 0) {
+    fail(`${repositoryPath}: at least one update entry is required.`);
+  }
+
+  const ecosystems = new Set();
+  for (const [index, entry] of configuration.updates.entries()) {
+    const label = `${repositoryPath}: update ${index + 1}`;
+    assertObject(entry, label);
+    const ecosystem = entry['package-ecosystem'];
+    if (typeof ecosystem !== 'string' || ecosystem.trim().length === 0) {
+      fail(`${label}: package-ecosystem is required.`);
+    }
+    ecosystems.add(ecosystem);
+    const directory = entry.directory ?? entry.directories;
+    if (typeof directory !== 'string' && !Array.isArray(directory)) {
+      fail(`${label}: a directory is required.`);
+    }
+    assertObject(entry.schedule, `${label} schedule`);
+    if (!DEPENDABOT_INTERVALS.has(entry.schedule.interval)) {
+      fail(`${label}: schedule.interval must be daily, weekly, or monthly.`);
+    }
+    const limit = entry['open-pull-requests-limit'];
+    if (!Number.isInteger(limit) || limit < 1 || limit > 10) {
+      fail(`${label}: open-pull-requests-limit must be between 1 and 10.`);
+    }
+  }
+
+  if (!ecosystems.has('github-actions')) {
+    fail(`${repositoryPath}: github-actions updates are required to refresh pinned actions.`);
+  }
+}
+
 function validateWorkflows(root) {
   const workflowsRoot = resolve(root, '.github/workflows');
   for (const path of listFiles(workflowsRoot)) {
@@ -590,6 +667,7 @@ export function validateAgentWorkflows(root = REPOSITORY_ROOT) {
   validateSkills(root);
   validateDuplicateRules(root, instructionFiles);
   validateWorkflows(root);
+  validateDependabot(root);
 }
 
 const isEntryPoint = typeof process.argv[1] === 'string'

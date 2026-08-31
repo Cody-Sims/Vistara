@@ -659,12 +659,14 @@ public sealed class RelationalAssetQueryStore(
 
     private static AssetDeliverySource ToDeliverySource(DeliveryProjection row)
     {
-        string path = row.IsPublic
-            ? $"/media/{Uri.EscapeDataString(row.PipelineId)}/" +
-                $"{Uri.EscapeDataString(row.SourceSha256)}/" +
-                $"{Uri.EscapeDataString(row.RecipeSha256)}." +
-                Uri.EscapeDataString(row.Extension)
-            : $"/delivery/assets/{row.AssetId:D}/{row.RequestId:D}";
+        string path = AssetRenditionDelivery.Path(
+            row.AssetId,
+            row.RequestId,
+            row.IsPublic,
+            row.PipelineId,
+            row.SourceSha256,
+            row.RecipeSha256,
+            row.Extension);
         return new AssetDeliverySource(
             row.Kind,
             path,

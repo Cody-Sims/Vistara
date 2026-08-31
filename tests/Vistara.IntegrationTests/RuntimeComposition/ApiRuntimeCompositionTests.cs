@@ -2,16 +2,20 @@ using System.Security.Cryptography;
 using Amazon.Runtime;
 using Azure.Core;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Vistara.Api.Composition.Gallery;
 using Vistara.Api.Composition.Media;
 using Vistara.Api.Composition.Platform;
+using Vistara.Api.Composition.Runtime;
 using Vistara.Api.Features.Derivatives;
 using Vistara.Api.Features.Events;
 using Vistara.Api.Features.Media;
+using Vistara.Api.OpenApi.Gallery;
 using Vistara.Application.Common.Imaging;
 using Vistara.Application.Derivatives;
 using Vistara.Application.Identity;
@@ -47,6 +51,7 @@ public sealed class ApiRuntimeCompositionTests
             services.AddVistaraApiPlatform(configuration);
             services.AddVistaraApiPersistence(configuration);
             services.AddVistaraMedia(configuration);
+            services.AddVistaraPlatformSurface();
 
             using ServiceProvider provider = services.BuildServiceProvider(
                 new ServiceProviderOptions
@@ -101,12 +106,21 @@ public sealed class ApiRuntimeCompositionTests
 
             builder.Services.AddSingleton<IMediaRuntimeDependencies>(
                 new FakeMediaRuntimeDependencies());
+            builder.Services.AddSingleton<IPlatformRateLimitHook>(
+                new DependencyFailingRateLimitHook());
+            builder.Services.AddVistaraApiRuntime(builder.Configuration);
             builder.Services.AddVistaraApiPlatform(builder.Configuration);
             builder.Services.AddVistaraApiPersistence(builder.Configuration);
             builder.Services.AddVistaraMedia(builder.Configuration);
+            builder.Services.AddVistaraGallery(builder.Configuration);
+            builder.Services.AddVistaraPlatformSurface();
             await using WebApplication app = builder.Build();
             app.Services.ValidateVistaraApiPlatformComposition();
+            app.Services.ValidateVistaraGalleryComposition();
+            app.UseVistaraPlatform();
             app.MapVistaraPlatformEndpoints();
+            app.MapVistaraPlatformSurface();
+            app.MapVistaraGalleryOpenApi();
 
             string[] routes = ((IEndpointRouteBuilder)app).DataSources
                 .SelectMany(source => source.Endpoints)
@@ -116,6 +130,9 @@ public sealed class ApiRuntimeCompositionTests
                 .Cast<string>()
                 .ToArray();
             Assert.Contains("/api/v1/events", routes);
+            Assert.Contains("/api/v1/setup", routes);
+            Assert.Contains("/api/v1/capabilities", routes);
+            Assert.Contains("/api/v1/admin/storage/validate", routes);
             Assert.Contains("/api/v1/derivative-presets", routes);
             Assert.Contains("/api/v1/assets/{assetId:guid}/original", routes);
             Assert.Contains(
@@ -124,6 +141,33 @@ public sealed class ApiRuntimeCompositionTests
             Assert.Contains(
                 "/delivery/{pipeline}/{sourceHash}/{recipeHash}.{extension}",
                 routes);
+            Assert.Contains(
+                "/delivery/assets/{assetId:guid}/{renditionId:guid}",
+                routes);
+            Assert.Single(routes, route => route == "/api/v1/assets");
+            Assert.Single(routes, route => route == "/health/live");
+            Assert.Single(routes, route => route == "/health/ready");
+            Assert.Single(routes, route => route == "/health/startup");
+
+            (int liveStatus, string liveBody) =
+                await SendAsync(app, "/health/live");
+            Assert.Equal(StatusCodes.Status204NoContent, liveStatus);
+            Assert.Empty(liveBody);
+
+            (int readyStatus, string readyBody) =
+                await SendAsync(app, "/health/ready");
+            (int startupStatus, string startupBody) =
+                await SendAsync(app, "/health/startup");
+            Assert.Equal(
+                StatusCodes.Status500InternalServerError,
+                readyStatus);
+            Assert.Equal(
+                StatusCodes.Status500InternalServerError,
+                startupStatus);
+            Assert.DoesNotContain(databasePath, readyBody, StringComparison.Ordinal);
+            Assert.DoesNotContain(mediaRoot, readyBody, StringComparison.Ordinal);
+            Assert.DoesNotContain(databasePath, startupBody, StringComparison.Ordinal);
+            Assert.DoesNotContain(mediaRoot, startupBody, StringComparison.Ordinal);
         }
         finally
         {
@@ -740,6 +784,27 @@ public sealed class ApiRuntimeCompositionTests
             .Replace('+', '-')
             .Replace('/', '_');
 
+    private static async Task<(int StatusCode, string Body)> SendAsync(
+        WebApplication app,
+        string path)
+    {
+        RequestDelegate pipeline = ((IApplicationBuilder)app).Build();
+        await using AsyncServiceScope scope = app.Services.CreateAsyncScope();
+        var context = new DefaultHttpContext
+        {
+            RequestServices = scope.ServiceProvider,
+        };
+        context.Request.Method = HttpMethods.Get;
+        context.Request.Path = path;
+        context.Response.Body = new MemoryStream();
+
+        await pipeline(context);
+        context.Response.Body.Position = 0;
+        string body = await new StreamReader(context.Response.Body)
+            .ReadToEndAsync(CancellationToken.None);
+        return (context.Response.StatusCode, body);
+    }
+
     private static string CreateScratchPath(string leafName) =>
         Path.Combine(
             AppContext.BaseDirectory,
@@ -772,6 +837,15 @@ public sealed class ApiRuntimeCompositionTests
 
         public IImageProcessor CreateImageProcessor() =>
             new FakeImageProcessor();
+    }
+
+    private sealed class DependencyFailingRateLimitHook : IPlatformRateLimitHook
+    {
+        public ValueTask<PlatformRateLimitDecision> CheckAsync(
+            HttpContext context,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException(
+                "Health liveness performed dependency I/O.");
     }
 
     private sealed class FakeImageProcessor : IImageProcessor

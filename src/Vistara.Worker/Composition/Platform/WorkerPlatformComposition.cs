@@ -4,17 +4,24 @@ using Microsoft.Extensions.Options;
 using Vistara.Application.Common;
 using Vistara.Application.Common.Imaging;
 using Vistara.Application.Derivatives;
+using Vistara.Application.Gallery.Curation;
 using Vistara.Application.Lifecycle;
 using Vistara.Domain.Jobs;
 using Vistara.Persistence;
 using Vistara.Persistence.Derivatives.Worker;
+using Vistara.Persistence.Gallery.Curation;
 using Vistara.Persistence.Jobs;
 using Vistara.Persistence.Lifecycle;
 using Vistara.Persistence.Outbox;
 using Vistara.Worker.Features.Derivatives;
+using Vistara.Worker.Features.Gallery;
 using Vistara.Worker.Features.Lifecycle;
+using Vistara.Worker.Features.Reconciliation.Derivatives;
+using Vistara.Worker.Features.Reconciliation.Lifecycle;
+using Vistara.Worker.Features.Reconciliation.Storage;
 using Vistara.Worker.Features.Reconciliation.Uploads;
 using Vistara.Worker.Runtime.Jobs;
+using Vistara.Worker.Runtime.Reconciliation;
 
 namespace Vistara.Worker.Composition.Platform;
 
@@ -206,6 +213,16 @@ public static class WorkerPlatformServiceCollectionExtensions
             ServiceDescriptor.Singleton<
                 IHostedService,
                 UploadReconciliationSchedulerHostedService>());
+        services.AddVistaraBlobIntegrityReconciliation();
+        services.AddVistaraDerivativeRecoveryReconciliation();
+        services.AddVistaraPurgeRecoveryReconciliation();
+        services.AddVistaraReconciliationSchedule(
+            ReconciliationSchedules.BlobIntegrity);
+        services.AddVistaraReconciliationSchedule(
+            ReconciliationSchedules.DerivativeRecovery);
+        services.AddVistaraReconciliationSchedule(
+            ReconciliationSchedules.PurgeRecovery);
+        services.AddVistaraReconciliationScheduler();
         services.TryAddSingleton(DerivativePresetRegistry.Standard);
         services.TryAddScoped<
             IDerivativeStatePort,
@@ -242,6 +259,15 @@ public static class WorkerPlatformServiceCollectionExtensions
             ServiceDescriptor.Scoped<
                 IJobHandler,
                 LifecycleRestoreJobHandler>());
+        services.TryAddScoped<RelationalGalleryCurationStore>();
+        services.TryAddScoped<IGalleryCurationBulkExecutor>(static provider =>
+            provider.GetRequiredService<RelationalGalleryCurationStore>());
+        services.TryAddScoped<GalleryCurationBulkService>();
+        services.TryAddScoped<GalleryCurationBulkJobHandler>();
+        services.TryAddEnumerable(
+            ServiceDescriptor.Scoped<
+                IJobHandler,
+                GalleryCurationBulkJobHandler>());
         services.TryAddSingleton<JobWorkerRuntime>();
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IHostedService, JobWorkerHostedService>());

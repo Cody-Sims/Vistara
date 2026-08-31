@@ -146,6 +146,34 @@ public sealed class ShareService
                 Renditions = asset.Renditions.ToArray(),
             })
             .ToArray();
+        // A share whose members expose nothing under the requested permissions
+        // would publish an empty gallery, so it fails here rather than
+        // succeeding hollow. An album target is not chosen asset by asset, so a
+        // member still waiting for its derivatives is dropped instead of
+        // failing the whole album.
+        if (command.TargetType == ShareTargetType.Album)
+        {
+            assets = [.. assets.Where(asset => IsDeliverable(
+                command.Permissions,
+                asset))];
+        }
+
+        if (assets.Length == 0 ||
+            assets.Any(asset => !IsDeliverable(command.Permissions, asset)))
+        {
+            await AuditAsync(
+                ShareAuditAction.CreateRejected,
+                actor.TenantId,
+                null,
+                actor.ActorId,
+                "share_target_not_deliverable",
+                now);
+            return new(
+                ShareCreateStatus.Invalid,
+                null,
+                null,
+                "share_target_not_deliverable");
+        }
         ShareSecretMaterial token = _tokenProtector.Issue();
         string? passwordHash = command.Password is null
             ? null
@@ -622,6 +650,108 @@ public sealed class ShareService
         return new(SharePublicStatus.Available, projection);
     }
 
+    /// <summary>
+    /// Resolves one captured rendition for an anonymous share recipient. This
+    /// owns the token, session, password, lifecycle, and snapshot membership
+    /// decisions; the delivery grant authorization port owns the resource
+    /// decision that follows. Every concealed reason reports the same status so
+    /// the byte surface cannot be used to probe a share.
+    /// </summary>
+    public async ValueTask<ShareRenditionResult> ResolvePublicRenditionAsync(
+        string? publicToken,
+        string? sessionToken,
+        Guid assetId,
+        string? deliveryIdentifier,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        DateTimeOffset now = RequireUtc(_clock.UtcNow);
+        (ShareRecord? Share, bool SessionAuthenticated) resolved =
+            await ResolvePublicAsync(
+                publicToken,
+                sessionToken,
+                now,
+                cancellationToken);
+        if (resolved.Share is null)
+        {
+            await AuditAsync(
+                ShareAuditAction.ViewRejected,
+                null,
+                null,
+                null,
+                "share_not_found",
+                now);
+            return new(
+                ShareRenditionStatus.NotFound,
+                null,
+                "share_rendition_not_found");
+        }
+
+        ShareRecord share = resolved.Share;
+        if (share.StatusAt(now) != ShareLifecycleStatus.Active)
+        {
+            await AuditAsync(
+                ShareAuditAction.ViewRejected,
+                share.TenantId,
+                share.Id,
+                null,
+                "share_gone",
+                now);
+            return new(ShareRenditionStatus.Gone, null, "share_gone");
+        }
+
+        if (share.PasswordProtected && !resolved.SessionAuthenticated)
+        {
+            await AuditAsync(
+                ShareAuditAction.ViewRejected,
+                share.TenantId,
+                share.Id,
+                null,
+                "share_password_required",
+                now);
+            return new(
+                ShareRenditionStatus.NotFound,
+                null,
+                "share_rendition_not_found");
+        }
+
+        ShareAssetSnapshot? asset = share.Assets.SingleOrDefault(candidate =>
+            candidate.AssetId == assetId);
+        ShareRendition? rendition = asset?.Renditions.SingleOrDefault(candidate =>
+            candidate.DeliveryIdentifier is not null &&
+            string.Equals(
+                candidate.DeliveryIdentifier,
+                deliveryIdentifier,
+                StringComparison.Ordinal));
+        if (asset is null ||
+            rendition is null ||
+            !IsExposed(share.Permissions, rendition))
+        {
+            await AuditAsync(
+                ShareAuditAction.ViewRejected,
+                share.TenantId,
+                share.Id,
+                null,
+                "share_rendition_not_found",
+                now);
+            return new(
+                ShareRenditionStatus.NotFound,
+                null,
+                "share_rendition_not_found");
+        }
+
+        return new(
+            ShareRenditionStatus.Available,
+            new ShareRenditionTarget(
+                share.TenantId,
+                share.Id,
+                share.Version,
+                asset.AssetId,
+                asset.RevisionId,
+                rendition.DeliveryIdentifier!,
+                rendition.RequiredAccess));
+    }
+
     public async ValueTask<ShareChallengeResult> ChallengeAsync(
         string? publicToken,
         string password,
@@ -860,9 +990,7 @@ public sealed class ShareService
         foreach (ShareAssetSnapshot asset in share.Assets)
         {
             IEnumerable<ShareRendition> renditions = asset.Renditions.Where(
-                rendition =>
-                    rendition.RequiredAccess == ShareAccess.View ||
-                    share.Permissions.HasFlag(rendition.RequiredAccess));
+                rendition => IsExposed(share.Permissions, rendition));
             yield return asset with
             {
                 Description = share.MetadataExposure == ShareMetadataExposure.Basic
@@ -875,6 +1003,26 @@ public sealed class ShareService
             };
         }
     }
+
+    /// <summary>
+    /// A rendition is exposed when the share grants the access it demands.
+    /// Viewing is implied by every share, so display renditions stay visible
+    /// while download renditions follow the download permission.
+    /// </summary>
+    private static bool IsExposed(
+        ShareAccess permissions,
+        ShareRendition rendition) =>
+        rendition.RequiredAccess == ShareAccess.View ||
+        permissions.HasFlag(rendition.RequiredAccess);
+
+    /// <summary>
+    /// An asset is deliverable when the share would publish at least one
+    /// rendition a recipient can actually fetch.
+    /// </summary>
+    private static bool IsDeliverable(
+        ShareAccess permissions,
+        ShareAssetSnapshot asset) =>
+        asset.Renditions.Any(rendition => IsExposed(permissions, rendition));
 
     private static string? ValidateCreate(
         ShareCreateCommand command,
@@ -929,6 +1077,7 @@ public sealed class ShareService
         asset.RevisionId != Guid.Empty &&
         asset.RevisionId.Version == 7 &&
         asset.RevisionNumber > 0 &&
+        asset.AssetVersion > 0 &&
         !string.IsNullOrWhiteSpace(asset.Title) &&
         asset.Width > 0 &&
         asset.Height > 0 &&
@@ -942,7 +1091,17 @@ public sealed class ShareService
                 ShareAccess.DownloadRenditions or
                 ShareAccess.DownloadOriginal) &&
             (rendition.DeliveryIdentifier is null ||
-                rendition.DeliveryIdentifier.Length <= 256));
+                IsDeliveryIdentifier(rendition.DeliveryIdentifier)));
+
+    /// <summary>
+    /// Matches the identifier grammar the delivery grant resource accepts so a
+    /// captured rendition can always be authorized for delivery later.
+    /// </summary>
+    private static bool IsDeliveryIdentifier(string value) =>
+        value.Length is > 0 and <= 256 &&
+        value.All(character =>
+            char.IsAsciiLetterOrDigit(character) ||
+            character is '-' or '_' or '.' or ':');
 
     private static ShareAssetSnapshot[] CopyAssets(
         IReadOnlyList<ShareAssetSnapshot> assets) =>
@@ -963,7 +1122,7 @@ public sealed class ShareService
             Assets = command.SnapshotAssets.Select(asset => new
             {
                 asset.AssetId,
-                asset.Revision,
+                asset.Version,
             }),
             command.Permissions,
             command.MetadataExposure,

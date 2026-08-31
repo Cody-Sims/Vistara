@@ -1,6 +1,5 @@
 using System.Data;
 using System.Data.Common;
-using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
@@ -27,7 +26,14 @@ public static class ApiHealthServiceCollectionExtensions
         services.TryAddEnumerable(Probe<ApiSchemaHealthProbe>());
         services.TryAddEnumerable(Probe<ApiStorageHealthProbe>());
         services.TryAddEnumerable(Probe<ApiQueueHealthProbe>());
-        services.TryAddScoped<SafeHealthEvaluator>();
+        services.TryAddSingleton(new HealthEvaluationOptions());
+        services.TryAddSingleton<HealthReportCache>();
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddScoped(static provider => new SafeHealthEvaluator(
+            provider.GetServices<IHealthDependencyProbe>(),
+            provider.GetRequiredService<HealthEvaluationOptions>(),
+            provider.GetRequiredService<HealthReportCache>(),
+            provider.GetRequiredService<TimeProvider>()));
         services.TryAddScoped<ApiHealthService>();
         return services;
     }
@@ -40,31 +46,106 @@ public static class ApiHealthServiceCollectionExtensions
 public static class ApiHealthEndpointRouteBuilderExtensions
 {
     public static IEndpointRouteBuilder MapVistaraApiHealthEndpoints(
-        this IEndpointRouteBuilder endpoints)
+        this IEndpointRouteBuilder endpoints) =>
+        endpoints.MapVistaraApiHealthEndpoints(includeLiveness: true);
+
+    /// <summary>
+    /// Maps the health routes. Liveness answers <c>204 No Content</c> with no
+    /// body because container health checks assert exactly that. Hosts whose
+    /// route table already owns <c>/health/live</c> map the dependency routes
+    /// only; liveness is still answered ahead of the pipeline by
+    /// <see cref="ApiHealthApplicationBuilderExtensions.UseVistaraApiHealth"/>.
+    /// </summary>
+    public static IEndpointRouteBuilder MapVistaraApiHealthEndpoints(
+        this IEndpointRouteBuilder endpoints,
+        bool includeLiveness)
     {
         ArgumentNullException.ThrowIfNull(endpoints);
-        endpoints.MapGet(
-                "/health/live",
-                static (ApiHealthService health, CancellationToken cancellationToken) =>
-                    health.CheckAsync(
-                        HealthEndpointKind.Liveness,
-                        cancellationToken))
-            .AllowAnonymous();
+        if (includeLiveness)
+        {
+            endpoints.MapGet(
+                    "/health/live",
+                    static (HttpContext context) =>
+                    {
+                        ApiLiveness.Write(context);
+                        return Task.CompletedTask;
+                    })
+                .AllowAnonymous();
+        }
+
         endpoints.MapGet(
                 "/health/ready",
-                static (ApiHealthService health, CancellationToken cancellationToken) =>
-                    health.CheckAsync(
-                        HealthEndpointKind.Readiness,
-                        cancellationToken))
+                static (HttpContext context) => Write(
+                    context,
+                    HealthEndpointKind.Readiness))
             .AllowAnonymous();
         endpoints.MapGet(
                 "/health/startup",
-                static (ApiHealthService health, CancellationToken cancellationToken) =>
-                    health.CheckAsync(
-                        HealthEndpointKind.Startup,
-                        cancellationToken))
+                static (HttpContext context) => Write(
+                    context,
+                    HealthEndpointKind.Startup))
             .AllowAnonymous();
         return endpoints;
+    }
+
+    private static Task Write(
+        HttpContext context,
+        HealthEndpointKind endpoint) =>
+        context.RequestServices
+            .GetRequiredService<ApiHealthService>()
+            .WriteAsync(context, endpoint, context.RequestAborted);
+}
+
+internal static class ApiLiveness
+{
+    internal static void Write(HttpContext context)
+    {
+        context.Response.StatusCode = StatusCodes.Status204NoContent;
+        context.Response.ContentLength = 0;
+        context.Response.Headers.CacheControl = "no-store";
+    }
+
+    internal static bool Matches(HttpRequest request) =>
+        HttpMethods.IsGet(request.Method) &&
+        request.Path.Equals("/health/live", StringComparison.OrdinalIgnoreCase);
+}
+
+public static class ApiHealthApplicationBuilderExtensions
+{
+    /// <summary>
+    /// Answers liveness ahead of rate limiting, authentication, and tenant
+    /// resolution so a saturated or degraded instance is never reported dead,
+    /// and maps readiness and startup as ordinary governed endpoints so their
+    /// dependency probes stay behind the rate limiter.
+    /// </summary>
+    public static IApplicationBuilder UseVistaraApiHealth(
+        this IApplicationBuilder application)
+    {
+        ArgumentNullException.ThrowIfNull(application);
+        if (application is IEndpointRouteBuilder endpoints)
+        {
+            endpoints.MapVistaraApiHealthEndpoints(includeLiveness: false);
+        }
+
+        return application.UseMiddleware<ApiLivenessMiddleware>();
+    }
+}
+
+internal sealed class ApiLivenessMiddleware(RequestDelegate next)
+{
+    private readonly RequestDelegate _next =
+        next ?? throw new ArgumentNullException(nameof(next));
+
+    public Task InvokeAsync(HttpContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (!ApiLiveness.Matches(context.Request))
+        {
+            return _next(context);
+        }
+
+        ApiLiveness.Write(context);
+        return Task.CompletedTask;
     }
 }
 
@@ -167,20 +248,26 @@ public sealed class ApiHealthService(SafeHealthEvaluator evaluator)
     private readonly SafeHealthEvaluator _evaluator =
         evaluator ?? throw new ArgumentNullException(nameof(evaluator));
 
-    public async Task<ContentHttpResult> CheckAsync(
+    public async Task WriteAsync(
+        HttpContext context,
         HealthEndpointKind endpoint,
         CancellationToken cancellationToken)
     {
         HealthReport report = await _evaluator.EvaluateAsync(
             endpoint,
             cancellationToken);
-        return TypedResults.Text(
+        context.Response.StatusCode = StatusFor(report);
+        context.Response.ContentType = "application/json";
+        context.Response.Headers.CacheControl = "no-store";
+        await context.Response.WriteAsync(
             HealthReportJson.Serialize(report),
-            "application/json",
-            statusCode: report.State == HealthState.Healthy
-                ? StatusCodes.Status200OK
-                : StatusCodes.Status503ServiceUnavailable);
+            cancellationToken);
     }
+
+    private static int StatusFor(HealthReport report) =>
+        report.State == HealthState.Healthy
+            ? StatusCodes.Status200OK
+            : StatusCodes.Status503ServiceUnavailable;
 }
 
 internal abstract class ApiHealthProbe(
@@ -288,7 +375,7 @@ internal sealed class ApiMigrationHealthProbe(IServiceProvider services)
         CancellationToken cancellationToken) =>
         ExecuteSchemaQueryAsync(
             services.GetRequiredService<VistaraDbContext>(),
-            """SELECT "tenant_id" FROM "worker_tenant_catalog" WHERE 1 = 0""",
+            """SELECT "routed_tenant_id" FROM "worker_tenant_catalog" WHERE 1 = 0""",
             cancellationToken);
 }
 
@@ -317,19 +404,20 @@ internal sealed class ApiDatabaseHealthProbe(IServiceProvider services)
         HealthDependency.Database,
         HealthReasonCodes.DependencyUnavailable)
 {
-    protected override async ValueTask CheckCoreAsync(
+    /// <summary>
+    /// Runs a real round trip on the context's own connection rather than
+    /// <c>CanConnectAsync</c>. Readiness is anonymous, so a query routed
+    /// through the EF pipeline is rejected by the tenant interceptor before it
+    /// reaches the server, and a connection that opens is not evidence that the
+    /// database answers.
+    /// </summary>
+    protected override ValueTask CheckCoreAsync(
         IServiceProvider services,
-        CancellationToken cancellationToken)
-    {
-        bool canConnect = await services
-            .GetRequiredService<VistaraDbContext>()
-            .Database
-            .CanConnectAsync(cancellationToken);
-        if (!canConnect)
-        {
-            throw new InvalidOperationException();
-        }
-    }
+        CancellationToken cancellationToken) =>
+        ExecuteSchemaQueryAsync(
+            services.GetRequiredService<VistaraDbContext>(),
+            "SELECT 1",
+            cancellationToken);
 }
 
 internal sealed class ApiSchemaHealthProbe(IServiceProvider services)
@@ -353,15 +441,21 @@ internal sealed class ApiStorageHealthProbe(IServiceProvider services)
         HealthDependency.Storage,
         HealthReasonCodes.StorageUnavailable)
 {
-    private static readonly BlobKey Sentinel = new("health/readiness");
+    private static readonly BlobListOptions Sentinel = new("health/");
 
     protected override async ValueTask CheckCoreAsync(
         IServiceProvider services,
         CancellationToken cancellationToken)
     {
-        _ = await services
-            .GetRequiredService<IBlobStore>()
-            .HeadAsync(Sentinel, cancellationToken);
+        IBlobStore store = services.GetRequiredService<IBlobStore>();
+        _ = store.Capabilities;
+        await foreach (BlobHead head in store.ListAsync(
+                           Sentinel,
+                           cancellationToken))
+        {
+            _ = head;
+            break;
+        }
     }
 }
 

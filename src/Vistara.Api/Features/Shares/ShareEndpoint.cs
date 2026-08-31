@@ -176,7 +176,15 @@ public static class ShareEndpoint
                     cancellationToken);
                 return;
             case ShareCreateStatus.NotFound:
-                await WriteNotFoundAsync(context, cancellationToken);
+                // Every absent, stale, trashed, purged, or foreign target
+                // reports the same problem so a share request cannot probe
+                // which assets exist.
+                await WriteProblemAsync(
+                    context,
+                    StatusCodes.Status404NotFound,
+                    "share_target_not_found",
+                    "The share target was not found",
+                    cancellationToken);
                 return;
             default:
                 await WriteProblemAsync(
@@ -395,7 +403,7 @@ public static class ShareEndpoint
                 await WriteJsonAsync(
                     context,
                     StatusCodes.Status200OK,
-                    ToPublic(result.Share!),
+                    ToPublic(result.Share!, publicToken),
                     cancellationToken);
                 return;
             case SharePublicStatus.Gone:
@@ -654,11 +662,12 @@ public static class ShareEndpoint
             share.Assets
                 .Select(asset => new VersionedAssetReference(
                     asset.AssetId,
-                    new ResourceVersion(asset.RevisionNumber)))
+                    new ResourceVersion(asset.AssetVersion)))
                 .ToArray());
 
     private static PublicShareResponse ToPublic(
-        SharePublicProjection share) =>
+        SharePublicProjection share,
+        string publicToken) =>
         new(
             share.Name,
             StatusText(share.Status),
@@ -671,13 +680,22 @@ public static class ShareEndpoint
             share.PasswordRequired
                 ? null
                 : new CursorPage<PublicSharedAssetResponse>(
-                    share.Assets.Select(ToPublicAsset).ToArray(),
+                    share.Assets
+                        .Select(asset => ToPublicAsset(asset, publicToken))
+                        .ToArray(),
                     share.NextCursor is null
                         ? null
                         : new SignedCursor(share.NextCursor)));
 
+    /// <summary>
+    /// Publishes the path a recipient can actually fetch. A public derivative
+    /// keeps its immutable media path, while a privately captured rendition is
+    /// published as the share-scoped delivery URL bound to the presented token,
+    /// which never exposes the storage pipeline, source hash, or recipe hash.
+    /// </summary>
     private static PublicSharedAssetResponse ToPublicAsset(
-        ShareAssetSnapshot asset) =>
+        ShareAssetSnapshot asset,
+        string publicToken) =>
         new(
             asset.AssetId,
             asset.Title,
@@ -688,7 +706,12 @@ public static class ShareEndpoint
             asset.Renditions.Select(rendition =>
                 new AssetRenditionResponse(
                     rendition.Kind,
-                    rendition.Path,
+                    rendition.DeliveryIdentifier is { } identifier
+                        ? ShareRenditionRoute.Build(
+                            publicToken,
+                            asset.AssetId,
+                            identifier)
+                        : rendition.Path,
                     rendition.Width,
                     rendition.Height,
                     rendition.ContentType)).ToArray());
@@ -816,7 +839,7 @@ public static class ShareEndpoint
         return version;
     }
 
-    private static string? ReadSessionToken(HttpContext context)
+    internal static string? ReadSessionToken(HttpContext context)
     {
         StringValues header = context.Request.Headers[SessionHeaderName];
         if (header.Count == 1 && !string.IsNullOrEmpty(header[0]))

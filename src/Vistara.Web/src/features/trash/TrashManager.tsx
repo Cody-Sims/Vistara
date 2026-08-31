@@ -10,6 +10,7 @@ import type {
   VersionedAssetReference,
 } from '../../api/generated/models';
 import styles from './Trash.module.css';
+import { versionTag } from '../../api/versionTag';
 
 export interface TrashManagerProps {
   readonly client: Pick<
@@ -192,7 +193,7 @@ export function TrashManager({
         },
         {
           idempotencyKey: createIdempotencyKey(),
-          ifMatch: `"v${dryRun.version}"`,
+          ifMatch: versionTag(dryRun.version),
         },
       );
       setBatch(response.data);

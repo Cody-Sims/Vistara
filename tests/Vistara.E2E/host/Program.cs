@@ -8,10 +8,12 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
 using Vistara.Api.Composition.Gallery;
 using Vistara.Api.Composition.Platform;
+using Vistara.Api.Composition.Runtime;
 using Vistara.Api.OpenApi.Gallery;
 using Vistara.Application.Common.Imaging;
 using Vistara.Application.Common.Storage;
 using Vistara.Auth.ApiKeys;
+using Vistara.Auth.Cookies;
 using Vistara.Domain.Common;
 using Vistara.Domain.Identity;
 using Vistara.Domain.Tenancy;
@@ -63,16 +65,19 @@ builder.Services.AddDataProtection().UseEphemeralDataProtectionProvider();
 builder.Services.AddSingleton<
     ApiMedia.IMediaRuntimeDependencies,
     TestMediaRuntimeDependencies>();
+builder.Services.AddVistaraApiRuntime(builder.Configuration);
 builder.Services.AddVistaraApiPlatform(builder.Configuration);
 builder.Services.AddVistaraApiPersistence(builder.Configuration);
 ApiMedia.MediaServiceCollectionExtensions.AddVistaraMedia(
     builder.Services,
     builder.Configuration);
+builder.Services.AddVistaraPlatformSurface();
 
 WebApplication app = builder.Build();
 app.Services.ValidateVistaraApiPlatformComposition();
 app.UseVistaraPlatform();
 app.MapVistaraPlatformEndpoints();
+app.MapVistaraPlatformSurface();
 app.MapVistaraGalleryOpenApi();
 app.UseStaticFiles();
 app.UseVistaraSpaFallback(async context =>
@@ -127,6 +132,9 @@ static async Task SeedAsync(IReadOnlyDictionary<string, string> arguments)
 
     string pepper = Required(arguments, "pepper");
     byte[] pepperBytes = Convert.FromBase64String(pepper);
+    // The seed runs once per suite, so the default work factor is lowered to
+    // the supported minimum rather than paid three times over.
+    var passwordHasher = new Pbkdf2LocalPasswordHasher(100_000);
     var browserStates = new Dictionary<string, BrowserState>(
         StringComparer.Ordinal);
     string[] browsers = ["chromium", "firefox", "webkit"];
@@ -167,6 +175,25 @@ static async Task SeedAsync(IReadOnlyDictionary<string, string> arguments)
                 DisplayName = $"E2E {browser}",
                 Status = UserStatus.Active.ToString(),
                 CreatedAtUtc = now,
+                UpdatedAtUtc = now,
+                Version = 1,
+            });
+            // A password so the browser can open a cookie session, which is the
+            // only credential the antiforgery contract applies to. The value
+            // exists for this run only and never leaves the artifacts folder.
+            Guid localIdentityId = Guid.CreateVersion7(now.AddMilliseconds(3));
+            context.LocalIdentities.Add(new LocalIdentityRow
+            {
+                Id = localIdentityId,
+                UserId = userId,
+                NormalizedLogin = $"{browser}@e2e.invalid",
+                LinkedAtUtc = now,
+            });
+            context.LocalCredentials.Add(new LocalCredentialRow
+            {
+                LocalIdentityId = localIdentityId,
+                UserId = userId,
+                PasswordHash = passwordHasher.Hash(BrowserPassword(browser)),
                 UpdatedAtUtc = now,
                 Version = 1,
             });
@@ -349,7 +376,9 @@ static async Task SeedAsync(IReadOnlyDictionary<string, string> arguments)
                     userId,
                     primaryAssetId,
                     trashAssetId,
-                    apiKey));
+                    apiKey,
+                    $"{browser}@e2e.invalid",
+                    BrowserPassword(browser)));
         }
     }
 
@@ -467,6 +496,13 @@ static IReadOnlyDictionary<string, string> ParseArguments(string[] values)
     return result;
 }
 
+/// <summary>
+/// The sign-in password seeded for one browser's tenant. It is derived from
+/// the browser name so a run is reproducible, and it is only ever accepted by
+/// the throwaway database this suite creates.
+/// </summary>
+static string BrowserPassword(string browser) => $"E2E-{browser}-password-1";
+
 static string Required(
     IReadOnlyDictionary<string, string> arguments,
     string name) =>
@@ -483,7 +519,9 @@ internal sealed record BrowserState(
     Guid UserId,
     Guid PrimaryAssetId,
     Guid TrashAssetId,
-    string ApiKey);
+    string ApiKey,
+    string Login,
+    string Password);
 
 internal sealed class FixedTenantScope(Guid tenantId) : ITenantScope
 {

@@ -32,7 +32,14 @@ public static class WorkerHealthServiceCollectionExtensions
         services.TryAddEnumerable(Probe<WorkerSchemaHealthProbe>());
         services.TryAddEnumerable(Probe<WorkerStorageHealthProbe>());
         services.TryAddEnumerable(Probe<WorkerQueueHealthProbe>());
-        services.TryAddScoped<SafeHealthEvaluator>();
+        services.TryAddSingleton(new HealthEvaluationOptions());
+        services.TryAddSingleton<HealthReportCache>();
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddScoped(static provider => new SafeHealthEvaluator(
+            provider.GetServices<IHealthDependencyProbe>(),
+            provider.GetRequiredService<HealthEvaluationOptions>(),
+            provider.GetRequiredService<HealthReportCache>(),
+            provider.GetRequiredService<TimeProvider>()));
         services.TryAddScoped<WorkerHealthService>();
         bool hasCustomJobObserver = services.Any(descriptor =>
             descriptor.ServiceType == typeof(IJobRuntimeObserver) &&
@@ -406,7 +413,7 @@ internal sealed class WorkerMigrationHealthProbe(IServiceProvider services)
         CancellationToken cancellationToken) =>
         ExecuteSchemaQueryAsync(
             services.GetRequiredService<VistaraDbContext>(),
-            """SELECT "tenant_id" FROM "worker_tenant_catalog" WHERE 1 = 0""",
+            """SELECT "routed_tenant_id" FROM "worker_tenant_catalog" WHERE 1 = 0""",
             cancellationToken);
 }
 
@@ -435,19 +442,20 @@ internal sealed class WorkerDatabaseHealthProbe(IServiceProvider services)
         HealthDependency.Database,
         HealthReasonCodes.DependencyUnavailable)
 {
-    protected override async ValueTask CheckCoreAsync(
+    /// <summary>
+    /// Runs a real round trip on the context's own connection rather than
+    /// <c>CanConnectAsync</c>. The worker holds no tenant scope while probing,
+    /// so a query routed through the EF pipeline is rejected by the tenant
+    /// interceptor before it reaches the server, and a connection that opens is
+    /// not evidence that the database answers.
+    /// </summary>
+    protected override ValueTask CheckCoreAsync(
         IServiceProvider services,
-        CancellationToken cancellationToken)
-    {
-        bool canConnect = await services
-            .GetRequiredService<VistaraDbContext>()
-            .Database
-            .CanConnectAsync(cancellationToken);
-        if (!canConnect)
-        {
-            throw new InvalidOperationException();
-        }
-    }
+        CancellationToken cancellationToken) =>
+        ExecuteSchemaQueryAsync(
+            services.GetRequiredService<VistaraDbContext>(),
+            "SELECT 1",
+            cancellationToken);
 }
 
 internal sealed class WorkerSchemaHealthProbe(IServiceProvider services)
@@ -471,15 +479,21 @@ internal sealed class WorkerStorageHealthProbe(IServiceProvider services)
         HealthDependency.Storage,
         HealthReasonCodes.StorageUnavailable)
 {
-    private static readonly BlobKey Sentinel = new("health/readiness");
+    private static readonly BlobListOptions Sentinel = new("health/");
 
     protected override async ValueTask CheckCoreAsync(
         IServiceProvider services,
         CancellationToken cancellationToken)
     {
-        _ = await services
-            .GetRequiredService<IBlobStore>()
-            .HeadAsync(Sentinel, cancellationToken);
+        IBlobStore store = services.GetRequiredService<IBlobStore>();
+        _ = store.Capabilities;
+        await foreach (BlobHead head in store.ListAsync(
+                           Sentinel,
+                           cancellationToken))
+        {
+            _ = head;
+            break;
+        }
     }
 }
 

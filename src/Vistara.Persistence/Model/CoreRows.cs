@@ -38,6 +38,48 @@ public sealed class LocalIdentityRow
     public DateTimeOffset LinkedAtUtc { get; set; }
 }
 
+/// <summary>
+/// A database-enforced singleton marker proving that first-owner provisioning
+/// has already produced a winner. The primary key is pinned to
+/// <see cref="SingletonId"/> so concurrent bootstrap attempts with distinct
+/// slugs and emails still collide on one unique key.
+/// </summary>
+public sealed class PlatformBootstrapRow
+{
+    public const int SingletonId = 1;
+
+    public int Id { get; set; } = SingletonId;
+    public Guid OwnerTenantId { get; set; }
+    public Guid OwnerUserId { get; set; }
+    public DateTimeOffset ProvisionedAtUtc { get; set; }
+    public long Version { get; set; }
+}
+
+/// <summary>
+/// Account-level presentation preferences. They follow the user across every
+/// tenant, so the table carries no tenant column and no row-level security.
+/// </summary>
+public sealed class UserPreferenceRow
+{
+    public Guid UserId { get; set; }
+    public string Density { get; set; } = "comfortable";
+    public bool ReducedMotion { get; set; }
+    public bool ScreenReaderPagedMode { get; set; }
+    public string? Locale { get; set; }
+    public string? TimeZone { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+    public long Version { get; set; }
+}
+
+public sealed class LocalCredentialRow
+{
+    public Guid LocalIdentityId { get; set; }
+    public Guid UserId { get; set; }
+    public string PasswordHash { get; set; } = string.Empty;
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+    public long Version { get; set; }
+}
+
 public sealed class ExternalIdentityRow
 {
     public Guid Id { get; set; }

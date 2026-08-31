@@ -78,6 +78,17 @@ public static class PersistenceServiceCollectionExtensions
                 options.UseNpgsql(persistenceOptions.ConnectionString);
             }
         });
+        services.AddDbContext<Identity.IdentityCatalogDbContext>(options =>
+        {
+            if (persistenceOptions.Provider == VistaraDatabaseProvider.Sqlite)
+            {
+                options.UseSqlite(persistenceOptions.ConnectionString);
+            }
+            else
+            {
+                options.UseNpgsql(persistenceOptions.ConnectionString);
+            }
+        });
         services.AddDbContext<JwtRevocationCatalogDbContext>(options =>
         {
             if (persistenceOptions.Provider == VistaraDatabaseProvider.Sqlite)
@@ -112,6 +123,11 @@ public static class PersistenceServiceCollectionExtensions
             }
         });
         services.AddScoped<RelationalAuthenticationStore>();
+        services.AddScoped<Identity.RelationalIdentityCatalog>();
+        services.AddScoped<Identity.RelationalUserPreferenceStore>();
+        services.TryAddScoped<
+            Vistara.Application.Common.Auditing.IAuditWriter,
+            Auditing.RelationalAuditWriter>();
         services.AddScoped<RelationalDerivativeRequestStore>();
         services.AddScoped<RelationalEventStreamStore>();
         services.AddScoped<RelationalMediaCatalogStore>();

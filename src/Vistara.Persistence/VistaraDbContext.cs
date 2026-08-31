@@ -37,6 +37,9 @@ public sealed class VistaraDbContext(
     public DbSet<TenantRow> Tenants => Set<TenantRow>();
     public DbSet<UserRow> Users => Set<UserRow>();
     public DbSet<LocalIdentityRow> LocalIdentities => Set<LocalIdentityRow>();
+    public DbSet<LocalCredentialRow> LocalCredentials => Set<LocalCredentialRow>();
+    public DbSet<PlatformBootstrapRow> PlatformBootstrap => Set<PlatformBootstrapRow>();
+    public DbSet<UserPreferenceRow> UserPreferences => Set<UserPreferenceRow>();
     public DbSet<ExternalIdentityRow> ExternalIdentities => Set<ExternalIdentityRow>();
     public DbSet<TenantMembershipRow> TenantMemberships => Set<TenantMembershipRow>();
     public DbSet<AuthSessionRow> AuthSessions => Set<AuthSessionRow>();
@@ -160,6 +163,64 @@ public sealed class VistaraDbContext(
             entity.HasKey(row => row.Id);
             entity.HasIndex(row => row.NormalizedLogin).IsUnique();
             entity.Property(row => row.NormalizedLogin).HasMaxLength(320);
+            entity.HasOne<UserRow>()
+                .WithMany()
+                .HasForeignKey(row => row.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<UserPreferenceRow>(entity =>
+        {
+            entity.ToTable("user_preferences", table =>
+            {
+                table.HasCheckConstraint(
+                    "ck_user_preferences_density",
+                    "\"density\" IN ('comfortable','compact')");
+                table.HasCheckConstraint(
+                    "ck_user_preferences_version",
+                    "\"version\" >= 1");
+            });
+            entity.HasKey(row => row.UserId);
+            entity.Property(row => row.Density).HasMaxLength(16);
+            entity.Property(row => row.Locale).HasMaxLength(35);
+            entity.Property(row => row.TimeZone).HasMaxLength(64);
+            entity.Property(row => row.Version).IsConcurrencyToken();
+            entity.HasOne<UserRow>()
+                .WithOne()
+                .HasForeignKey<UserPreferenceRow>(row => row.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<PlatformBootstrapRow>(entity =>
+        {
+            entity.ToTable("platform_bootstrap", table =>
+            {
+                table.HasCheckConstraint(
+                    "ck_platform_bootstrap_singleton",
+                    "\"id\" = 1");
+                table.HasCheckConstraint(
+                    "ck_platform_bootstrap_version",
+                    "\"version\" >= 1");
+            });
+            entity.HasKey(row => row.Id);
+            entity.Property(row => row.Id).ValueGeneratedNever();
+            entity.Property(row => row.Version).IsConcurrencyToken();
+        });
+
+        modelBuilder.Entity<LocalCredentialRow>(entity =>
+        {
+            entity.ToTable("local_credentials", table =>
+                table.HasCheckConstraint(
+                    "ck_local_credentials_version",
+                    "\"version\" >= 1"));
+            entity.HasKey(row => row.LocalIdentityId);
+            entity.HasIndex(row => row.UserId);
+            entity.Property(row => row.PasswordHash).HasMaxLength(512);
+            entity.Property(row => row.Version).IsConcurrencyToken();
+            entity.HasOne<LocalIdentityRow>()
+                .WithOne()
+                .HasForeignKey<LocalCredentialRow>(row => row.LocalIdentityId)
+                .OnDelete(DeleteBehavior.Cascade);
             entity.HasOne<UserRow>()
                 .WithMany()
                 .HasForeignKey(row => row.UserId)

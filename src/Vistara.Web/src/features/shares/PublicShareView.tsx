@@ -4,6 +4,7 @@ import {
   type VistaraApiClient,
 } from '../../api/generated';
 import type { PublicShare } from '../../api/generated/models';
+import { buildResponsiveImage } from '../viewer/responsiveImage';
 import styles from './Shares.module.css';
 
 export interface PublicShareViewProps {
@@ -206,52 +207,55 @@ export function PublicShareView({
             <p>No images are currently available in this share.</p>
           ) : (
             <ul className={styles.publicGrid}>
-              {share.assets.items.map((asset) => (
-                <li key={asset.id} className={styles.publicCard}>
-                  <h3>{asset.title}</h3>
-                  {asset.renditions[0] ? (
-                    <img
-                      src={asset.renditions[0].path}
-                      alt={
-                        share.metadataExposure === 'basic' && asset.description
-                          ? asset.description
-                          : asset.title
-                      }
-                      width={asset.renditions[0].width}
-                      height={asset.renditions[0].height}
-                    />
-                  ) : null}
-                  {share.metadataExposure === 'basic' && asset.description ? (
-                    <p>{asset.description}</p>
-                  ) : null}
-                  {share.metadataExposure === 'basic' ? (
-                    <dl className={styles.assetMetadata}>
-                      <div>
-                        <dt>Dimensions</dt>
-                        <dd>
-                          {asset.width} × {asset.height}
-                        </dd>
-                      </div>
-                      {asset.capturedAt ? (
+              {share.assets.items.map((asset, index) => {
+                const image = buildResponsiveImage(asset, 'share', index === 0);
+
+                return (
+                  <li key={asset.id} className={styles.publicCard}>
+                    <h3>{asset.title}</h3>
+                    {image ? (
+                      <img
+                        {...image}
+                        alt={
+                          share.metadataExposure === 'basic' &&
+                          asset.description
+                            ? asset.description
+                            : asset.title
+                        }
+                      />
+                    ) : null}
+                    {share.metadataExposure === 'basic' && asset.description ? (
+                      <p>{asset.description}</p>
+                    ) : null}
+                    {share.metadataExposure === 'basic' ? (
+                      <dl className={styles.assetMetadata}>
                         <div>
-                          <dt>Captured</dt>
-                          <dd>{formatDate(new Date(asset.capturedAt))}</dd>
+                          <dt>Dimensions</dt>
+                          <dd>
+                            {asset.width} × {asset.height}
+                          </dd>
                         </div>
-                      ) : null}
-                    </dl>
-                  ) : null}
-                  {share.permissions.downloadRenditions &&
-                  asset.renditions[0] ? (
-                    <a
-                      className={styles.secondaryButton}
-                      href={asset.renditions[0].path}
-                      download
-                    >
-                      Download display image
-                    </a>
-                  ) : null}
-                </li>
-              ))}
+                        {asset.capturedAt ? (
+                          <div>
+                            <dt>Captured</dt>
+                            <dd>{formatDate(new Date(asset.capturedAt))}</dd>
+                          </div>
+                        ) : null}
+                      </dl>
+                    ) : null}
+                    {share.permissions.downloadRenditions &&
+                    asset.renditions[0] ? (
+                      <a
+                        className={styles.secondaryButton}
+                        href={asset.renditions[0].path}
+                        download
+                      >
+                        Download display image
+                      </a>
+                    ) : null}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </section>

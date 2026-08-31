@@ -88,6 +88,12 @@ public sealed class ShareEndpointTests
         Assert.Equal(StatusCodes.Status201Created, created.Response.StatusCode);
         Assert.Equal("\"v1\"", created.Response.Headers.ETag);
         Assert.StartsWith("vsh_", publicToken, StringComparison.Ordinal);
+        JsonElement snapshotTarget = JsonDocument.Parse(firstBody)
+            .RootElement.GetProperty("share")
+            .GetProperty("snapshotAssets")[0];
+        Assert.Equal(
+            9,
+            snapshotTarget.GetProperty("version").GetInt64());
         Assert.Equal(StatusCodes.Status409Conflict, replay.Response.StatusCode);
         Assert.DoesNotContain(publicToken, replayBody, StringComparison.Ordinal);
     }
@@ -394,6 +400,7 @@ public sealed class ShareEndpointTests
                         AssetId,
                         RevisionId,
                         4,
+                        9,
                         "Title",
                         "Description",
                         Now,
@@ -401,7 +408,7 @@ public sealed class ShareEndpointTests
                         800,
                         [
                             new ShareRendition(
-                                "thumbnail",
+                                "thumb",
                                 "/media/thumb.webp",
                                 300,
                                 200,

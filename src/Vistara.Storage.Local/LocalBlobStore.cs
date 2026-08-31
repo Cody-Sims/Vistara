@@ -13,9 +13,13 @@ namespace Vistara.Storage.Local;
 /// </summary>
 /// <remarks>
 /// Keys are hashed before path resolution and every existing component is
-/// rejected when it is a symbolic link or reparse point. The configured root
-/// and its ancestors must not be concurrently writable by untrusted principals;
-/// portable path APIs cannot eliminate directory-swap TOCTOU attacks otherwise.
+/// rejected when it is a symbolic link or reparse point. Shard directories are
+/// created lazily on write, so an absent intermediate directory reports a
+/// missing object instead of an invalid request; an absent configured root,
+/// a wrong object type, a link, or an I/O failure stays an explicit error.
+/// The configured root and its ancestors must not be concurrently writable by
+/// untrusted principals; portable path APIs cannot eliminate directory-swap
+/// TOCTOU attacks otherwise.
 /// </remarks>
 public sealed class LocalBlobStore : IBlobStore, IDurableMultipartBlobStore
 {
@@ -277,25 +281,31 @@ public sealed class LocalBlobStore : IBlobStore, IDurableMultipartBlobStore
         foreach (string path in EnumerateObjectPaths(cancellationToken))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await using FileStream stream = await OpenObjectFileAsync(
-                path,
-                cancellationToken);
-            LocalBlobDescriptor descriptor = await ReadDescriptorAsync(
-                stream,
-                cancellationToken);
-            BlobKey key = CreateValidatedDescriptorKey(descriptor.Key);
-            if (!string.Equals(
-                    ResolveObjectPath(key),
-                    path,
-                    LocalBlobPathGuard.PathComparison))
+            FileStream? stream = await TryOpenObjectFileAsync(path, cancellationToken);
+            if (stream is null)
             {
-                throw Corrupt("A local blob descriptor does not match its resolved path.");
+                continue;
             }
 
-            if (options.Prefix is null ||
-                key.Value.StartsWith(options.Prefix, StringComparison.Ordinal))
+            await using (stream)
             {
-                heads.Add(CreateHead(key, descriptor));
+                LocalBlobDescriptor descriptor = await ReadDescriptorAsync(
+                    stream,
+                    cancellationToken);
+                BlobKey key = CreateValidatedDescriptorKey(descriptor.Key);
+                if (!string.Equals(
+                        ResolveObjectPath(key),
+                        path,
+                        LocalBlobPathGuard.PathComparison))
+                {
+                    throw Corrupt("A local blob descriptor does not match its resolved path.");
+                }
+
+                if (options.Prefix is null ||
+                    key.Value.StartsWith(options.Prefix, StringComparison.Ordinal))
+                {
+                    heads.Add(CreateHead(key, descriptor));
+                }
             }
         }
 
@@ -553,6 +563,21 @@ public sealed class LocalBlobStore : IBlobStore, IDurableMultipartBlobStore
         return await ReadHeadAsync(stream, key, cancellationToken);
     }
 
+    private async ValueTask<FileStream?> TryOpenObjectFileAsync(
+        string objectPath,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await OpenObjectFileAsync(objectPath, cancellationToken);
+        }
+        catch (BlobStoreException error)
+            when (error.Code == BlobStoreErrorCode.NotFound)
+        {
+            return null;
+        }
+    }
+
     private async ValueTask<FileStream> OpenObjectFileAsync(
         string objectPath,
         CancellationToken cancellationToken)
@@ -680,19 +705,41 @@ public sealed class LocalBlobStore : IBlobStore, IDurableMultipartBlobStore
     private IEnumerable<string> EnumerateObjectPaths(
         CancellationToken cancellationToken)
     {
+        if (!_pathGuard.TryEnsureDirectoryChainIsSafe(_objectsPath))
+        {
+            yield break;
+        }
+
         Stack<string> pending = new();
         pending.Push(_objectsPath);
         while (pending.Count > 0)
         {
             cancellationToken.ThrowIfCancellationRequested();
             string directory = pending.Pop();
-            _pathGuard.EnsureDirectoryIsSafe(directory);
-            string[] entries = Directory.GetFileSystemEntries(directory);
+            if (!_pathGuard.TryEnsureDirectoryIsSafe(directory))
+            {
+                continue;
+            }
+
+            string[] entries;
+            try
+            {
+                entries = Directory.GetFileSystemEntries(directory);
+            }
+            catch (DirectoryNotFoundException)
+            {
+                continue;
+            }
+
             Array.Sort(entries, StringComparer.Ordinal);
             for (int index = entries.Length - 1; index >= 0; index--)
             {
                 string entry = entries[index];
-                FileAttributes attributes = File.GetAttributes(entry);
+                if (!_pathGuard.TryGetAttributes(entry, out FileAttributes attributes))
+                {
+                    continue;
+                }
+
                 if ((attributes & FileAttributes.ReparsePoint) != 0)
                 {
                     throw new BlobStoreException(

@@ -43,17 +43,32 @@ export function NotFoundPage() {
 
 interface RouteErrorPageProps {
   detail: string;
+  /** Defaults to reloading the document, which tests replace with a spy. */
+  onReload?: () => void;
 }
 
-export function RouteErrorPage({ detail }: RouteErrorPageProps) {
+export function RouteErrorPage({ detail, onReload }: RouteErrorPageProps) {
   return (
     <section className={styles.panel} aria-labelledby="error-heading">
       <p className={styles.eyebrow}>Application error</p>
       <h1 id="error-heading">Something went wrong</h1>
       <p className={styles.description}>{detail}</p>
-      <Link className={styles.actionLink} to="/library">
-        Return to library
-      </Link>
+      <p className={styles.description}>
+        Vistara may have been updated while this page was open. Reloading
+        fetches the current version and keeps you where you are.
+      </p>
+      <div className={styles.actions}>
+        <button
+          className={styles.actionButton}
+          type="button"
+          onClick={() => (onReload ?? (() => window.location.reload()))()}
+        >
+          Reload this page
+        </button>
+        <Link className={styles.actionLink} to="/library">
+          Return to library
+        </Link>
+      </div>
     </section>
   );
 }

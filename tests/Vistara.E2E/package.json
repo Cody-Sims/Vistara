@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "test": "playwright test",
-    "install:browsers": "playwright install chromium firefox webkit"
+    "test:smoke": "playwright test --project=chromium --grep @smoke --forbid-only",
+    "install:browsers": "playwright install chromium firefox webkit",
+    "install:smoke-browser": "playwright install --with-deps chromium"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",

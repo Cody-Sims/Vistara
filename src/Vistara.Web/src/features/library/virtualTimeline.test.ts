@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { AssetSummary, TimelineGroup } from '../../api/generated';
 import {
   buildTimelineRows,
+  pageTimelineRows,
   virtualizeTimelineRows,
 } from './virtualTimeline';
 
@@ -68,5 +69,38 @@ describe('timeline virtualization', () => {
           row.assets.some((item) => item.id === 'asset-700'),
       ),
     ).toBe(true);
+  });
+});
+
+describe('paged timeline', () => {
+  const rows = Array.from({ length: 7 }, (_, index) => ({
+    type: 'heading' as const,
+    key: `row-${index}`,
+    label: `Row ${index}`,
+    size: 10 + index,
+  }));
+
+  it('lays a page out from the top with no gaps', () => {
+    const paged = pageTimelineRows(rows, 2, 3);
+
+    expect(paged.page).toBe(2);
+    expect(paged.pageCount).toBe(3);
+    expect(paged.rows.map((entry) => entry.row.key)).toEqual([
+      'row-3',
+      'row-4',
+      'row-5',
+    ]);
+    expect(paged.rows.map((entry) => entry.offset)).toEqual([0, 13, 27]);
+    expect(paged.totalHeight).toBe(13 + 14 + 15);
+  });
+
+  it('clamps a page beyond the end and keeps at least one page', () => {
+    expect(pageTimelineRows(rows, 99, 3).page).toBe(3);
+    expect(pageTimelineRows(rows, 0, 3).page).toBe(1);
+    expect(pageTimelineRows([], 1, 3)).toMatchObject({
+      page: 1,
+      pageCount: 1,
+      totalHeight: 0,
+    });
   });
 });

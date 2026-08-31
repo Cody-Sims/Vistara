@@ -1,0 +1,47 @@
+.control {
+  display: inline-flex;
+  min-block-size: var(--target-min);
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 640;
+}
+
+.select {
+  min-block-size: var(--target-min);
+  padding-inline: var(--space-3) 2rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background-color: var(--color-surface-raised);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+@media (max-width: 48rem) {
+  .label {
+    position: absolute;
+    overflow: hidden;
+    inline-size: 1px;
+    block-size: 1px;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .select {
+    inline-size: 5.5rem;
+    padding-inline-start: var(--space-2);
+  }
+}
+
+@media (max-width: 24rem) {
+  .control {
+    display: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .select {
+    border: 2px solid ButtonText;
+  }
+}

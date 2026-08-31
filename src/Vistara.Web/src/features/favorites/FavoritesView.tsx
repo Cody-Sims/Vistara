@@ -9,9 +9,9 @@ import {
 } from '../../api/generated/client';
 import type {
   AssetSummary,
-  EntityTag,
 } from '../../api/generated/models';
 import styles from './favorites.module.css';
+import { versionTag } from '../../api/versionTag';
 
 type FavoritesClient = Pick<
   VistaraApiClient,
@@ -305,7 +305,7 @@ export function FavoritesView({ client }: FavoritesViewProps) {
           <ul className={styles.grid}>
             {assets.map((asset) => {
               const thumbnail = asset.renditions.find(
-                (rendition) => rendition.kind === 'thumbnail',
+                (rendition) => rendition.kind === 'thumb',
               );
               return (
                 <li key={asset.id} className={styles.card}>
@@ -367,9 +367,6 @@ export function FavoritesView({ client }: FavoritesViewProps) {
   );
 }
 
-function versionTag(version: number): EntityTag {
-  return `"v${version}"`;
-}
 
 function isConflict(error: unknown): boolean {
   return error instanceof VistaraApiError && error.status === 412;

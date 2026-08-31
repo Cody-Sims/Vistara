@@ -201,11 +201,79 @@ jobs:
       - name: Record Worker digest
         run: echo "Worker image digest \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
 
+  build-migrations:
+    name: Build migration bundle image
+    needs: validate-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-release.outputs.commit }}
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Create migration image metadata
+        id: metadata
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ghcr.io/${{ needs.validate-release.outputs.namespace }}/vistara-migrations
+          tags: |
+            type=raw,value=${{ needs.validate-release.outputs.version }}
+            type=raw,value=${{ needs.validate-release.outputs.commit }}
+
+      - name: Build and push migration image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: deploy/containers/migration.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            IMAGE_VERSION=${{ needs.validate-release.outputs.version }}
+          sbom: true
+          provenance: mode=max
+
+      - name: Attest migration image provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ needs.validate-release.outputs.namespace }}/vistara-migrations
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Record migration digest
+        run: echo "Migration image digest \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+
   summarize:
     name: Summarize image digests
     needs:
       - build-api
       - build-worker
+      - build-migrations
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -216,4 +284,8 @@ jobs:
           {
             echo "API: \`${{ needs.build-api.outputs.digest }}\`"
             echo "Worker: \`${{ needs.build-worker.outputs.digest }}\`"
+            echo "Migrations: \`${{ needs.build-migrations.outputs.digest }}\`"
+            echo ""
+            echo "Run the migration image to its completion before rolling the"
+            echo "API or worker forward. Rollback guidance: docs/operations/release-runbook.md"
           } >> "$GITHUB_STEP_SUMMARY"

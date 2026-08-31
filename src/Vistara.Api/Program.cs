@@ -1,17 +1,21 @@
 using Microsoft.Extensions.FileProviders;
 using Vistara.Api.Composition.Media;
 using Vistara.Api.Composition.Platform;
+using Vistara.Api.Composition.Runtime;
 using Vistara.Api.OpenApi.Gallery;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+builder.Services.AddVistaraApiRuntime(builder.Configuration);
 builder.Services.AddVistaraApiPlatform(builder.Configuration);
 builder.Services.AddVistaraApiPersistence(builder.Configuration);
 builder.Services.AddVistaraMedia(builder.Configuration);
+builder.Services.AddVistaraPlatformSurface();
 
 WebApplication app = builder.Build();
 app.Services.ValidateVistaraApiPlatformComposition();
 app.UseVistaraPlatform();
 app.MapVistaraPlatformEndpoints();
+app.MapVistaraPlatformSurface();
 app.MapVistaraGalleryOpenApi();
 app.UseStaticFiles();
 app.UseVistaraSpaFallback(async context =>

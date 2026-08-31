@@ -1,0 +1,299 @@
+using System.Security.Claims;
+using Microsoft.AspNetCore.Http;
+using Vistara.Contracts.Identity;
+using Vistara.Domain.Tenancy;
+
+namespace Vistara.Api.Features.Account;
+
+public enum AccountOperation
+{
+    ReadSelf,
+    ReadTenants,
+    ReadMembers,
+    ManageMembers,
+    ReadApiKeys,
+    ManageApiKeys,
+    ManageQuotas,
+    ReadAudit,
+}
+
+public enum AccountAccessStatus
+{
+    Authorized,
+    Unauthenticated,
+    Forbidden,
+}
+
+/// <summary>
+/// The credential that authenticated the actor. The set is closed and maps one
+/// to one onto the published <c>authenticationKind</c> vocabulary, so the
+/// account surface never has to guess what a caller is holding.
+/// </summary>
+public enum AccountAuthenticationKind
+{
+    /// <summary>An interactive browser session owned by a human principal.</summary>
+    Cookie,
+
+    /// <summary>An automation credential bound to one tenant.</summary>
+    ApiKey,
+
+    /// <summary>A federated bearer token bound to one tenant.</summary>
+    Bearer,
+}
+
+public sealed record AccountActor(
+    Guid TenantId,
+    Guid UserId,
+    TenantRole Role,
+    AccountAuthenticationKind AuthenticationKind)
+{
+    /// <summary>
+    /// Only an interactive browser session may enumerate the principal's other
+    /// tenants. A tenant-bound credential such as an API key must never reveal
+    /// where its owner is a member outside the tenant it was issued for.
+    /// </summary>
+    public bool MayEnumerateOtherTenants =>
+        AuthenticationKind == AccountAuthenticationKind.Cookie;
+
+    /// <summary>The published name of the credential that authenticated.</summary>
+    public string AuthenticationKindName => AuthenticationKind switch
+    {
+        AccountAuthenticationKind.Cookie => AuthenticationKinds.Cookie,
+        AccountAuthenticationKind.ApiKey => AuthenticationKinds.ApiKey,
+        AccountAuthenticationKind.Bearer => AuthenticationKinds.Bearer,
+        _ => throw new InvalidOperationException(
+            "The authenticated credential kind is unknown."),
+    };
+}
+
+public sealed record AccountAccess
+{
+    private AccountAccess(AccountAccessStatus status, AccountActor? actor)
+    {
+        Status = status;
+        Actor = actor;
+    }
+
+    public AccountAccessStatus Status { get; }
+
+    public AccountActor? Actor { get; }
+
+    public static AccountAccess Authorized(AccountActor actor)
+    {
+        ArgumentNullException.ThrowIfNull(actor);
+        return new(AccountAccessStatus.Authorized, actor);
+    }
+
+    public static AccountAccess Denied(AccountAccessStatus status)
+    {
+        if (status == AccountAccessStatus.Authorized || !Enum.IsDefined(status))
+        {
+            throw new ArgumentOutOfRangeException(nameof(status));
+        }
+
+        return new(status, null);
+    }
+}
+
+/// <summary>
+/// Resolves the tenant-scoped actor permitted to perform an account or
+/// platform administration operation.
+/// </summary>
+public interface IAccountAuthorizationPort
+{
+    ValueTask<AccountAccess> AuthorizeAsync(
+        HttpContext context,
+        AccountOperation operation,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Derives account access from the platform authentication claims that the
+/// cookie, API key, and bearer handlers already publish.
+/// </summary>
+public sealed class ClaimsAccountAuthorizationPort : IAccountAuthorizationPort
+{
+    internal const string TenantClaimType = "tenant_id";
+
+    internal const string ScopeClaimType = "scope";
+
+    internal const string AuthenticationKindClaimType = "vistara_auth_kind";
+
+    internal const string BrowserAuthenticationKind = "Cookie";
+
+    internal const string ApiKeyAuthenticationKind = "ApiKey";
+
+    internal const string BearerAuthenticationKind = "Bearer";
+
+    public ValueTask<AccountAccess> AuthorizeAsync(
+        HttpContext context,
+        AccountOperation operation,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (!Enum.IsDefined(operation))
+        {
+            throw new ArgumentOutOfRangeException(nameof(operation));
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        ClaimsPrincipal principal = context.User;
+        if (principal.Identity?.IsAuthenticated != true)
+        {
+            return ValueTask.FromResult(
+                AccountAccess.Denied(AccountAccessStatus.Unauthenticated));
+        }
+
+        if (!TryReadUuid7(principal, TenantClaimType, out Guid tenantId) ||
+            !TryReadUuid7(principal, ClaimTypes.NameIdentifier, out Guid userId) ||
+            !TryReadRole(principal, out TenantRole role))
+        {
+            return ValueTask.FromResult(
+                AccountAccess.Denied(AccountAccessStatus.Forbidden));
+        }
+
+        string? requiredScope = RequiredScope(operation);
+        if (requiredScope is not null &&
+            !principal.HasClaim(ScopeClaimType, requiredScope))
+        {
+            return ValueTask.FromResult(
+                AccountAccess.Denied(AccountAccessStatus.Forbidden));
+        }
+
+        if (!HasMinimumRole(role, MinimumRole(operation)))
+        {
+            return ValueTask.FromResult(
+                AccountAccess.Denied(AccountAccessStatus.Forbidden));
+        }
+
+        // The account surface publishes the credential kind, so a principal
+        // that carries no single recognized kind is refused rather than
+        // described under a guessed one.
+        if (!TryReadAuthenticationKind(
+                principal,
+                out AccountAuthenticationKind authenticationKind))
+        {
+            return ValueTask.FromResult(
+                AccountAccess.Denied(AccountAccessStatus.Forbidden));
+        }
+
+        return ValueTask.FromResult(
+            AccountAccess.Authorized(new AccountActor(
+                tenantId,
+                userId,
+                role,
+                authenticationKind)));
+    }
+
+    internal static string? RequiredScope(AccountOperation operation) =>
+        operation switch
+        {
+            AccountOperation.ReadSelf or AccountOperation.ReadTenants => null,
+            AccountOperation.ReadMembers or
+            AccountOperation.ManageMembers => "members.manage",
+            AccountOperation.ReadApiKeys or
+            AccountOperation.ManageApiKeys => "api_keys.manage",
+            AccountOperation.ManageQuotas => "quotas.manage",
+            AccountOperation.ReadAudit => "members.manage",
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        };
+
+    internal static TenantRole MinimumRole(AccountOperation operation) =>
+        operation switch
+        {
+            AccountOperation.ReadSelf or AccountOperation.ReadTenants =>
+                TenantRole.Viewer,
+            AccountOperation.ReadMembers or
+            AccountOperation.ManageMembers or
+            AccountOperation.ReadApiKeys or
+            AccountOperation.ManageApiKeys or
+            AccountOperation.ReadAudit => TenantRole.TenantAdmin,
+            AccountOperation.ManageQuotas => TenantRole.TenantOwner,
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        };
+
+    /// <summary>
+    /// Reads the one credential kind the platform authentication handlers
+    /// published. A missing, repeated, or unrecognized kind fails: a forged
+    /// pair of kind claims must never resolve to the browser kind, and no
+    /// caller may be described under a kind the platform did not issue.
+    /// </summary>
+    internal static bool TryReadAuthenticationKind(
+        ClaimsPrincipal principal,
+        out AccountAuthenticationKind authenticationKind)
+    {
+        authenticationKind = default;
+        string[] kinds = principal.FindAll(AuthenticationKindClaimType)
+            .Select(claim => claim.Value)
+            .Distinct(StringComparer.Ordinal)
+            .Take(2)
+            .ToArray();
+        if (kinds.Length != 1)
+        {
+            return false;
+        }
+
+        switch (kinds[0])
+        {
+            case BrowserAuthenticationKind:
+                authenticationKind = AccountAuthenticationKind.Cookie;
+                return true;
+            case ApiKeyAuthenticationKind:
+                authenticationKind = AccountAuthenticationKind.ApiKey;
+                return true;
+            case BearerAuthenticationKind:
+                authenticationKind = AccountAuthenticationKind.Bearer;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static bool HasMinimumRole(TenantRole actual, TenantRole minimum) =>
+        Rank(actual) >= Rank(minimum);
+
+    private static int Rank(TenantRole role) =>
+        role switch
+        {
+            TenantRole.Viewer => 0,
+            TenantRole.Member => 1,
+            TenantRole.TenantAdmin => 2,
+            TenantRole.TenantOwner => 3,
+            _ => -1,
+        };
+
+    private static bool TryReadRole(ClaimsPrincipal principal, out TenantRole role)
+    {
+        string[] values = principal.FindAll(ClaimTypes.Role)
+            .Select(claim => claim.Value)
+            .Distinct(StringComparer.Ordinal)
+            .Take(2)
+            .ToArray();
+        if (values.Length != 1)
+        {
+            role = default;
+            return false;
+        }
+
+        return Enum.TryParse(values[0], ignoreCase: false, out role) &&
+            Enum.IsDefined(role);
+    }
+
+    private static bool TryReadUuid7(
+        ClaimsPrincipal principal,
+        string claimType,
+        out Guid value)
+    {
+        value = default;
+        string[] values = principal.FindAll(claimType)
+            .Select(claim => claim.Value)
+            .Distinct(StringComparer.Ordinal)
+            .Take(2)
+            .ToArray();
+        return values.Length == 1 &&
+            Guid.TryParse(values[0], out value) &&
+            value != Guid.Empty &&
+            value.Version == 7;
+    }
+}

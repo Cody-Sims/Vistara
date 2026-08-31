@@ -1,6 +1,19 @@
-import type { AssetSummary } from '../../api/generated';
+import type { AssetRendition, AssetStatus } from '../../api/generated';
 
-export type ImageContext = 'grid' | 'viewer';
+export type ImageContext = 'grid' | 'share' | 'viewer';
+
+/**
+ * The shape every renderable image shares, whether it comes from the gallery
+ * or from a public share where gallery-only fields are withheld.
+ */
+export interface ResponsiveImageSource {
+  readonly title: string;
+  readonly description?: string;
+  readonly status?: AssetStatus;
+  readonly width: number;
+  readonly height: number;
+  readonly renditions: readonly AssetRendition[];
+}
 
 export interface ResponsiveImage {
   alt: string;
@@ -15,6 +28,7 @@ export interface ResponsiveImage {
 
 const sizes: Record<ImageContext, string> = {
   grid: '(max-width: 30rem) 50vw, (max-width: 64rem) 33vw, min(20vw, 20rem)',
+  share: '(max-width: 40rem) 100vw, (max-width: 70rem) 50vw, 33vw',
   viewer: '100vw',
 };
 
@@ -30,11 +44,11 @@ function isSameOriginPath(path: string) {
 }
 
 export function buildResponsiveImage(
-  asset: AssetSummary,
+  asset: ResponsiveImageSource,
   context: ImageContext,
   highPriority: boolean,
 ): ResponsiveImage | null {
-  if (asset.status !== 'ready') return null;
+  if (asset.status !== undefined && asset.status !== 'ready') return null;
 
   const renditions = asset.renditions
     .filter((rendition) => isSameOriginPath(rendition.path))

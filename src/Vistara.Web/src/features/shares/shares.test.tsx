@@ -209,7 +209,22 @@ describe('public shares', () => {
             capturedAt: '2026-07-01T12:00:00.000Z',
             width: 1200,
             height: 800,
-            renditions: [],
+            renditions: [
+              {
+                kind: 'thumb',
+                path: '/media/share-480.webp',
+                width: 480,
+                height: 320,
+                contentType: 'image/webp',
+              },
+              {
+                kind: 'viewer',
+                path: '/media/share-1200.webp',
+                width: 1200,
+                height: 800,
+                contentType: 'image/webp',
+              },
+            ],
           },
         ],
       },
@@ -314,5 +329,64 @@ describe('public shares', () => {
     expect(screen.queryByText('Private location details')).not.toBeInTheDocument();
     expect(screen.queryByText('Dimensions')).not.toBeInTheDocument();
     expect(screen.queryByText('Captured')).not.toBeInTheDocument();
+  });
+
+  it('serves shared images responsively without leaking provider URLs', async () => {
+    const share: PublicShare = {
+      name: 'Open gallery',
+      status: 'active',
+      permissions: {
+        view: true,
+        downloadRenditions: true,
+        downloadOriginal: false,
+      },
+      metadataExposure: 'basic',
+      passwordRequired: false,
+      assets: {
+        items: [
+          {
+            id: 'asset-1',
+            title: 'Mountain',
+            description: 'Sunrise over the ridge',
+            width: 1200,
+            height: 800,
+            renditions: [
+              {
+                kind: 'thumb',
+                path: '/media/share-480.webp',
+                width: 480,
+                height: 320,
+                contentType: 'image/webp',
+              },
+              {
+                kind: 'viewer',
+                path: '/media/share-1200.webp',
+                width: 1200,
+                height: 800,
+                contentType: 'image/webp',
+              },
+            ],
+          },
+        ],
+      },
+    };
+    const client = {
+      getPublicShare: vi.fn().mockResolvedValue({ data: share }),
+      challengePublicShare: vi.fn(),
+    };
+
+    render(<PublicShareView client={client} token="open-token" />);
+
+    const image = await screen.findByAltText('Sunrise over the ridge');
+    expect(image).toHaveAttribute(
+      'srcset',
+      '/media/share-480.webp 480w, /media/share-1200.webp 1200w',
+    );
+    expect(image).toHaveAttribute(
+      'sizes',
+      '(max-width: 40rem) 100vw, (max-width: 70rem) 50vw, 33vw',
+    );
+    expect(image).toHaveAttribute('fetchpriority', 'high');
+    expect(image.getAttribute('src')).toMatch(/^\/media\//);
   });
 });

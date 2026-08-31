@@ -151,3 +151,46 @@ export function virtualizeTimelineRows(
       ),
   };
 }
+
+export interface PagedTimeline {
+  readonly rows: readonly VirtualTimelineRow[];
+  readonly totalHeight: number;
+  readonly page: number;
+  readonly pageCount: number;
+}
+
+/**
+ * Lays out one page of rows for readers who chose paged mode. Every row on the
+ * page stays mounted, so a screen reader or keyboard user can reach the end of
+ * the page and move on deliberately instead of scrolling forever.
+ */
+export function pageTimelineRows(
+  rows: readonly TimelineRow[],
+  page: number,
+  rowsPerPage: number,
+): PagedTimeline {
+  const size = Math.max(1, Math.trunc(rowsPerPage));
+  const pageCount = Math.max(1, Math.ceil(rows.length / size));
+  const current = Math.min(Math.max(1, Math.trunc(page)), pageCount);
+  const start = (current - 1) * size;
+  const slice = rows.slice(start, start + size);
+
+  let offset = 0;
+  const laid = slice.map((row, index) => {
+    const placed = {
+      index: start + index,
+      offset,
+      size: row.size,
+      row,
+    };
+    offset += row.size;
+    return placed;
+  });
+
+  return {
+    rows: laid,
+    totalHeight: offset,
+    page: current,
+    pageCount,
+  };
+}

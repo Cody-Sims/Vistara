@@ -126,6 +126,72 @@ public static class MediaDeliveryEndpoint
             cancellationToken);
     }
 
+    public static async Task AssetRenditionAsync(
+        HttpContext context,
+        Guid assetId,
+        Guid renditionId,
+        IMediaDeliveryAuthorizationPort authorization,
+        IMediaDeliveryApplicationPort application,
+        CancellationToken cancellationToken)
+    {
+        MediaDeliveryAccess? access = await AuthorizeAsync(
+            context,
+            () => authorization.AuthorizeAssetRenditionAsync(
+                context,
+                assetId,
+                cancellationToken),
+            cancellationToken);
+        if (access is null)
+        {
+            return;
+        }
+
+        if (!await EnsureAuthorizedAsync(
+                context,
+                access,
+                concealUnauthenticated: false,
+                cancellationToken))
+        {
+            return;
+        }
+
+        if (access.AssetId != assetId)
+        {
+            await WriteNotFoundAsync(context, cancellationToken);
+            return;
+        }
+
+        MediaRenditionScope? scope = CreateRenditionScope(
+            access.TenantId!.Value,
+            assetId,
+            renditionId);
+        if (scope is null)
+        {
+            await WriteNotFoundAsync(context, cancellationToken);
+            return;
+        }
+
+        MediaDeliveryResult? result = await ResolveAsync(
+            context,
+            () => application.ResolveAssetRenditionAsync(
+                scope,
+                cancellationToken),
+            cancellationToken);
+        if (result is null)
+        {
+            return;
+        }
+
+        await DeliverAsync(
+            context,
+            result,
+            expectedExtension: null,
+            MediaDeliveryHttpContract.PrivateNoStoreCacheControl,
+            includeDownloadFileName: false,
+            allowQueued: true,
+            cancellationToken);
+    }
+
     public static async Task OriginalAsync(
         HttpContext context,
         Guid assetId,
@@ -179,6 +245,52 @@ public static class MediaDeliveryEndpoint
             allowQueued: false,
             cancellationToken);
     }
+
+    /// <summary>
+    /// Delivers an already-authorized rendition. Sharing owns its own
+    /// authorization decision but must not restate byte, range, validator, and
+    /// media-type handling, so it delivers through this entry point.
+    /// </summary>
+    public static async Task DeliverRenditionAsync(
+        HttpContext context,
+        Func<ValueTask<MediaDeliveryResult>> resolve,
+        string cacheControl,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(resolve);
+        ArgumentException.ThrowIfNullOrWhiteSpace(cacheControl);
+
+        MediaDeliveryResult? result = await ResolveAsync(
+            context,
+            resolve,
+            cancellationToken);
+        if (result is null)
+        {
+            return;
+        }
+
+        await DeliverAsync(
+            context,
+            result,
+            expectedExtension: null,
+            cacheControl,
+            includeDownloadFileName: false,
+            allowQueued: true,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Writes a media problem response with the no-store and sniffing rules
+    /// every media route shares.
+    /// </summary>
+    public static Task WriteMediaProblemAsync(
+        HttpContext context,
+        int status,
+        string code,
+        string title,
+        CancellationToken cancellationToken) =>
+        WriteProblemAsync(context, status, code, title, cancellationToken);
 
     private static async Task DeliverAsync(
         HttpContext context,
@@ -541,6 +653,21 @@ public static class MediaDeliveryEndpoint
                 sourceHash,
                 recipeHash,
                 extension);
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private static MediaRenditionScope? CreateRenditionScope(
+        Guid tenantId,
+        Guid assetId,
+        Guid renditionId)
+    {
+        try
+        {
+            return new MediaRenditionScope(tenantId, assetId, renditionId);
         }
         catch (ArgumentException)
         {

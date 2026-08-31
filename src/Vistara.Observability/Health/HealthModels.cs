@@ -32,6 +32,7 @@ public static class HealthReasonCodes
     public const string Healthy = "healthy";
     public const string DependencyMissing = "dependency_missing";
     public const string DependencyUnavailable = "dependency_unavailable";
+    public const string DependencyTimeout = "dependency_timeout";
     public const string ConfigurationInvalid = "configuration_invalid";
     public const string MigrationRequired = "migration_required";
     public const string SchemaIncompatible = "schema_incompatible";
@@ -44,6 +45,7 @@ public static class HealthReasonCodes
         Healthy,
         DependencyMissing,
         DependencyUnavailable,
+        DependencyTimeout,
         ConfigurationInvalid,
         MigrationRequired,
         SchemaIncompatible,

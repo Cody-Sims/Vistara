@@ -12,16 +12,29 @@ namespace Vistara.IntegrationTests.Health;
 
 public sealed class HealthTelemetryTests
 {
+    // Activity and meter listeners observe the whole process, so every capture
+    // is restricted to the thread running the case under test. Without this,
+    // telemetry emitted by concurrently executing test classes leaks in.
+    private static bool OnTestThread(int testThreadId) =>
+        Environment.CurrentManagedThreadId == testThreadId;
+
     [Fact]
     public void Operations_emit_low_cardinality_trace_metric_and_log_dimensions()
     {
+        int testThreadId = Environment.CurrentManagedThreadId;
         Activity? stopped = null;
         using var listener = new ActivityListener
         {
             ShouldListenTo = source => source.Name == VistaraTelemetry.SourceName,
             Sample = static (ref ActivityCreationOptions<ActivityContext> _) =>
                 ActivitySamplingResult.AllData,
-            ActivityStopped = activity => stopped = activity,
+            ActivityStopped = activity =>
+            {
+                if (OnTestThread(testThreadId))
+                {
+                    stopped = activity;
+                }
+            },
         };
         ActivitySource.AddActivityListener(listener);
 
@@ -35,9 +48,21 @@ public sealed class HealthTelemetryTests
             }
         };
         meterListener.SetMeasurementEventCallback<long>(
-            (_, _, tags, _) => measurements.Add(ToDictionary(tags)));
+            (_, _, tags, _) =>
+            {
+                if (OnTestThread(testThreadId))
+                {
+                    measurements.Add(ToDictionary(tags));
+                }
+            });
         meterListener.SetMeasurementEventCallback<double>(
-            (_, _, tags, _) => measurements.Add(ToDictionary(tags)));
+            (_, _, tags, _) =>
+            {
+                if (OnTestThread(testThreadId))
+                {
+                    measurements.Add(ToDictionary(tags));
+                }
+            });
         meterListener.Start();
 
         using (TelemetryOperation operation =
@@ -79,13 +104,20 @@ public sealed class HealthTelemetryTests
     [Fact]
     public void Worker_job_observer_does_not_tag_job_identity_or_type()
     {
+        int testThreadId = Environment.CurrentManagedThreadId;
         var stopped = new List<Activity>();
         using var listener = new ActivityListener
         {
             ShouldListenTo = source => source.Name == VistaraTelemetry.SourceName,
             Sample = static (ref ActivityCreationOptions<ActivityContext> _) =>
                 ActivitySamplingResult.AllData,
-            ActivityStopped = stopped.Add,
+            ActivityStopped = activity =>
+            {
+                if (OnTestThread(testThreadId))
+                {
+                    stopped.Add(activity);
+                }
+            },
         };
         ActivitySource.AddActivityListener(listener);
         var observer = new OpenTelemetryJobRuntimeObserver(
@@ -107,6 +139,7 @@ public sealed class HealthTelemetryTests
     [Fact]
     public async Task Checkpoints_do_not_emit_generic_operation_measurements()
     {
+        int testThreadId = Environment.CurrentManagedThreadId;
         var measurements = new List<(
             string Instrument,
             IReadOnlyDictionary<string, object?> Tags)>();
@@ -120,10 +153,20 @@ public sealed class HealthTelemetryTests
         };
         meterListener.SetMeasurementEventCallback<long>(
             (instrument, _, tags, _) =>
-                measurements.Add((instrument.Name, ToDictionary(tags))));
+            {
+                if (OnTestThread(testThreadId))
+                {
+                    measurements.Add((instrument.Name, ToDictionary(tags)));
+                }
+            });
         meterListener.SetMeasurementEventCallback<double>(
             (instrument, _, tags, _) =>
-                measurements.Add((instrument.Name, ToDictionary(tags))));
+            {
+                if (OnTestThread(testThreadId))
+                {
+                    measurements.Add((instrument.Name, ToDictionary(tags)));
+                }
+            });
         meterListener.Start();
 
         await new OpenTelemetryDerivativeCheckpointObserver().ReachedAsync(

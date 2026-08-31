@@ -15,6 +15,8 @@ import type {
   EntityTag,
 } from '../../api/generated/models';
 import styles from './albums.module.css';
+import { Skeleton } from '../../components';
+import { versionTag } from '../../api/versionTag';
 
 type AlbumsClient = Pick<VistaraApiClient, 'listAlbums' | 'createAlbum'>;
 
@@ -152,7 +154,10 @@ export function AlbumsView({ client }: AlbumsViewProps) {
       ) : null}
 
       {state === 'loading' ? (
-        <p role="status">Loading albums…</p>
+        <div aria-busy="true">
+          <p role="status">Loading albums…</p>
+          <Skeleton count={4} shape="card" />
+        </div>
       ) : null}
       {state === 'error' ? (
         <div className={styles.error} role="alert">
@@ -602,9 +607,6 @@ function AlbumItemRow({
   );
 }
 
-function versionTag(version: number): EntityTag {
-  return `"v${version}"`;
-}
 
 function isConflict(error: unknown): boolean {
   return error instanceof VistaraApiError && error.status === 412;

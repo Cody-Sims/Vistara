@@ -12,3 +12,5 @@ applyTo: '.github/workflows/**,.github/dependabot.yml'
 - Restrict Pages deployment to `main`, where it publishes only the static Web preview.
 - Grant package write permission only to release- or tag-triggered publication workflows.
 - Keep checkout credentials disabled unless a reviewed step demonstrably requires them.
+- Never expose repository secrets to pull-request-triggered workflows; live-credential suites run only on schedule or dispatch.
+- Keep `.github/dependabot.yml` covering Actions, NuGet, every npm manifest, and deployment images on a recurring bounded schedule.
