@@ -1,4 +1,4 @@
-import { useInfiniteQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import {
   useEffect,
   useMemo,
@@ -19,6 +19,7 @@ import type {
 } from '../../api/generated';
 import { useAppPreferences } from '../../app/preferences';
 import { Skeleton } from '../../components';
+import { CurationActions, type CurationClient } from '../curation';
 import { buildResponsiveImage } from '../viewer/responsiveImage';
 import {
   defaultLibraryState,
@@ -55,8 +56,15 @@ export interface LibraryLayout {
   viewportHeight: number;
 }
 
+export interface LibraryCuration {
+  readonly client: CurationClient;
+  /** Overrides the session scope check, for the preview and for tests. */
+  readonly canCurate?: boolean;
+}
+
 interface LibraryPageProps {
   dataSource: LibraryDataSource;
+  curation?: LibraryCuration;
   layout?: LibraryLayout;
   restorationStore?: ReturnType<typeof createLibraryRestorationStore>;
 }
@@ -207,6 +215,7 @@ function updateStatus(
 }
 
 export function LibraryPage({
+  curation,
   dataSource,
   layout: layoutOverride,
   restorationStore,
@@ -285,6 +294,11 @@ export function LibraryPage({
       )
     : allAssets.map((asset) => asset.id);
   const selectedCount = selectionCount(selection);
+  const selectedAssets = useMemo(
+    () => allAssets.filter((asset) => isSelected(selection, asset.id)),
+    [allAssets, selection],
+  );
+  const queryClient = useQueryClient();
   const defaultStore = useRestoration(
     address,
     focusedAssetId,
@@ -294,6 +308,11 @@ export function LibraryPage({
     restorationStore,
   );
   const activeScrollerRef = defaultStore;
+
+  /** Curation changes the timeline, so the pages in hand are read again. */
+  function refreshTimeline() {
+    return queryClient.invalidateQueries({ queryKey: ['library-timeline'] });
+  }
 
   function setState(next: LibraryState) {
     setSearchParams(libraryStateToSearchParams(next));
@@ -522,6 +541,30 @@ export function LibraryPage({
               </>
             ) : null}
           </div>
+
+          {curation && selectedAssets.length > 0 ? (
+            <CurationActions
+              assets={selectedAssets}
+              client={curation.client}
+              onCurated={() => void refreshTimeline()}
+              onTrashed={(ids) => {
+                setSelection(
+                  ids.reduce(
+                    (current, id) =>
+                      isSelected(current, id)
+                        ? toggleSelection(current, id)
+                        : current,
+                    selection,
+                  ),
+                );
+                void refreshTimeline();
+              }}
+              onRestored={() => void refreshTimeline()}
+              {...(curation.canCurate === undefined
+                ? {}
+                : { canCurate: curation.canCurate })}
+            />
+          ) : null}
 
           <div
             aria-label="Library timeline"

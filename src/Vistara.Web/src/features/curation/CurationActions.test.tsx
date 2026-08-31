@@ -3,7 +3,24 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { VistaraApiError } from '../../api/generated/client';
 import type { AssetSummary } from '../../api/generated/models';
+import { SessionContext } from '../session/sessionContext';
+import type { SessionContextValue } from '../session/sessionContext';
 import { CurationActions } from './CurationActions';
+
+function session(
+  scopes: SessionContextValue['scopes'],
+): SessionContextValue {
+  return {
+    status: 'authenticated',
+    credentialKind: 'cookie',
+    scopes,
+    canAdminister: false,
+    signOutIncomplete: false,
+    signIn: () => Promise.reject(new Error('not used')),
+    signOut: () => Promise.resolve(),
+    reload: () => Promise.resolve(),
+  };
+}
 
 function asset(overrides: Partial<AssetSummary> = {}): AssetSummary {
   return {
@@ -120,6 +137,30 @@ function renderActions(
 
   return { client, user };
 }
+
+describe('curation actions and the session', () => {
+  it('is offered to a session that may manage metadata', () => {
+    render(
+      <SessionContext.Provider value={session(['assets.read', 'metadata.manage'])}>
+        <CurationActions assets={[asset()]} client={makeClient() as never} />
+      </SessionContext.Provider>,
+    );
+
+    expect(
+      screen.getByRole('group', { name: 'Curation actions' }),
+    ).toBeInTheDocument();
+  });
+
+  it('is withheld from a session that may only read', () => {
+    render(
+      <SessionContext.Provider value={session(['assets.read'])}>
+        <CurationActions assets={[asset()]} client={makeClient() as never} />
+      </SessionContext.Provider>,
+    );
+
+    expect(screen.queryByRole('group', { name: 'Curation actions' })).toBeNull();
+  });
+});
 
 describe('curation actions', () => {
   it('is not offered to a session that may not curate', () => {
@@ -348,7 +389,10 @@ describe('curation actions', () => {
         { idempotencyKey: 'key-1' },
       ),
     );
-    expect(onTrashed).toHaveBeenCalledWith(['asset-1']);
+    expect(onTrashed).toHaveBeenCalledWith(
+      ['asset-1'],
+      [{ id: 'asset-1', version: 4 }],
+    );
     await waitFor(() =>
       expect(screen.getByRole('status')).toHaveTextContent(
         'Moved to trash: 1 image.',

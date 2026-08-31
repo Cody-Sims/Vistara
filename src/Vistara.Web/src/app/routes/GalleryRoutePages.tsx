@@ -134,7 +134,7 @@ export function LibraryRoute() {
     };
   }, [location.pathname, location.search]);
 
-  return <LibraryPage dataSource={client} />;
+  return <LibraryPage curation={{ client }} dataSource={client} />;
 }
 
 export function SearchRoute() {
@@ -142,7 +142,7 @@ export function SearchRoute() {
 }
 
 export function ViewerRoute() {
-  return <ViewerPage dataSource={client} />;
+  return <ViewerPage curation={{ client }} dataSource={client} />;
 }
 
 export function UploadsRoute() {

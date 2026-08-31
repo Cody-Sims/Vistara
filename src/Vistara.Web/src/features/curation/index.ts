@@ -1,2 +1,5 @@
 export { CurationActions, type CurationActionsProps } from './CurationActions';
-export { type CurationClient } from './curationClient';
+export {
+  restoreTrashedAssets,
+  type CurationClient,
+} from './curationClient';

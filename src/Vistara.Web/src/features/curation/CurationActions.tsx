@@ -51,7 +51,14 @@ export interface CurationActionsProps {
   /** Overrides the session scope check, for a preview or a focused test. */
   readonly canCurate?: boolean;
   readonly onCurated?: (assets: readonly AssetSummary[]) => void;
-  readonly onTrashed?: (ids: readonly string[]) => void;
+  /**
+   * The assets that reached the trash, with the versions they landed on, so a
+   * caller that replaces this surface can still offer the undo.
+   */
+  readonly onTrashed?: (
+    ids: readonly string[],
+    restorable: readonly VersionedAssetReference[],
+  ) => void;
   readonly onRestored?: (ids: readonly string[]) => void;
   readonly createIdempotencyKey?: () => string;
 }
@@ -509,7 +516,7 @@ export function CurationActions({
       });
       setDetails([]);
       setBusy(false);
-      onTrashed?.(trashable.map((target) => target.id));
+      onTrashed?.(trashable.map((target) => target.id), []);
       return;
     }
 
@@ -519,11 +526,15 @@ export function CurationActions({
       title: titles.get(result.assetId) ?? result.assetId,
       outcome: outcomeForTrashStatus(result.status),
     }));
+    const restorable = restorableReferences(answer.results);
     report('Moved to trash', results);
-    setUndoable(restorableReferences(answer.results));
+    setUndoable(restorable);
     setBusy(false);
     onTrashed?.(
-      results.filter((result) => result.outcome === 'updated').map((r) => r.id),
+      results
+        .filter((result) => result.outcome === 'updated')
+        .map((result) => result.id),
+      restorable,
     );
   }
 
