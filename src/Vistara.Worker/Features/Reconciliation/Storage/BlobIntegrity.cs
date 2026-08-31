@@ -32,8 +32,6 @@ public sealed record BlobIntegrityOptions
     /// </summary>
     public bool DeleteOrphans { get; init; }
 
-    public string StoragePrefix { get; init; } = string.Empty;
-
     internal void Validate()
     {
         if (BatchSize is < 1 or > 1_000 ||
@@ -220,21 +218,35 @@ public sealed class BlobIntegrityService(
             return (0, 0);
         }
 
-        Dictionary<string, BlobHead> candidates =
-            new(StringComparer.Ordinal);
-        await foreach (BlobHead head in _store.ListAsync(
-                           new BlobListOptions(NormalizedPrefix()),
-                           cancellationToken))
+        Dictionary<string, BlobHead> candidates = new(StringComparer.Ordinal);
+        foreach (string prefix in TenantBlobNamespaces.For(request.TenantId))
         {
-            if (now - head.Properties.LastModifiedUtc < _options.OrphanMinimumAge)
-            {
-                continue;
-            }
-
-            candidates[head.Identity.Key.Value] = head;
             if (candidates.Count >= _options.MaximumStorageObjects)
             {
                 break;
+            }
+
+            await foreach (BlobHead head in _store.ListAsync(
+                               new BlobListOptions(prefix),
+                               cancellationToken))
+            {
+                string objectKey = head.Identity.Key.Value;
+                if (!TenantBlobNamespaces.Contains(request.TenantId, objectKey))
+                {
+                    continue;
+                }
+
+                if (now - head.Properties.LastModifiedUtc <
+                    _options.OrphanMinimumAge)
+                {
+                    continue;
+                }
+
+                candidates[objectKey] = head;
+                if (candidates.Count >= _options.MaximumStorageObjects)
+                {
+                    break;
+                }
             }
         }
 
@@ -252,6 +264,12 @@ public sealed class BlobIntegrityService(
         foreach (string objectKey in unknown)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (!TenantBlobNamespaces.Contains(request.TenantId, objectKey))
+            {
+                throw new InvalidOperationException(
+                    "Reconciliation produced an object outside the tenant namespace.");
+            }
+
             VistaraTelemetry.RecordCheckpoint(
                 TelemetryCheckpointKind.ReconciliationObjectInspected);
             if (request.DryRun || !_options.DeleteOrphans)
@@ -264,7 +282,8 @@ public sealed class BlobIntegrityService(
             if (current is null ||
                 current.Identity.Version.Value !=
                     candidates[objectKey].Identity.Version.Value ||
-                now - current.Properties.LastModifiedUtc < _options.OrphanMinimumAge)
+                now - current.Properties.LastModifiedUtc <
+                    _options.OrphanMinimumAge)
             {
                 continue;
             }
@@ -284,10 +303,6 @@ public sealed class BlobIntegrityService(
         return (unknown.Count, deleted);
     }
 
-    private string? NormalizedPrefix() =>
-        string.IsNullOrWhiteSpace(_options.StoragePrefix)
-            ? null
-            : _options.StoragePrefix;
 }
 
 public sealed class BlobIntegrityJobHandler(BlobIntegrityService service)

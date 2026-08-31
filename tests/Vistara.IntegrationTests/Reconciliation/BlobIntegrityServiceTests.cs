@@ -16,7 +16,7 @@ public sealed class BlobIntegrityServiceTests
         Guid tenantId = Guid.CreateVersion7();
         var state = new FakeState(tenantId,
         [
-            Record("assets/one", Now.AddDays(-1)),
+            Record(Original(tenantId, "one"), Now.AddDays(-1)),
         ]);
         var service = new BlobIntegrityService(
             state,
@@ -39,7 +39,7 @@ public sealed class BlobIntegrityServiceTests
         Guid tenantId = Guid.CreateVersion7();
         var state = new FakeState(tenantId,
         [
-            Record("assets/one", Now.AddDays(-1)),
+            Record(Original(tenantId, "one"), Now.AddDays(-1)),
         ]);
         var service = new BlobIntegrityService(
             state,
@@ -58,7 +58,7 @@ public sealed class BlobIntegrityServiceTests
 
         Assert.Equal(1, first.MissingRecorded);
         Assert.Equal(0, second.MissingRecorded);
-        Assert.Equal(["assets/one"], state.Missing);
+        Assert.Equal([Original(tenantId, "one")], state.Missing);
     }
 
     [Fact]
@@ -67,7 +67,7 @@ public sealed class BlobIntegrityServiceTests
         Guid tenantId = Guid.CreateVersion7();
         var state = new FakeState(tenantId,
         [
-            Record("assets/fresh", Now.AddMinutes(-1)),
+            Record(Original(tenantId, "fresh"), Now.AddMinutes(-1)),
         ]);
         var service = new BlobIntegrityService(
             state,
@@ -89,10 +89,10 @@ public sealed class BlobIntegrityServiceTests
         Guid tenantId = Guid.CreateVersion7();
         var state = new FakeState(tenantId,
         [
-            Record("assets/present", Now.AddDays(-1)),
+            Record(Original(tenantId, "present"), Now.AddDays(-1)),
         ]);
         var store = new ReconciliationBlobStore();
-        store.Add("assets/present", Now.AddDays(-1));
+        store.Add(Original(tenantId, "present"), Now.AddDays(-1));
         var service = new BlobIntegrityService(
             state,
             store,
@@ -113,7 +113,7 @@ public sealed class BlobIntegrityServiceTests
         Guid tenantId = Guid.CreateVersion7();
         var state = new FakeState(tenantId, []);
         var store = new ReconciliationBlobStore();
-        store.Add("assets/orphan", Now.AddDays(-3));
+        store.Add(Original(tenantId, "orphan"), Now.AddDays(-3));
         var service = new BlobIntegrityService(
             state,
             store,
@@ -126,7 +126,7 @@ public sealed class BlobIntegrityServiceTests
 
         Assert.Equal(1, report.OrphansDetected);
         Assert.Equal(0, report.OrphansDeleted);
-        Assert.Contains("assets/orphan", store.Keys, StringComparer.Ordinal);
+        Assert.Contains(Original(tenantId, "orphan"), store.Keys, StringComparer.Ordinal);
     }
 
     [Fact]
@@ -135,12 +135,12 @@ public sealed class BlobIntegrityServiceTests
         Guid tenantId = Guid.CreateVersion7();
         var state = new FakeState(tenantId,
         [
-            Record("assets/known", Now.AddDays(-3)),
+            Record(Original(tenantId, "known"), Now.AddDays(-3)),
         ]);
         var store = new ReconciliationBlobStore();
-        store.Add("assets/known", Now.AddDays(-3));
-        store.Add("assets/orphan", Now.AddDays(-3));
-        store.Add("assets/recent-orphan", Now.AddHours(-1));
+        store.Add(Original(tenantId, "known"), Now.AddDays(-3));
+        store.Add(Original(tenantId, "orphan"), Now.AddDays(-3));
+        store.Add(Original(tenantId, "recent-orphan"), Now.AddHours(-1));
         var service = new BlobIntegrityService(
             state,
             store,
@@ -153,10 +153,10 @@ public sealed class BlobIntegrityServiceTests
 
         Assert.Equal(1, report.OrphansDetected);
         Assert.Equal(1, report.OrphansDeleted);
-        Assert.DoesNotContain("assets/orphan", store.Keys, StringComparer.Ordinal);
-        Assert.Contains("assets/known", store.Keys, StringComparer.Ordinal);
+        Assert.DoesNotContain(Original(tenantId, "orphan"), store.Keys, StringComparer.Ordinal);
+        Assert.Contains(Original(tenantId, "known"), store.Keys, StringComparer.Ordinal);
         Assert.Contains(
-            "assets/recent-orphan",
+            Original(tenantId, "recent-orphan"),
             store.Keys,
             StringComparer.Ordinal);
     }
@@ -167,7 +167,7 @@ public sealed class BlobIntegrityServiceTests
         Guid tenantId = Guid.CreateVersion7();
         var state = new FakeState(tenantId, []);
         var store = new ReconciliationBlobStore();
-        store.Add("assets/orphan", Now.AddDays(-3));
+        store.Add(Original(tenantId, "orphan"), Now.AddDays(-3));
         var service = new BlobIntegrityService(
             state,
             store,
@@ -180,7 +180,7 @@ public sealed class BlobIntegrityServiceTests
 
         Assert.Equal(1, report.OrphansDetected);
         Assert.Equal(0, report.OrphansDeleted);
-        Assert.Contains("assets/orphan", store.Keys, StringComparer.Ordinal);
+        Assert.Contains(Original(tenantId, "orphan"), store.Keys, StringComparer.Ordinal);
     }
 
     [Fact]
@@ -189,7 +189,7 @@ public sealed class BlobIntegrityServiceTests
         Guid tenantId = Guid.CreateVersion7();
         var state = new FakeState(tenantId,
         [
-            Record("assets/one", Now.AddDays(-1)),
+            Record(Original(tenantId, "one"), Now.AddDays(-1)),
         ]);
         var service = new BlobIntegrityService(
             state,
@@ -212,7 +212,7 @@ public sealed class BlobIntegrityServiceTests
         Guid tenantId = Guid.CreateVersion7();
         var state = new FakeState(tenantId,
         [
-            Record("assets/one", Now.AddDays(-1)),
+            Record(Original(tenantId, "one"), Now.AddDays(-1)),
         ]);
         var service = new BlobIntegrityService(
             state,
@@ -234,8 +234,8 @@ public sealed class BlobIntegrityServiceTests
         Guid tenantId = Guid.CreateVersion7();
         BlobIntegrityRecord[] records =
         [
-            Record("assets/one", Now.AddDays(-1)),
-            Record("assets/two", Now.AddDays(-1)),
+            Record(Original(tenantId, "one"), Now.AddDays(-1)),
+            Record(Original(tenantId, "two"), Now.AddDays(-1)),
         ];
         var state = new FakeState(tenantId, records);
         var service = new BlobIntegrityService(
@@ -253,6 +253,9 @@ public sealed class BlobIntegrityServiceTests
             records[^1].BlobId.ToString(),
             report.ContinuationCursor);
     }
+
+    private static string Original(Guid tenantId, string leaf) =>
+        $"originals/{tenantId.ToString("N")[..2]}/{tenantId:D}/{leaf}/1/{leaf}.jpg";
 
     private static BlobIntegrityRecord Record(
         string objectKey,

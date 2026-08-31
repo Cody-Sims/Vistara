@@ -20,7 +20,11 @@ internal sealed class ReconciliationBlobStore : IBlobStore
         ReadAfterWriteConsistency = BlobConsistencyModel.Strong,
     };
 
+    private readonly List<string> _listedPrefixes = [];
+
     internal IReadOnlyCollection<string> Keys => _objects.Keys;
+
+    internal IReadOnlyList<string> ListedPrefixes => _listedPrefixes;
 
     internal void Add(string objectKey, DateTimeOffset lastModifiedUtc) =>
         _objects[objectKey] = lastModifiedUtc;
@@ -42,7 +46,12 @@ internal sealed class ReconciliationBlobStore : IBlobStore
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
-        foreach ((string key, DateTimeOffset modified) in _objects)
+        if (options.Prefix is not null)
+        {
+            _listedPrefixes.Add(options.Prefix);
+        }
+
+        foreach ((string key, DateTimeOffset modified) in _objects.ToArray())
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (options.Prefix is not null &&
