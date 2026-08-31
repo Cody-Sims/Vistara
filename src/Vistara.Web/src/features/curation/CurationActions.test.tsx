@@ -927,6 +927,7 @@ describe('curation actions', () => {
   });
 
   it('lists a tag the API replayed only once', async () => {
+    const complaints = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const { client, user } = renderActions();
 
     await user.click(screen.getByRole('button', { name: 'Tags' }));
@@ -944,9 +945,13 @@ describe('curation actions', () => {
         ),
       ).toHaveLength(1),
     );
+    expect(
+      complaints.mock.calls.map((call) => call.map(String).join(' ')).join('\n'),
+    ).toBe('');
   });
 
   it('lists an album the API replayed only once', async () => {
+    const complaints = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const { client, user } = renderActions();
 
     await user.click(screen.getByRole('button', { name: 'Albums' }));
@@ -964,6 +969,9 @@ describe('curation actions', () => {
         ),
       ).toHaveLength(1),
     );
+    expect(
+      complaints.mock.calls.map((call) => call.map(String).join(' ')).join('\n'),
+    ).toBe('');
   });
 
   it('reports how many images the actions apply to', () => {

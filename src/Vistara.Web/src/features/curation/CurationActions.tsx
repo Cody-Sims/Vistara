@@ -544,9 +544,9 @@ export function CurationActions({
     const results: CurationItemResult[] = [];
     const versions: AssetSummary[] = [];
 
-    for (const batch of batches(toVersionedReferences(targets))) {
+    for (const batch of batches(toVersionedReferences(actionable))) {
       const inBatch = batch.map(
-        (item) => targets.find((target) => target.id === item.id)!,
+        (item) => actionable.find((target) => target.id === item.id)!,
       );
       const outcome = (value: CurationItemResult['outcome']) =>
         inBatch.map((target) => ({
