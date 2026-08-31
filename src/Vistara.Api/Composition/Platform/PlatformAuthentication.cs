@@ -109,25 +109,41 @@ public sealed record PlatformCredentialResult
     private PlatformCredentialResult(
         PlatformIdentity? identity,
         string? errorCode,
-        string? refreshedCookie)
+        string? refreshedCookie,
+        string? refreshedSessionToken)
     {
         Identity = identity;
         ErrorCode = errorCode;
         RefreshedCookie = refreshedCookie;
+        RefreshedSessionToken = refreshedSessionToken;
     }
 
     public PlatformIdentity? Identity { get; }
     public string? ErrorCode { get; }
     public string? RefreshedCookie { get; }
+
+    /// <summary>
+    /// The session token the credential is bound to after authentication, when
+    /// authentication replaced it. A rotated session revokes the token the
+    /// request presented, so anything that derives from the live session must
+    /// use this value instead of the request cookie.
+    /// </summary>
+    public string? RefreshedSessionToken { get; }
+
     public bool IsSuccess => Identity is not null;
 
     public static PlatformCredentialResult Success(
         PlatformIdentity identity,
-        string? refreshedCookie = null) =>
-        new(identity ?? throw new ArgumentNullException(nameof(identity)), null, refreshedCookie);
+        string? refreshedCookie = null,
+        string? refreshedSessionToken = null) =>
+        new(
+            identity ?? throw new ArgumentNullException(nameof(identity)),
+            null,
+            refreshedCookie,
+            refreshedSessionToken);
 
     public static PlatformCredentialResult Invalid(string errorCode) =>
-        new(null, NormalizeCode(errorCode), null);
+        new(null, NormalizeCode(errorCode), null, null);
 
     private static string NormalizeCode(string errorCode)
     {
@@ -164,6 +180,29 @@ internal static class PlatformAuthenticationState
     internal static readonly object AntiforgeryDigestKey = new();
     internal static readonly object ReauthenticationKey = new();
     internal static readonly object FailureCodeKey = new();
+    internal static readonly object SessionTokenKey = new();
+
+    /// <summary>
+    /// The browser session token this request is authenticated by, after any
+    /// rotation. Authentication may replace the presented cookie, in which case
+    /// the presented one is already revoked; an endpoint that has to act on the
+    /// live session must read the effective token from here.
+    /// </summary>
+    internal static string? ReadEffectiveSessionToken(HttpContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.Items.TryGetValue(SessionTokenKey, out object? token)
+            ? token as string
+            : null;
+    }
+
+    internal static void EstablishSessionToken(HttpContext context, string token)
+    {
+        if (!string.IsNullOrWhiteSpace(token))
+        {
+            context.Items[SessionTokenKey] = token;
+        }
+    }
 
     internal static AuthenticateResult ToAuthenticateResult(
         HttpContext context,
@@ -290,6 +329,13 @@ internal sealed class PlatformCookieAuthenticationHandler(
         PlatformCredentialResult result = await authenticator.AuthenticateCookieAsync(
             token,
             Context.RequestAborted);
+        if (result.IsSuccess)
+        {
+            PlatformAuthenticationState.EstablishSessionToken(
+                Context,
+                result.RefreshedSessionToken ?? token);
+        }
+
         return PlatformAuthenticationState.ToAuthenticateResult(
             Context,
             Scheme.Name,
@@ -451,7 +497,8 @@ internal sealed class DefaultPlatformCookieAuthenticator(IServiceProvider servic
                         session.Principal.Reauthentication.ActorId.Value,
                         session.Principal.Reauthentication.VerifiedAtUtc,
                         PlatformAuthenticationStrength.PrimaryCredential)),
-                session.RefreshedCookie?.ToSetCookieHeader());
+                session.RefreshedCookie?.ToSetCookieHeader(),
+                session.RefreshedCookie?.Value);
         }
         catch (InvalidOperationException)
         {

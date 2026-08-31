@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Http;
+using Vistara.Contracts.Identity;
 using Vistara.Domain.Tenancy;
 
 namespace Vistara.Api.Features.Account;
@@ -23,13 +24,21 @@ public enum AccountAccessStatus
     Forbidden,
 }
 
+/// <summary>
+/// The credential that authenticated the actor. The set is closed and maps one
+/// to one onto the published <c>authenticationKind</c> vocabulary, so the
+/// account surface never has to guess what a caller is holding.
+/// </summary>
 public enum AccountAuthenticationKind
 {
-    /// <summary>An automation or federated credential bound to one tenant.</summary>
-    TenantBound,
-
     /// <summary>An interactive browser session owned by a human principal.</summary>
-    Browser,
+    Cookie,
+
+    /// <summary>An automation credential bound to one tenant.</summary>
+    ApiKey,
+
+    /// <summary>A federated bearer token bound to one tenant.</summary>
+    Bearer,
 }
 
 public sealed record AccountActor(
@@ -44,7 +53,17 @@ public sealed record AccountActor(
     /// where its owner is a member outside the tenant it was issued for.
     /// </summary>
     public bool MayEnumerateOtherTenants =>
-        AuthenticationKind == AccountAuthenticationKind.Browser;
+        AuthenticationKind == AccountAuthenticationKind.Cookie;
+
+    /// <summary>The published name of the credential that authenticated.</summary>
+    public string AuthenticationKindName => AuthenticationKind switch
+    {
+        AccountAuthenticationKind.Cookie => AuthenticationKinds.Cookie,
+        AccountAuthenticationKind.ApiKey => AuthenticationKinds.ApiKey,
+        AccountAuthenticationKind.Bearer => AuthenticationKinds.Bearer,
+        _ => throw new InvalidOperationException(
+            "The authenticated credential kind is unknown."),
+    };
 }
 
 public sealed record AccountAccess
@@ -102,6 +121,10 @@ public sealed class ClaimsAccountAuthorizationPort : IAccountAuthorizationPort
 
     internal const string BrowserAuthenticationKind = "Cookie";
 
+    internal const string ApiKeyAuthenticationKind = "ApiKey";
+
+    internal const string BearerAuthenticationKind = "Bearer";
+
     public ValueTask<AccountAccess> AuthorizeAsync(
         HttpContext context,
         AccountOperation operation,
@@ -144,12 +167,23 @@ public sealed class ClaimsAccountAuthorizationPort : IAccountAuthorizationPort
                 AccountAccess.Denied(AccountAccessStatus.Forbidden));
         }
 
+        // The account surface publishes the credential kind, so a principal
+        // that carries no single recognized kind is refused rather than
+        // described under a guessed one.
+        if (!TryReadAuthenticationKind(
+                principal,
+                out AccountAuthenticationKind authenticationKind))
+        {
+            return ValueTask.FromResult(
+                AccountAccess.Denied(AccountAccessStatus.Forbidden));
+        }
+
         return ValueTask.FromResult(
             AccountAccess.Authorized(new AccountActor(
                 tenantId,
                 userId,
                 role,
-                ReadAuthenticationKind(principal))));
+                authenticationKind)));
     }
 
     internal static string? RequiredScope(AccountOperation operation) =>
@@ -179,21 +213,41 @@ public sealed class ClaimsAccountAuthorizationPort : IAccountAuthorizationPort
             _ => throw new ArgumentOutOfRangeException(nameof(operation)),
         };
 
-    internal static AccountAuthenticationKind ReadAuthenticationKind(
-        ClaimsPrincipal principal)
+    /// <summary>
+    /// Reads the one credential kind the platform authentication handlers
+    /// published. A missing, repeated, or unrecognized kind fails: a forged
+    /// pair of kind claims must never resolve to the browser kind, and no
+    /// caller may be described under a kind the platform did not issue.
+    /// </summary>
+    internal static bool TryReadAuthenticationKind(
+        ClaimsPrincipal principal,
+        out AccountAuthenticationKind authenticationKind)
     {
+        authenticationKind = default;
         string[] kinds = principal.FindAll(AuthenticationKindClaimType)
             .Select(claim => claim.Value)
             .Distinct(StringComparer.Ordinal)
             .Take(2)
             .ToArray();
-        return kinds.Length == 1 &&
-            string.Equals(
-                kinds[0],
-                BrowserAuthenticationKind,
-                StringComparison.Ordinal)
-            ? AccountAuthenticationKind.Browser
-            : AccountAuthenticationKind.TenantBound;
+        if (kinds.Length != 1)
+        {
+            return false;
+        }
+
+        switch (kinds[0])
+        {
+            case BrowserAuthenticationKind:
+                authenticationKind = AccountAuthenticationKind.Cookie;
+                return true;
+            case ApiKeyAuthenticationKind:
+                authenticationKind = AccountAuthenticationKind.ApiKey;
+                return true;
+            case BearerAuthenticationKind:
+                authenticationKind = AccountAuthenticationKind.Bearer;
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static bool HasMinimumRole(TenantRole actual, TenantRole minimum) =>

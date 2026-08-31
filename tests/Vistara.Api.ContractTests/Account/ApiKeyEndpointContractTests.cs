@@ -338,6 +338,7 @@ public sealed class ApiKeyEndpointContractTests
                     new Claim(ClaimTypes.NameIdentifier, UserId.ToString("D")),
                     new Claim(ClaimTypes.Role, "TenantOwner"),
                     new Claim("scope", "api_keys.manage"),
+                    new Claim("vistara_auth_kind", "Cookie"),
                 ],
                 "test")),
         };

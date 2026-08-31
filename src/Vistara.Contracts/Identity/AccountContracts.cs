@@ -21,10 +21,31 @@ public sealed record CurrentUserResponse(
     [property: JsonPropertyName("tenantId")] Guid? TenantId,
     [property: JsonPropertyName("role")] string? Role,
     [property: JsonPropertyName("tenants")] IReadOnlyList<CurrentUserTenantResponse> Tenants,
+    [property: JsonPropertyName("authenticationKind")] string AuthenticationKind,
     [property: JsonPropertyName("csrfHeaderName")] string CsrfHeaderName,
     [property: JsonPropertyName("csrfToken")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     string? CsrfToken = null);
+
+/// <summary>
+/// The credential kind that authenticated a response. The vocabulary is closed
+/// and stable: a client selects behaviour from this value and must never infer
+/// the credential from the presence of an antiforgery token. Only
+/// <see cref="Cookie"/> carries <c>csrfToken</c>.
+/// </summary>
+public static class AuthenticationKinds
+{
+    /// <summary>An interactive browser session cookie.</summary>
+    public const string Cookie = "cookie";
+
+    /// <summary>A tenant-bound API key presented in the API key header.</summary>
+    public const string ApiKey = "apiKey";
+
+    /// <summary>A federated bearer token presented in the authorization header.</summary>
+    public const string Bearer = "bearer";
+
+    public static IReadOnlyList<string> All { get; } = [Cookie, ApiKey, Bearer];
+}
 
 public sealed record LoginResponse(
     [property: JsonPropertyName("user")] CurrentUserResponse User,

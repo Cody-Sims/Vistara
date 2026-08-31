@@ -311,9 +311,8 @@ public sealed class AccountEndpointContractTests
     [Theory]
     [InlineData("ApiKey")]
     [InlineData("Bearer")]
-    [InlineData(null)]
     public async Task Tenant_bound_credentials_never_enumerate_other_tenants(
-        string? authenticationKind)
+        string authenticationKind)
     {
         var sessions = new FakeBrowserSessionPort();
         var claims = new List<Claim>
@@ -321,11 +320,8 @@ public sealed class AccountEndpointContractTests
             new("tenant_id", TenantId.ToString("D")),
             new(ClaimTypes.NameIdentifier, UserId.ToString("D")),
             new(ClaimTypes.Role, "TenantOwner"),
+            new("vistara_auth_kind", authenticationKind),
         };
-        if (authenticationKind is not null)
-        {
-            claims.Add(new Claim("vistara_auth_kind", authenticationKind));
-        }
 
         TestResponse response = await SendAsync(
             "me",
@@ -337,26 +333,38 @@ public sealed class AccountEndpointContractTests
         Assert.Equal(TenantId, sessions.DescribedTenantId);
     }
 
-    [Fact]
-    public async Task A_forged_browser_kind_claim_pair_is_treated_as_tenant_bound()
+    /// <summary>
+    /// The response publishes the credential kind, so a principal that carries
+    /// no single recognized kind is refused rather than described under a
+    /// guessed one. A forged pair of kind claims must not become a browser
+    /// session.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("Basic")]
+    [InlineData("ApiKey,Cookie")]
+    public async Task An_unrecognized_credential_kind_is_refused(
+        string authenticationKinds)
     {
         var sessions = new FakeBrowserSessionPort();
+        var claims = new List<Claim>
+        {
+            new("tenant_id", TenantId.ToString("D")),
+            new(ClaimTypes.NameIdentifier, UserId.ToString("D")),
+            new(ClaimTypes.Role, "TenantOwner"),
+        };
+        claims.AddRange(authenticationKinds
+            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(kind => new Claim("vistara_auth_kind", kind)));
 
         TestResponse response = await SendAsync(
             "me",
             sessions,
-            principal: new ClaimsPrincipal(new ClaimsIdentity(
-                [
-                    new Claim("tenant_id", TenantId.ToString("D")),
-                    new Claim(ClaimTypes.NameIdentifier, UserId.ToString("D")),
-                    new Claim(ClaimTypes.Role, "TenantOwner"),
-                    new Claim("vistara_auth_kind", "ApiKey"),
-                    new Claim("vistara_auth_kind", "Cookie"),
-                ],
-                "test")));
+            principal: new ClaimsPrincipal(new ClaimsIdentity(claims, "test")));
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.False(sessions.IncludedOtherTenants);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Null(sessions.DescribedUserId);
+        Assert.Null(sessions.AntiforgeryRequestToken);
     }
 
     [Fact]
@@ -371,6 +379,46 @@ public sealed class AccountEndpointContractTests
                 Guid.CreateVersion7().ToString("D"));
 
         Assert.Equal(TenantId, sessions.DescribedTenantId);
+    }
+
+    /// <summary>
+    /// The response names the credential that authenticated it from a closed
+    /// vocabulary, so a client never has to infer the credential from the
+    /// presence of an antiforgery token.
+    /// </summary>
+    [Theory]
+    [InlineData("Cookie", "cookie", true)]
+    [InlineData("ApiKey", "apiKey", false)]
+    [InlineData("Bearer", "bearer", false)]
+    public async Task Current_user_publishes_the_credential_kind(
+        string claimValue,
+        string publishedKind,
+        bool expectsCsrfToken)
+    {
+        var sessions = new FakeBrowserSessionPort();
+
+        TestResponse response = await SendAsync(
+            "me",
+            sessions,
+            principal: new ClaimsPrincipal(new ClaimsIdentity(
+                [
+                    new Claim("tenant_id", TenantId.ToString("D")),
+                    new Claim(ClaimTypes.NameIdentifier, UserId.ToString("D")),
+                    new Claim(ClaimTypes.Role, "TenantOwner"),
+                    new Claim("vistara_auth_kind", claimValue),
+                ],
+                "test")),
+            configure: context =>
+                context.Request.Headers.Cookie = $"{SessionCookie}=live-token");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using JsonDocument json = JsonDocument.Parse(response.Body);
+        Assert.Equal(
+            publishedKind,
+            json.RootElement.GetProperty("authenticationKind").GetString());
+        Assert.Equal(
+            expectsCsrfToken,
+            json.RootElement.TryGetProperty("csrfToken", out _));
     }
 
     private static async Task<TestResponse> SendAsync(

@@ -82,7 +82,7 @@ public static class AccountEndpoint
             context,
             StatusCodes.Status200OK,
             new LoginResponse(
-                Map(session.User, cookies),
+                Map(session.User, cookies, AuthenticationKinds.Cookie),
                 session.AntiforgeryToken),
             cancellationToken);
     }
@@ -151,16 +151,20 @@ public static class AccountEndpoint
         }
 
         // A reloaded browser holds the session cookie but no antiforgery
-        // token, so a live cookie session is handed a fresh one here.
-        string? antiforgeryToken = actor.MayEnumerateOtherTenants
-            ? await sessions.IssueAntiforgeryTokenAsync(
-                ReadSessionToken(context, cookies),
-                cancellationToken)
-            : null;
+        // token, so a live cookie session is handed a fresh one here. The
+        // token is derived from the session this request ends up authenticated
+        // by: a sliding or privilege rotation has already revoked the cookie
+        // the request arrived with.
+        string? antiforgeryToken =
+            actor.AuthenticationKind == AccountAuthenticationKind.Cookie
+                ? await sessions.IssueAntiforgeryTokenAsync(
+                    EffectiveSessionToken(context, cookies),
+                    cancellationToken)
+                : null;
         await WriteJsonAsync(
             context,
             StatusCodes.Status200OK,
-            Map(user, cookies, antiforgeryToken),
+            Map(user, cookies, actor.AuthenticationKindName, antiforgeryToken),
             cancellationToken);
     }
 
@@ -324,9 +328,21 @@ public static class AccountEndpoint
             ? value
             : null;
 
+    /// <summary>
+    /// The session token the request is authenticated by. Cookie
+    /// authentication may rotate the session, which revokes the token the
+    /// browser presented, so the rotated token wins over the request cookie.
+    /// </summary>
+    private static string? EffectiveSessionToken(
+        HttpContext context,
+        CookieAuthOptions cookies) =>
+        PlatformAuthenticationState.ReadEffectiveSessionToken(context)
+        ?? ReadSessionToken(context, cookies);
+
     private static CurrentUserResponse Map(
         CurrentUserView user,
         CookieAuthOptions cookies,
+        string authenticationKind,
         string? antiforgeryToken = null) =>
         new(
             user.UserId,
@@ -342,6 +358,7 @@ public static class AccountEndpoint
                     tenant.Role,
                     tenant.MembershipStatus))
                 .ToArray(),
+            authenticationKind,
             cookies.AntiforgeryHeaderName,
             antiforgeryToken);
 

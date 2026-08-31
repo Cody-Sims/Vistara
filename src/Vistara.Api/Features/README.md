@@ -27,11 +27,11 @@ A composition root wires the whole surface with
 | Method and route | Purpose | Concurrency |
 |---|---|---|
 | `GET /api/v1/capabilities` | Deployment capabilities and configured limits | `ETag`, `304` |
-| `POST /api/v1/auth/login` | Local cookie sign-in; returns `csrfToken` | — |
+| `POST /api/v1/auth/login` | Local cookie sign-in; returns `csrfToken` and `user.authenticationKind` of `cookie` | — |
 | `POST /api/v1/auth/logout` | Ends the session; always clears the cookie | — |
 | `GET /api/v1/setup` | Whether provisioning is still open (anonymous) | — |
 | `POST /api/v1/setup` | One-time first-owner provisioning | `409` once claimed |
-| `GET /api/v1/me` | Current principal, memberships, `csrfToken` | — |
+| `GET /api/v1/me` | Current principal, memberships, `authenticationKind`, and `csrfToken` for cookie sessions | — |
 | `GET /api/v1/me/preferences` | Account preferences | `ETag` |
 | `PATCH /api/v1/me/preferences` | Merge patch of preferences | `If-Match` |
 | `GET /api/v1/tenants` | Tenants the principal belongs to | — |

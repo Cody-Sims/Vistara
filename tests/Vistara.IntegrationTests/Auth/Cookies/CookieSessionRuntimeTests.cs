@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
@@ -10,11 +11,15 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.IdentityModel.JsonWebTokens;
+using Microsoft.IdentityModel.Tokens;
 using Microsoft.Net.Http.Headers;
 using Vistara.Api.Composition.Platform;
 using Vistara.Api.Composition.Runtime;
+using Vistara.Application.Common;
 using Vistara.Application.Identity;
 using Vistara.Auth.Cookies;
+using Vistara.Auth.Jwt;
 using Vistara.Persistence;
 using Vistara.Persistence.Model;
 using Xunit;
@@ -46,6 +51,15 @@ public sealed class CookieSessionRuntimeTests
     /// </summary>
     private const string NoncanonicalSessionToken =
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    private const string BearerIssuer = "https://issuer.vistara.invalid";
+
+    private const string BearerAudience = "vistara-api";
+
+    private const string BearerSubject = "external-subject-1";
+
+    private static readonly DateTimeOffset StartOfTest =
+        new(2036, 5, 6, 7, 8, 9, TimeSpan.Zero);
 
     [Fact]
     public async Task Cookie_issued_by_login_authenticates_the_next_request()
@@ -246,8 +260,209 @@ public sealed class CookieSessionRuntimeTests
         Assert.Equal(0, await host.CountLiveSessionsAsync());
     }
 
-    private static string SetupBody(string slug, string email) =>
-        JsonSerializer.Serialize(new
+    /// <summary>
+    /// A browser that returns after the sliding refresh interval gets a new
+    /// session cookie. The response must still describe a cookie session, and
+    /// the antiforgery token it carries must belong to the refreshed session,
+    /// not to the cookie the request arrived with, which rotation revoked.
+    /// </summary>
+    [Fact]
+    public async Task Cookie_session_rotated_by_the_sliding_interval_stays_usable()
+    {
+        await using CookieRuntimeHost host = await CookieRuntimeHost.CreateAsync();
+        await host.ProvisionAsync("repro-workspace", "repro.owner@vistara.invalid");
+        string original = await host.LoginAsync("repro.owner@vistara.invalid");
+        host.Clock.Advance(TimeSpan.FromMinutes(11));
+
+        TestResponse me = await host.SendAsync("GET", "/api/v1/me", original);
+        string refreshed = me.SessionCookieValue();
+        string csrfToken = me.Json().GetProperty("csrfToken").GetString()!;
+        TestResponse unsafeRequest = await host.SendAsync(
+            "POST",
+            "/api/v1/api-keys",
+            refreshed,
+            """{"scopes":["assets.read"]}""",
+            new Dictionary<string, string> { ["X-Vistara-CSRF"] = csrfToken });
+        TestResponse withOldCookie = await host.SendAsync(
+            "GET",
+            "/api/v1/me",
+            original);
+
+        Assert.Equal(HttpStatusCode.OK, me.StatusCode);
+        Assert.Equal("cookie", me.Json().GetProperty("authenticationKind").GetString());
+        Assert.Equal(
+            "X-Vistara-CSRF",
+            me.Json().GetProperty("csrfHeaderName").GetString());
+        Assert.NotEqual(original, refreshed);
+        Assert.False(string.IsNullOrWhiteSpace(csrfToken));
+        Assert.Equal(HttpStatusCode.Created, unsafeRequest.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, withOldCookie.StatusCode);
+    }
+
+    /// <summary>
+    /// The antiforgery token a rotation produces must be the one the very next
+    /// unsafe request needs, with no second read of <c>/api/v1/me</c> in
+    /// between.
+    /// </summary>
+    [Fact]
+    public async Task Rotated_cookie_session_accepts_the_immediate_unsafe_request()
+    {
+        await using CookieRuntimeHost host = await CookieRuntimeHost.CreateAsync();
+        await host.ProvisionAsync("repro-workspace", "repro.owner@vistara.invalid");
+        string original = await host.LoginAsync("repro.owner@vistara.invalid");
+        string staleCsrf = (await host.SendAsync("GET", "/api/v1/me", original))
+            .Json()
+            .GetProperty("csrfToken")
+            .GetString()!;
+        host.Clock.Advance(TimeSpan.FromMinutes(11));
+
+        TestResponse me = await host.SendAsync("GET", "/api/v1/me", original);
+        string refreshed = me.SessionCookieValue();
+        string csrfToken = me.Json().GetProperty("csrfToken").GetString()!;
+        TestResponse accepted = await host.SendAsync(
+            "POST",
+            "/api/v1/api-keys",
+            refreshed,
+            """{"scopes":["assets.read"]}""",
+            new Dictionary<string, string> { ["X-Vistara-CSRF"] = csrfToken });
+        TestResponse refused = await host.SendAsync(
+            "POST",
+            "/api/v1/api-keys",
+            refreshed,
+            """{"scopes":["assets.read"]}""",
+            new Dictionary<string, string> { ["X-Vistara-CSRF"] = staleCsrf });
+
+        Assert.NotEqual(staleCsrf, csrfToken);
+        Assert.Equal(HttpStatusCode.Created, accepted.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
+        Assert.Equal("cookie_auth.antiforgery_required", refused.ProblemCode());
+    }
+
+    /// <summary>
+    /// Two tabs read the same live session. Neither may rotate it, and both
+    /// must receive the same usable antiforgery token.
+    /// </summary>
+    [Fact]
+    public async Task Cookie_session_antiforgery_token_is_stable_across_tabs()
+    {
+        await using CookieRuntimeHost host = await CookieRuntimeHost.CreateAsync();
+        await host.ProvisionAsync("repro-workspace", "repro.owner@vistara.invalid");
+        string cookie = await host.LoginAsync("repro.owner@vistara.invalid");
+
+        TestResponse firstTab = await host.SendAsync("GET", "/api/v1/me", cookie);
+        TestResponse secondTab = await host.SendAsync("GET", "/api/v1/me", cookie);
+        string csrfToken = secondTab.Json().GetProperty("csrfToken").GetString()!;
+        TestResponse unsafeRequest = await host.SendAsync(
+            "POST",
+            "/api/v1/api-keys",
+            cookie,
+            """{"scopes":["assets.read"]}""",
+            new Dictionary<string, string> { ["X-Vistara-CSRF"] = csrfToken });
+
+        Assert.Equal(HttpStatusCode.OK, firstTab.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, secondTab.StatusCode);
+        Assert.Null(firstTab.RefreshedSessionCookieValue());
+        Assert.Null(secondTab.RefreshedSessionCookieValue());
+        Assert.Equal(
+            firstTab.Json().GetProperty("csrfToken").GetString(),
+            csrfToken);
+        Assert.Equal(HttpStatusCode.Created, unsafeRequest.StatusCode);
+        Assert.Equal(1, await host.CountLiveSessionsAsync());
+    }
+
+    /// <summary>
+    /// Every credential publishes its own kind, and only a cookie session ever
+    /// carries an antiforgery token.
+    /// </summary>
+    [Fact]
+    public async Task Every_credential_kind_is_published_and_only_cookies_carry_csrf()
+    {
+        using RSA rsa = RSA.Create(2048);
+        var signingKey = new RsaSecurityKey(rsa) { KeyId = "issuer-1" };
+        await using CookieRuntimeHost host =
+            await CookieRuntimeHost.CreateAsync(signingKey);
+        Guid tenantId = await host.ProvisionAsync(
+            "repro-workspace",
+            "repro.owner@vistara.invalid");
+        TestResponse login = await host.PostJsonAsync(
+            "/api/v1/auth/login",
+            LoginBody("repro.owner@vistara.invalid"));
+        string cookie = login.SessionCookieValue();
+        string csrfToken = login.Json().GetProperty("csrfToken").GetString()!;
+        Guid userId = login.Json()
+            .GetProperty("user")
+            .GetProperty("userId")
+            .GetGuid();
+        await host.LinkExternalIdentityAsync(
+            tenantId,
+            userId,
+            BearerIssuer,
+            BearerSubject);
+
+        TestResponse created = await host.SendAsync(
+            "POST",
+            "/api/v1/api-keys",
+            cookie,
+            """{"scopes":["assets.read"]}""",
+            new Dictionary<string, string> { ["X-Vistara-CSRF"] = csrfToken });
+        string apiKey = created.Json().GetProperty("secret").GetString()!;
+        TestResponse byCookie = await host.SendAsync("GET", "/api/v1/me", cookie);
+        TestResponse byApiKey = await host.SendAsync(
+            "GET",
+            "/api/v1/me",
+            headers: new Dictionary<string, string> { ["X-API-Key"] = apiKey });
+        TestResponse byBearer = await host.SendAsync(
+            "GET",
+            "/api/v1/me",
+            headers: new Dictionary<string, string>
+            {
+                ["Authorization"] = $"Bearer {CreateBearerToken(signingKey, tenantId, host)}",
+            });
+
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        Assert.Equal(
+            "cookie",
+            login.Json()
+                .GetProperty("user")
+                .GetProperty("authenticationKind")
+                .GetString());
+        Assert.Equal(HttpStatusCode.OK, byCookie.StatusCode);
+        Assert.Equal(
+            "cookie",
+            byCookie.Json().GetProperty("authenticationKind").GetString());
+        Assert.True(byCookie.Json().TryGetProperty("csrfToken", out _));
+        Assert.Equal(HttpStatusCode.OK, byApiKey.StatusCode);
+        Assert.Equal(
+            "apiKey",
+            byApiKey.Json().GetProperty("authenticationKind").GetString());
+        Assert.False(byApiKey.Json().TryGetProperty("csrfToken", out _));
+        Assert.Equal(HttpStatusCode.OK, byBearer.StatusCode);
+        Assert.Equal(
+            "bearer",
+            byBearer.Json().GetProperty("authenticationKind").GetString());
+        Assert.False(byBearer.Json().TryGetProperty("csrfToken", out _));
+    }
+
+    private static string CreateBearerToken(
+        SecurityKey signingKey,
+        Guid tenantId,
+        CookieRuntimeHost host)
+    {
+        DateTimeOffset now = host.Clock.UtcNow;
+        string payload = $$"""
+            {"iss":"{{BearerIssuer}}","aud":"{{BearerAudience}}",
+             "sub":"{{BearerSubject}}","jti":"{{Guid.CreateVersion7():D}}",
+             "tenant_id":"{{tenantId:D}}",
+             "nbf":{{now.AddMinutes(-1).ToUnixTimeSeconds()}},
+             "exp":{{now.AddMinutes(5).ToUnixTimeSeconds()}}}
+            """;
+        return new JsonWebTokenHandler().CreateToken(
+            payload,
+            new SigningCredentials(signingKey, SecurityAlgorithms.RsaSha256),
+            new Dictionary<string, object> { ["typ"] = "at+jwt" });
+    }
+
+    private static string SetupBody(string slug, string email) =>        JsonSerializer.Serialize(new
         {
             tenantSlug = slug,
             tenantName = slug,
@@ -273,22 +488,26 @@ public sealed class CookieSessionRuntimeTests
         private readonly RequestDelegate _pipeline;
         private readonly string _connectionString;
         private readonly ExecutedSqlRecorder _sql;
+        private readonly AdvanceableClock _clock;
 
         private CookieRuntimeHost(
             SqliteConnection anchor,
             WebApplication app,
             RequestDelegate pipeline,
             string connectionString,
-            ExecutedSqlRecorder sql)
+            ExecutedSqlRecorder sql,
+            AdvanceableClock clock)
         {
             _anchor = anchor;
             _app = app;
             _pipeline = pipeline;
             _connectionString = connectionString;
             _sql = sql;
+            _clock = clock;
         }
 
-        internal static async Task<CookieRuntimeHost> CreateAsync()
+        internal static async Task<CookieRuntimeHost> CreateAsync(
+            SecurityKey? bearerSigningKey = null)
         {
             string name = $"CookieRuntime-{Guid.NewGuid():N}";
             string connectionString =
@@ -306,6 +525,7 @@ public sealed class CookieSessionRuntimeTests
             }
 
             var sql = new ExecutedSqlRecorder();
+            var clock = new AdvanceableClock(StartOfTest);
             WebApplicationBuilder builder = WebApplication.CreateBuilder();
             builder.Configuration.Sources.Clear();
             builder.Configuration.AddInMemoryCollection(
@@ -313,11 +533,31 @@ public sealed class CookieSessionRuntimeTests
                 {
                     ["Persistence:Provider"] = "Sqlite",
                     ["Persistence:ConnectionString"] = connectionString,
+                    ["Platform:Authentication:ApiKeys:CurrentPepperVersion"] = "v1",
+                    ["Platform:Authentication:ApiKeys:Peppers:v1"] =
+                        Convert.ToBase64String(new byte[32]),
+                    ["Platform:Authentication:Jwt:Issuers:0:ProfileId"] = "test",
+                    ["Platform:Authentication:Jwt:Issuers:0:Issuer"] = BearerIssuer,
+                    ["Platform:Authentication:Jwt:Issuers:0:Audience"] = BearerAudience,
+                    ["Platform:Authentication:Jwt:Issuers:0:MetadataAddress"] =
+                        $"{BearerIssuer}/.well-known/openid-configuration",
+                    ["Platform:Authentication:Jwt:Issuers:0:AllowedAlgorithms:0"] =
+                        SecurityAlgorithms.RsaSha256,
                 });
             builder.Logging.ClearProviders();
             builder.Logging.SetMinimumLevel(LogLevel.Warning);
             builder.Logging.AddProvider(sql);
             builder.Logging.AddFilter(CommandCategory, LogLevel.Information);
+            builder.Services.AddSingleton<IClock>(clock);
+            if (bearerSigningKey is not null)
+            {
+                // Only the federated issuer's published key set is substituted:
+                // it lives outside the process. Token validation, membership
+                // resolution, and claim mapping stay on the production path.
+                builder.Services.AddSingleton<IJwtMetadataSigningKeyResolver>(
+                    new StaticMetadataSigningKeyResolver(bearerSigningKey));
+            }
+
             builder.Services.AddVistaraApiRuntime(builder.Configuration);
             builder.Services.AddVistaraApiPlatform(builder.Configuration);
             builder.Services.AddVistaraApiPersistence(builder.Configuration);
@@ -327,8 +567,17 @@ public sealed class CookieSessionRuntimeTests
             app.UseVistaraPlatform();
             app.MapVistaraPlatformSurface();
             RequestDelegate pipeline = ((IApplicationBuilder)app).Build();
-            return new CookieRuntimeHost(anchor, app, pipeline, connectionString, sql);
+            return new CookieRuntimeHost(
+                anchor,
+                app,
+                pipeline,
+                connectionString,
+                sql,
+                clock);
         }
+
+        /// <summary>The clock the whole host reads, so lifetimes are exact.</summary>
+        internal AdvanceableClock Clock => _clock;
 
         /// <summary>Every statement the host has run since the last clear.</summary>
         internal IReadOnlyList<string> ExecutedSql() => _sql.Statements;
@@ -426,8 +675,32 @@ public sealed class CookieSessionRuntimeTests
             return response.SessionCookieValue();
         }
 
-        internal async Task SuspendTenantAsync(Guid tenantId)
+        /// <summary>
+        /// Links a federated subject to an existing user, the way an external
+        /// identity provider sign-in does, so a bearer token can authenticate.
+        /// </summary>
+        internal async Task LinkExternalIdentityAsync(
+            Guid tenantId,
+            Guid userId,
+            string issuer,
+            string subject)
         {
+            await using AsyncServiceScope scope = _app.Services.CreateAsyncScope();
+            var factory = scope.ServiceProvider
+                .GetRequiredService<TenantDbContextFactory>();
+            await using VistaraDbContext context = factory.Create(tenantId);
+            context.ExternalIdentities.Add(new ExternalIdentityRow
+            {
+                Id = Guid.CreateVersion7(),
+                UserId = userId,
+                Issuer = issuer,
+                Subject = subject,
+                LinkedAtUtc = _clock.UtcNow,
+            });
+            await context.SaveChangesAsync(CancellationToken.None);
+        }
+
+        internal async Task SuspendTenantAsync(Guid tenantId)        {
             await ExecuteAsync(
                 "UPDATE tenants SET status = 'Suspended' WHERE lower(id) = $tenant",
                 ("$tenant", tenantId.ToString("D").ToLowerInvariant()));
@@ -457,7 +730,8 @@ public sealed class CookieSessionRuntimeTests
             string method,
             string path,
             string? sessionCookie = null,
-            string? body = null)
+            string? body = null,
+            IReadOnlyDictionary<string, string>? headers = null)
         {
             await using AsyncServiceScope scope = _app.Services.CreateAsyncScope();
             var context = new DefaultHttpContext
@@ -468,6 +742,13 @@ public sealed class CookieSessionRuntimeTests
             context.Request.Scheme = "https";
             context.Request.Host = new HostString("vistara.example.test");
             context.Request.Path = path;
+            if (headers is not null)
+            {
+                foreach ((string name, string value) in headers)
+                {
+                    context.Request.Headers[name] = value;
+                }
+            }
             context.Connection.RemoteIpAddress = IPAddress.Parse("198.51.100.10");
             if (sessionCookie is not null)
             {
@@ -530,6 +811,31 @@ public sealed class CookieSessionRuntimeTests
             await _app.DisposeAsync();
             await _anchor.DisposeAsync();
         }
+    }
+
+    /// <summary>
+    /// A clock the test advances by hand so session lifetimes are exact rather
+    /// than wall-clock dependent.
+    /// </summary>
+    private sealed class AdvanceableClock(DateTimeOffset start) : IClock
+    {
+        private DateTimeOffset _utcNow = start;
+
+        public DateTimeOffset UtcNow => _utcNow;
+
+        internal void Advance(TimeSpan amount) => _utcNow = _utcNow.Add(amount);
+    }
+
+    /// <summary>
+    /// Publishes a federated issuer's signing key without reaching the network.
+    /// </summary>
+    private sealed class StaticMetadataSigningKeyResolver(SecurityKey key)
+        : IJwtMetadataSigningKeyResolver
+    {
+        public ValueTask<IReadOnlyCollection<SecurityKey>> ResolveAsync(
+            Uri metadataAddress,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IReadOnlyCollection<SecurityKey>>([key]);
     }
 
     /// <summary>
