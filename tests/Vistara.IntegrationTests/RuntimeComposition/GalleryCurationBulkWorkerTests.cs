@@ -10,8 +10,10 @@ using Vistara.Application.Gallery;
 using Vistara.Application.Gallery.Favorites;
 using Vistara.Persistence;
 using Vistara.Persistence.Gallery.Curation;
+using Vistara.Persistence.Ingest;
 using Vistara.Persistence.Model;
 using Vistara.Worker.Composition.Platform;
+using Vistara.Worker.Features.Gallery;
 using Vistara.Worker.Runtime.Jobs;
 using Xunit;
 
@@ -89,6 +91,108 @@ public sealed class GalleryCurationBulkWorkerTests
             .ToArrayAsync();
         Assert.Equal([2L, 2L], versions);
         Assert.Equal("Completed", await database.ReadJobStateAsync(jobId));
+    }
+
+    [Fact]
+    public async Task Worker_records_partial_outcomes_and_still_completes_the_job()
+    {
+        await using CurationWorkerDatabase database =
+            await CurationWorkerDatabase.CreateAsync();
+        Guid jobId = Guid.CreateVersion7();
+        _ = await database.QueueAsync(
+            jobId,
+            new BulkCurationRequest(
+                [
+                    new BulkCurationTarget(database.FirstAssetId, 1),
+                    new BulkCurationTarget(database.SecondAssetId, 99),
+                ],
+                new BulkCurationAction("setFavorite", null, null, true)),
+            "bulk-partial");
+
+        await database.RunWorkerAsync();
+
+        await using VistaraDbContext context = database.CreateContext();
+        Assert.Equal(
+            database.FirstAssetId,
+            Assert.Single(await context.AssetFavorites.ToListAsync()).AssetId);
+        Assert.Equal("Completed", await database.ReadJobStateAsync(jobId));
+        AuditEventRow audit = Assert.Single(
+            await context.AuditEvents
+                .Where(row => row.Action == "gallery.curation.bulk")
+                .ToListAsync());
+        Assert.Equal(jobId.ToString("D"), audit.ResourceIdentifier);
+        Assert.Equal("Failed", audit.Outcome);
+        Assert.Contains(
+            $"succeeded:v2",
+            audit.AfterJson,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "conflict:asset_version_conflict",
+            audit.AfterJson,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Worker_never_applies_bulk_work_to_another_tenants_asset()
+    {
+        await using CurationWorkerDatabase database =
+            await CurationWorkerDatabase.CreateAsync();
+        (Guid foreignTenantId, Guid foreignAssetId) =
+            await database.SeedForeignTenantAsync();
+        Guid jobId = Guid.CreateVersion7();
+        _ = await database.QueueAsync(
+            jobId,
+            new BulkCurationRequest(
+                [
+                    new BulkCurationTarget(database.FirstAssetId, 1),
+                    new BulkCurationTarget(foreignAssetId, 1),
+                ],
+                new BulkCurationAction("setFavorite", null, null, true)),
+            "bulk-cross-tenant");
+
+        await database.RunWorkerAsync();
+
+        await using VistaraDbContext foreign =
+            database.CreateContext(foreignTenantId);
+        Assert.Empty(await foreign.AssetFavorites.ToListAsync());
+        Assert.Equal(
+            1L,
+            (await foreign.Assets.SingleAsync(asset => asset.Id == foreignAssetId))
+                .Version);
+        await using VistaraDbContext context = database.CreateContext();
+        Assert.Equal(
+            database.FirstAssetId,
+            Assert.Single(await context.AssetFavorites.ToListAsync()).AssetId);
+        Assert.Equal("Completed", await database.ReadJobStateAsync(jobId));
+    }
+
+    [Fact]
+    public void Worker_startup_validation_resolves_the_bulk_curation_handler()
+    {
+        ServiceCollection services = [];
+        services.AddSingleton(NoInvocationProxy.Create<IBlobStore>());
+        services.AddSingleton(NoInvocationProxy.Create<IImageProcessor>());
+        services.AddVistaraWorkerPlatform(
+            new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Persistence:Provider"] = "Sqlite",
+                    ["Persistence:ConnectionString"] = "Data Source=:memory:",
+                    ["Worker:InstanceId"] = "curation-bulk-validation",
+                })
+                .Build());
+        using ServiceProvider provider = services.BuildServiceProvider(
+            new ServiceProviderOptions { ValidateScopes = true });
+
+        provider.ValidateVistaraWorkerPlatformComposition();
+
+        using IServiceScope scope = provider.CreateScope();
+        scope.ServiceProvider
+            .GetRequiredService<IMutableTenantScope>()
+            .Establish(Guid.CreateVersion7());
+        Assert.Single(
+            scope.ServiceProvider.GetServices<IJobHandler>(),
+            handler => handler is GalleryCurationBulkJobHandler);
     }
 
     internal sealed class CurationWorkerDatabase : IAsyncDisposable
@@ -229,6 +333,59 @@ public sealed class GalleryCurationBulkWorkerTests
 
         internal VistaraDbContext CreateContext() =>
             CreateContext(_connectionString, TenantId);
+
+        internal VistaraDbContext CreateContext(Guid tenantId) =>
+            CreateContext(_connectionString, tenantId);
+
+        internal async ValueTask<(Guid TenantId, Guid AssetId)>
+            SeedForeignTenantAsync()
+        {
+            Guid tenantId = Guid.CreateVersion7();
+            Guid ownerId = Guid.CreateVersion7();
+            Guid assetId = Guid.CreateVersion7();
+            await using VistaraDbContext context = CreateContext(tenantId);
+            context.Tenants.Add(new TenantRow
+            {
+                Id = tenantId,
+                TenantId = tenantId,
+                Slug = "curation-bulk-foreign",
+                Name = "Curation bulk foreign",
+                Status = "Active",
+                CreatedAtUtc = Now,
+                UpdatedAtUtc = Now,
+                Version = 1,
+            });
+            context.Users.Add(new UserRow
+            {
+                Id = ownerId,
+                NormalizedEmail = "foreign@curation.invalid",
+                DisplayName = "Foreign owner",
+                Status = "Active",
+                CreatedAtUtc = Now,
+                UpdatedAtUtc = Now,
+                Version = 1,
+            });
+            context.Assets.Add(new AssetRow
+            {
+                Id = assetId,
+                TenantId = tenantId,
+                OwnerId = ownerId,
+                Title = "Foreign asset",
+                Status = "Ready",
+                Visibility = "Private",
+                CreatedAtUtc = Now,
+                UpdatedAtUtc = Now,
+                Version = 1,
+            });
+            await context.SaveChangesAsync();
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                 INSERT INTO worker_tenant_catalog
+                     (routed_tenant_id, worker_enabled, updated_at_utc, version)
+                 VALUES ({tenantId}, {true}, {Now}, {1L})
+                 """);
+            return (tenantId, assetId);
+        }
 
         internal async ValueTask<CurationResult<BulkCurationSubmission>> QueueAsync(
             Guid jobId,
