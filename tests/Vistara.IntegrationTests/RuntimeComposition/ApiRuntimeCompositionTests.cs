@@ -51,6 +51,7 @@ public sealed class ApiRuntimeCompositionTests
             services.AddVistaraApiPlatform(configuration);
             services.AddVistaraApiPersistence(configuration);
             services.AddVistaraMedia(configuration);
+            services.AddVistaraPlatformSurface();
 
             using ServiceProvider provider = services.BuildServiceProvider(
                 new ServiceProviderOptions
@@ -112,11 +113,13 @@ public sealed class ApiRuntimeCompositionTests
             builder.Services.AddVistaraApiPersistence(builder.Configuration);
             builder.Services.AddVistaraMedia(builder.Configuration);
             builder.Services.AddVistaraGallery(builder.Configuration);
+            builder.Services.AddVistaraPlatformSurface();
             await using WebApplication app = builder.Build();
             app.Services.ValidateVistaraApiPlatformComposition();
             app.Services.ValidateVistaraGalleryComposition();
             app.UseVistaraPlatform();
             app.MapVistaraPlatformEndpoints();
+            app.MapVistaraPlatformSurface();
             app.MapVistaraGalleryOpenApi();
 
             string[] routes = ((IEndpointRouteBuilder)app).DataSources

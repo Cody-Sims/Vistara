@@ -70,11 +70,13 @@ builder.Services.AddVistaraApiPersistence(builder.Configuration);
 ApiMedia.MediaServiceCollectionExtensions.AddVistaraMedia(
     builder.Services,
     builder.Configuration);
+builder.Services.AddVistaraPlatformSurface();
 
 WebApplication app = builder.Build();
 app.Services.ValidateVistaraApiPlatformComposition();
 app.UseVistaraPlatform();
 app.MapVistaraPlatformEndpoints();
+app.MapVistaraPlatformSurface();
 app.MapVistaraGalleryOpenApi();
 app.UseStaticFiles();
 app.UseVistaraSpaFallback(async context =>

@@ -136,7 +136,6 @@ public static class PlatformServiceCollectionExtensions
                 provider.GetRequiredService<IJwtRevocationStore>(),
                 provider.GetRequiredService<IClock>()));
         services.AddVistaraApiUploads();
-        services.AddVistaraPlatformSurface();
         return services;
     }
 
@@ -239,7 +238,6 @@ public static class PlatformEndpointRouteBuilderExtensions
         endpoints.MapVistaraDerivatives();
         endpoints.MapVistaraEventStream();
         endpoints.MapVistaraUploads();
-        endpoints.MapVistaraPlatformSurface();
         return endpoints;
     }
 }
