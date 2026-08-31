@@ -35,6 +35,11 @@ public sealed record PurgeRecoveryOptions
     }
 }
 
+/// <summary>
+/// An executing purge batch that has actually begun work and then stopped
+/// making progress. Staleness is measured from when execution started, not
+/// from when an operator requested the batch.
+/// </summary>
 public sealed record StalledPurgeBatch(Guid BatchId, DateTimeOffset StartedAtUtc);
 
 public interface IPurgeRecoveryStatePort
@@ -231,20 +236,27 @@ internal sealed class RelationalPurgeRecoveryStateAdapter(
             int batchSize,
             CancellationToken cancellationToken)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(batchSize);
         _tenantScope.Establish(tenantId);
-        List<PurgeBatchRow> rows = await _context.PurgeBatches
+        var rows = await _context.PurgeBatches
             .AsNoTracking()
             .Where(row =>
                 row.State == ExecutingState &&
-                row.RequestedAtUtc <= stalledBeforeUtc)
-            .OrderBy(row => row.RequestedAtUtc)
+                row.StartedAtUtc != null &&
+                row.StartedAtUtc <= stalledBeforeUtc)
+            .OrderBy(row => row.StartedAtUtc)
             .ThenBy(row => row.Id)
             .Take(batchSize)
-            .ToListAsync(cancellationToken);
+            .Select(row => new
+            {
+                row.Id,
+                StartedAtUtc = row.StartedAtUtc!.Value,
+            })
+            .ToArrayAsync(cancellationToken);
         return
         [
             .. rows.Select(row =>
-                new StalledPurgeBatch(row.Id, row.RequestedAtUtc)),
+                new StalledPurgeBatch(row.Id, row.StartedAtUtc)),
         ];
     }
 }
