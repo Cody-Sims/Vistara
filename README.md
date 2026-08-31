@@ -282,9 +282,11 @@ path.
 
 ## Screenshots
 
-Not yet captured. Add gallery, viewer, upload, share, and administration
-screenshots here before the first tagged release, and store the images under a
-`docs/` asset directory rather than linking to external hosts.
+None are committed yet, and none are required to tag a release. Gallery,
+viewer, upload, share, and administration screenshots are captured as review
+evidence on the release pull request. Committing a set here later is optional
+follow-up work; when it happens, store the images under a `docs/` asset
+directory rather than linking to external hosts.
 
 ## Documentation
 

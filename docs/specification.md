@@ -7,11 +7,13 @@
 **Implementation baseline:** .NET 10 LTS
 
 **Implementation status:** the version 0.1 scope in section 4 is implemented on
-`main`, and section 16 carries a per-wave status marker. Section 13 and the
-Wave 8 AI tasks describe a future architecture; no AI capability exists in the
-codebase. Nothing in `docs/future-ideas/` — AI metadata and editing, a Model
-Context Protocol server, or cloud imports — is implemented or scheduled. The
-shipped capabilities are summarized in `README.md` and `docs/release-notes.md`.
+`dev` and staged in pull request #2 for the 0.1.0 tag; it counts as released
+only once that pull request merges and the tag is published. Section 16 carries
+a per-wave status marker. Section 13 and the Wave 8 AI tasks describe a future
+architecture; no AI capability exists in the codebase. Nothing in
+`docs/future-ideas/` — AI metadata and editing, a Model Context Protocol server,
+or cloud imports — is implemented or scheduled. The staged capabilities are
+summarized in `README.md` and `docs/release-notes.md`.
 
 ## 1. Executive product definition
 
@@ -123,9 +125,11 @@ Primary scenarios:
 
 ### MVP / version 0.1
 
-**Status: implemented.** Every item below exists on `main`. Its exact shape,
-the endpoints, presets, and configuration keys, and the caveats that remain are
-recorded in `README.md`, `docs/release-notes.md`, and
+**Status: implemented.** Every item below is implemented on `dev` and staged in
+pull request #2 for the 0.1.0 tag; none of it is released until that pull
+request merges and the tag is published. Its exact shape, the endpoints,
+presets, and configuration keys, and the caveats that remain are recorded in
+`README.md`, `docs/release-notes.md`, and
 `docs/security/admin-and-cloud-onboarding.md`.
 
 - .NET 10 API and worker.
@@ -1287,7 +1291,8 @@ Targets:
 Tasks may edit only their listed ownership paths. Shared root, composition, and generated files are reserved for integration tasks.
 
 **Status legend.** Each wave below carries a status line. *Complete* means the
-wave's outcomes exist on `main` and its verification commands are part of the
+wave's outcomes are implemented on `dev`, staged in pull request #2 for the
+0.1.0 tag, and covered by verification commands that are part of the
 repository's checks. *Not started* means no code for that wave exists. Waves 0A
 through 7 are complete; Wave 8 is not started.
 

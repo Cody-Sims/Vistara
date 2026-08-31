@@ -9,8 +9,10 @@ stable release tag and commit and should be deployed by digest.
 
 ## 0.1.0 — unreleased
 
-First complete release of the 0.1 scope. No Git tag has been published yet;
-this entry describes what is on `main` and ready to be tagged.
+First complete release of the 0.1 scope. It is implemented on `dev` and staged
+in pull request #2 for the 0.1.0 tag. Nothing here is released yet: this entry
+becomes the 0.1.0 release only after that pull request merges and the tag is
+published, at which point the heading gains its release date.
 
 ### Highlights
 
