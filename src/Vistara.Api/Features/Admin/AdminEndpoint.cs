@@ -140,12 +140,14 @@ public static class AdminEndpoint
         }
 
         UpdateTenantPolicyRequest? request;
+        JsonElement root;
         try
         {
-            request = await JsonSerializer.DeserializeAsync<UpdateTenantPolicyRequest>(
+            using JsonDocument document = await JsonDocument.ParseAsync(
                 context.Request.Body,
-                ResponseJsonOptions,
-                cancellationToken);
+                cancellationToken: cancellationToken);
+            root = document.RootElement.Clone();
+            request = root.Deserialize<UpdateTenantPolicyRequest>(ResponseJsonOptions);
         }
         catch (JsonException)
         {
@@ -181,9 +183,15 @@ public static class AdminEndpoint
                 request.Sharing?.PublicLinksEnabled,
                 request.Sharing?.MaxLinkLifetimeDays,
                 request.Sharing?.RequirePasswordForPublicLinks,
-                request.Quotas?.StorageBytes,
-                request.Quotas?.DailyTransformPixels,
-                request.Quotas?.ConcurrentUploads),
+                ReadQuota(root, "storageBytes", request.Quotas?.StorageBytes),
+                ReadQuota(
+                    root,
+                    "dailyTransformPixels",
+                    request.Quotas?.DailyTransformPixels),
+                ReadQuota(
+                    root,
+                    "concurrentUploads",
+                    request.Quotas?.ConcurrentUploads)),
             expected,
             cancellationToken);
         if (!updated.TryGetValue(out TenantPolicyView? view))
@@ -306,6 +314,28 @@ public static class AdminEndpoint
                     .ToArray(),
                 nextCursor),
             cancellationToken);
+    }
+
+    /// <summary>
+    /// Distinguishes an absent quota member from an explicit null, so a patch
+    /// that never mentions a quota cannot clear or zero it.
+    /// </summary>
+    internal static PatchValue<long?> ReadQuota(
+        JsonElement root,
+        string name,
+        long? parsed)
+    {
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty("quotas", out JsonElement quotas) ||
+            quotas.ValueKind != JsonValueKind.Object ||
+            !quotas.TryGetProperty(name, out JsonElement member))
+        {
+            return PatchValue.Absent<long?>();
+        }
+
+        return member.ValueKind == JsonValueKind.Null
+            ? PatchValue.Of<long?>(null)
+            : PatchValue.Of(parsed);
     }
 
     private static async ValueTask<long> CurrentVersionAsync(

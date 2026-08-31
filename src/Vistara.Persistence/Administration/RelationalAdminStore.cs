@@ -21,9 +21,9 @@ public sealed record PersistedTenantPolicy(
     bool PublicLinksEnabled,
     int MaxLinkLifetimeDays,
     bool RequirePasswordForPublicLinks,
-    long StorageBytes,
-    long DailyTransformPixels,
-    long ConcurrentUploads,
+    long? StorageBytes,
+    long? DailyTransformPixels,
+    long? ConcurrentUploads,
     long Version);
 
 public sealed record PersistedAuditEvent(
@@ -156,9 +156,12 @@ public sealed class RelationalAdminStore(VistaraDbContext context)
         sharing["requirePasswordForPublicLinks"] = desired.RequirePasswordForPublicLinks;
 
         JsonObject quotas = Parse(tenant.QuotasJson);
-        quotas["storedBytes"] = desired.StorageBytes;
-        quotas["transformations"] = desired.DailyTransformPixels;
-        quotas["concurrentUploads"] = desired.ConcurrentUploads;
+        // An absent quota means unlimited. Writing zero would tell the
+        // reservation path that nothing is allowed, so a cleared quota removes
+        // the member instead of synthesizing a limit.
+        Assign(quotas, "storedBytes", desired.StorageBytes);
+        Assign(quotas, "transformations", desired.DailyTransformPixels);
+        Assign(quotas, "concurrentUploads", desired.ConcurrentUploads);
 
         tenant.SettingsJson = settings.ToJsonString();
         tenant.QuotasJson = quotas.ToJsonString();
@@ -244,9 +247,9 @@ public sealed class RelationalAdminStore(VistaraDbContext context)
             ReadBool(sharing, "publicLinksEnabled", true),
             (int)ReadLong(sharing, "maxLinkLifetimeDays", DefaultMaxLinkLifetimeDays),
             ReadBool(sharing, "requirePasswordForPublicLinks", false),
-            ReadLong(quotas, "storedBytes", 0),
-            ReadLong(quotas, "transformations", 0),
-            ReadLong(quotas, "concurrentUploads", 0),
+            ReadOptionalLong(quotas, "storedBytes"),
+            ReadOptionalLong(quotas, "transformations"),
+            ReadOptionalLong(quotas, "concurrentUploads"),
             tenant.Version);
     }
 
@@ -278,6 +281,22 @@ public sealed class RelationalAdminStore(VistaraDbContext context)
         parent[name] = created;
         return created;
     }
+
+    private static void Assign(JsonObject target, string name, long? value)
+    {
+        if (value is { } assigned)
+        {
+            target[name] = assigned;
+            return;
+        }
+
+        target.Remove(name);
+    }
+
+    private static long? ReadOptionalLong(JsonObject source, string name) =>
+        source[name] is JsonValue value && value.TryGetValue(out long parsed) && parsed >= 0
+            ? parsed
+            : null;
 
     private static long ReadLong(JsonObject source, string name, long fallback) =>
         source[name] is JsonValue value && value.TryGetValue(out long parsed) && parsed >= 0

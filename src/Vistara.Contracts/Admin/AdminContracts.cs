@@ -33,10 +33,14 @@ public sealed record SharingPolicyResponse(
     [property: JsonPropertyName("maxLinkLifetimeDays")] int MaxLinkLifetimeDays,
     [property: JsonPropertyName("requirePasswordForPublicLinks")] bool RequirePasswordForPublicLinks);
 
+/// <summary>
+/// Tenant quota ceilings. A <c>null</c> member means the tenant has no limit
+/// for that dimension; zero would mean nothing is allowed.
+/// </summary>
 public sealed record QuotaPolicyResponse(
-    [property: JsonPropertyName("storageBytes")] long StorageBytes,
-    [property: JsonPropertyName("dailyTransformPixels")] long DailyTransformPixels,
-    [property: JsonPropertyName("concurrentUploads")] long ConcurrentUploads);
+    [property: JsonPropertyName("storageBytes")] long? StorageBytes,
+    [property: JsonPropertyName("dailyTransformPixels")] long? DailyTransformPixels,
+    [property: JsonPropertyName("concurrentUploads")] long? ConcurrentUploads);
 
 public sealed record TenantPolicyResponse(
     [property: JsonPropertyName("retention")] RetentionPolicyResponse Retention,
@@ -84,6 +88,10 @@ public sealed record SharingPolicyPatch(
     [property: JsonPropertyName("maxLinkLifetimeDays")] int? MaxLinkLifetimeDays,
     [property: JsonPropertyName("requirePasswordForPublicLinks")] bool? RequirePasswordForPublicLinks);
 
+/// <summary>
+/// Quota members are read with merge-patch semantics: an absent member is
+/// unchanged and an explicit <c>null</c> clears the limit.
+/// </summary>
 public sealed record QuotaPolicyPatch(
     [property: JsonPropertyName("storageBytes")] long? StorageBytes,
     [property: JsonPropertyName("dailyTransformPixels")] long? DailyTransformPixels,

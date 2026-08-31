@@ -31,6 +31,8 @@ internal sealed class PlatformAdminAdapter(
         PersistedTenantPolicy? policy =
             await store.ReadPolicyAsync(tenantId, cancellationToken);
         long quotaBytes = policy?.StorageBytes ?? 0;
+        // A bucket quota of zero on the wire means "not limited"; the policy
+        // document is the authority on whether a limit exists.
         (string status, string? message) =
             await ProbeAsync(cancellationToken);
         DateTimeOffset checkedAt = clock.UtcNow;
@@ -110,9 +112,9 @@ internal sealed class PlatformAdminAdapter(
             patch.PublicLinksEnabled ?? current.PublicLinksEnabled,
             patch.MaxLinkLifetimeDays ?? current.MaxLinkLifetimeDays,
             patch.RequirePasswordForPublicLinks ?? current.RequirePasswordForPublicLinks,
-            patch.StorageBytes ?? current.StorageBytes,
-            patch.DailyTransformPixels ?? current.DailyTransformPixels,
-            patch.ConcurrentUploads ?? current.ConcurrentUploads,
+            Merge(patch.StorageBytes, current.StorageBytes),
+            Merge(patch.DailyTransformPixels, current.DailyTransformPixels),
+            Merge(patch.ConcurrentUploads, current.ConcurrentUploads),
             current.Version);
         if (Validate(desired) is { } invalid)
         {
@@ -145,10 +147,7 @@ internal sealed class PlatformAdminAdapter(
             AuditField.Plain(
                 "publicLinksEnabled",
                 desired.PublicLinksEnabled ? "true" : "false"),
-            AuditField.Plain(
-                "storedBytes",
-                desired.StorageBytes.ToString(
-                    System.Globalization.CultureInfo.InvariantCulture)),
+            AuditField.Plain("storedBytes", Describe(desired.StorageBytes)),
         ]);
         await audit.AppendAsync(
             new AuditRecord(
@@ -207,8 +206,8 @@ internal sealed class PlatformAdminAdapter(
                 "Retention and link lifetimes must be between one and 3650 days.");
         }
 
-        if (policy.StorageBytes < 0 ||
-            policy.DailyTransformPixels < 0 ||
+        if (policy.StorageBytes is < 0 ||
+            policy.DailyTransformPixels is < 0 ||
             policy.ConcurrentUploads is < 0 or > 1_000)
         {
             return ResultError.Validation(
@@ -218,6 +217,13 @@ internal sealed class PlatformAdminAdapter(
 
         return null;
     }
+
+    private static long? Merge(Api.Features.Account.PatchValue<long?> patch, long? current) =>
+        patch.IsPresent ? patch.Value : current;
+
+    private static string Describe(long? value) =>
+        value?.ToString(System.Globalization.CultureInfo.InvariantCulture) ??
+        "unlimited";
 
     internal static string DescribeKind(string provider) =>
         provider switch

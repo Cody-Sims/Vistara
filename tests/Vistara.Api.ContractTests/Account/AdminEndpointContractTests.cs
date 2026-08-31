@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Vistara.Api.Features.Account;
 using Vistara.Api.Features.Admin;
 using Vistara.Domain.Common;
 using Xunit;
@@ -105,6 +106,10 @@ public sealed class AdminEndpointContractTests
             4,
             json.RootElement.GetProperty("quotas")
                 .GetProperty("concurrentUploads").GetInt64());
+        Assert.Equal(
+            JsonValueKind.Null,
+            json.RootElement.GetProperty("quotas")
+                .GetProperty("dailyTransformPixels").ValueKind);
         Assert.Equal(7, json.RootElement.GetProperty("version").GetInt64());
     }
 
@@ -124,9 +129,47 @@ public sealed class AdminEndpointContractTests
         Assert.Equal(7, admin.ExpectedVersion);
         Assert.NotNull(admin.Patch);
         Assert.Equal(14, admin.Patch.TrashRetentionDays);
-        Assert.Equal(8, admin.Patch.ConcurrentUploads);
+        Assert.True(admin.Patch.ConcurrentUploads.IsPresent);
+        Assert.Equal(8, admin.Patch.ConcurrentUploads.Value);
+        Assert.False(admin.Patch.StorageBytes.IsPresent);
         Assert.Null(admin.Patch.PurgeGraceDays);
         Assert.Equal(UserId, admin.ActorUserId);
+    }
+
+    [Fact]
+    public async Task An_explicit_null_quota_is_forwarded_as_a_cleared_limit()
+    {
+        var admin = new FakeAdminPort();
+
+        TestResponse response = await SendAsync(
+            "policies-patch",
+            admin,
+            body: """{"quotas":{"storageBytes":null}}""",
+            ifMatch: "\"v7\"");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(admin.Patch);
+        Assert.True(admin.Patch.StorageBytes.IsPresent);
+        Assert.Null(admin.Patch.StorageBytes.Value);
+        Assert.False(admin.Patch.ConcurrentUploads.IsPresent);
+    }
+
+    [Fact]
+    public async Task A_retention_only_patch_never_mentions_a_quota()
+    {
+        var admin = new FakeAdminPort();
+
+        TestResponse response = await SendAsync(
+            "policies-patch",
+            admin,
+            body: """{"retention":{"trashRetentionDays":21}}""",
+            ifMatch: "\"v7\"");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(admin.Patch);
+        Assert.False(admin.Patch.StorageBytes.IsPresent);
+        Assert.False(admin.Patch.DailyTransformPixels.IsPresent);
+        Assert.False(admin.Patch.ConcurrentUploads.IsPresent);
     }
 
     [Fact]
@@ -388,7 +431,7 @@ public sealed class AdminEndpointContractTests
             Guid tenantId,
             CancellationToken cancellationToken) =>
             ValueTask.FromResult(Result.Success(
-                new TenantPolicyView(30, 7, true, 30, false, 1_000_000, 0, 4, 7)));
+                new TenantPolicyView(30, 7, true, 30, false, 1_000_000, null, 4, 7)));
 
         public ValueTask<Result<TenantPolicyView>> UpdatePolicyAsync(
             Guid tenantId,
@@ -407,9 +450,13 @@ public sealed class AdminEndpointContractTests
                     patch.PublicLinksEnabled ?? true,
                     patch.MaxLinkLifetimeDays ?? 30,
                     patch.RequirePasswordForPublicLinks ?? false,
-                    patch.StorageBytes ?? 1_000_000,
-                    patch.DailyTransformPixels ?? 0,
-                    patch.ConcurrentUploads ?? 4,
+                    patch.StorageBytes.IsPresent ? patch.StorageBytes.Value : 1_000_000,
+                    patch.DailyTransformPixels.IsPresent
+                        ? patch.DailyTransformPixels.Value
+                        : null,
+                    patch.ConcurrentUploads.IsPresent
+                        ? patch.ConcurrentUploads.Value
+                        : 4,
                     expectedVersion + 1)));
         }
 

@@ -65,7 +65,7 @@ public sealed class AdminAdministrationTests
         Assert.Equal(30, view.TrashRetentionDays);
         Assert.Equal(7, view.PurgeGraceDays);
         Assert.True(view.PublicLinksEnabled);
-        Assert.Equal(0, view.StorageBytes);
+        Assert.Null(view.StorageBytes);
         Assert.Equal(1, view.Version);
     }
 
@@ -79,7 +79,7 @@ public sealed class AdminAdministrationTests
         Result<TenantPolicyView> updated = await PatchPolicyAsync(
             harness,
             owner,
-            new TenantPolicyPatch(14, 3, false, 7, true, 5_000, 9_000, 6),
+            new TenantPolicyPatch(14, 3, false, 7, true, PatchValue.Of<long?>(5_000), PatchValue.Of<long?>(9_000), PatchValue.Of<long?>(6)),
             1);
 
         Assert.True(updated.TryGetValue(out TenantPolicyView? view));
@@ -109,7 +109,7 @@ public sealed class AdminAdministrationTests
         await PatchPolicyAsync(
             harness,
             owner,
-            new TenantPolicyPatch(null, null, null, null, null, 42, null, null),
+            new TenantPolicyPatch(null, null, null, null, null, PatchValue.Of<long?>(42), PatchValue.Absent<long?>(), PatchValue.Absent<long?>()),
             2);
 
         await using VistaraDbContext read = harness.CreateContext(owner.TenantId);
@@ -131,13 +131,13 @@ public sealed class AdminAdministrationTests
         await PatchPolicyAsync(
             harness,
             owner,
-            new TenantPolicyPatch(14, null, null, null, null, null, null, null),
+            new TenantPolicyPatch(14, null, null, null, null, PatchValue.Absent<long?>(), PatchValue.Absent<long?>(), PatchValue.Absent<long?>()),
             1);
 
         Result<TenantPolicyView> stale = await PatchPolicyAsync(
             harness,
             owner,
-            new TenantPolicyPatch(21, null, null, null, null, null, null, null),
+            new TenantPolicyPatch(21, null, null, null, null, PatchValue.Absent<long?>(), PatchValue.Absent<long?>(), PatchValue.Absent<long?>()),
             1);
 
         Assert.True(stale.IsFailure);
@@ -167,9 +167,11 @@ public sealed class AdminAdministrationTests
                 null,
                 linkLifetimeDays,
                 null,
-                storageBytes,
-                null,
-                null),
+                storageBytes is null
+                    ? PatchValue.Absent<long?>()
+                    : PatchValue.Of<long?>(storageBytes),
+                PatchValue.Absent<long?>(),
+                PatchValue.Absent<long?>()),
             1);
 
         Assert.True(updated.IsFailure);
@@ -185,12 +187,12 @@ public sealed class AdminAdministrationTests
         await PatchPolicyAsync(
             harness,
             owner,
-            new TenantPolicyPatch(14, null, null, null, null, null, null, null),
+            new TenantPolicyPatch(14, null, null, null, null, PatchValue.Absent<long?>(), PatchValue.Absent<long?>(), PatchValue.Absent<long?>()),
             1);
         await PatchPolicyAsync(
             harness,
             owner,
-            new TenantPolicyPatch(21, null, null, null, null, null, null, null),
+            new TenantPolicyPatch(21, null, null, null, null, PatchValue.Absent<long?>(), PatchValue.Absent<long?>(), PatchValue.Absent<long?>()),
             2);
 
         AuditPage first = await ReadAuditAsync(harness, owner.TenantId, limit: 1);
@@ -218,7 +220,7 @@ public sealed class AdminAdministrationTests
         await PatchPolicyAsync(
             harness,
             owner,
-            new TenantPolicyPatch(14, null, null, null, null, null, null, null),
+            new TenantPolicyPatch(14, null, null, null, null, PatchValue.Absent<long?>(), PatchValue.Absent<long?>(), PatchValue.Absent<long?>()),
             1);
 
         AuditPage matching = await ReadAuditAsync(

@@ -1,3 +1,4 @@
+using Vistara.Api.Features.Account;
 using Vistara.Domain.Common;
 
 namespace Vistara.Api.Features.Admin;
@@ -26,20 +27,25 @@ public sealed record TenantPolicyView(
     bool PublicLinksEnabled,
     int MaxLinkLifetimeDays,
     bool RequirePasswordForPublicLinks,
-    long StorageBytes,
-    long DailyTransformPixels,
-    long ConcurrentUploads,
+    long? StorageBytes,
+    long? DailyTransformPixels,
+    long? ConcurrentUploads,
     long Version);
 
+/// <summary>
+/// A merge patch of the policy groups. A quota is <see cref="PatchValue{T}"/>
+/// so an absent member stays unchanged while an explicit JSON null clears the
+/// limit and restores unlimited.
+/// </summary>
 public sealed record TenantPolicyPatch(
     int? TrashRetentionDays,
     int? PurgeGraceDays,
     bool? PublicLinksEnabled,
     int? MaxLinkLifetimeDays,
     bool? RequirePasswordForPublicLinks,
-    long? StorageBytes,
-    long? DailyTransformPixels,
-    long? ConcurrentUploads);
+    PatchValue<long?> StorageBytes,
+    PatchValue<long?> DailyTransformPixels,
+    PatchValue<long?> ConcurrentUploads);
 
 public sealed record AuditEventView(
     Guid Id,
