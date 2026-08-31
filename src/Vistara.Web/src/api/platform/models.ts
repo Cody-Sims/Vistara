@@ -190,12 +190,13 @@ export interface UpdateTenantMemberRequest {
   readonly status?: MembershipStatus;
 }
 
+/** Published job states; filters accept these spellings. */
 export type JobState =
-  | 'Pending'
-  | 'Leased'
-  | 'RetryScheduled'
-  | 'Completed'
-  | 'DeadLettered';
+  | 'pending'
+  | 'leased'
+  | 'retryScheduled'
+  | 'completed'
+  | 'deadLettered';
 
 export interface JobQuery {
   readonly states?: readonly JobState[];
@@ -214,10 +215,16 @@ export interface JobFailure {
   readonly summary: string;
 }
 
+/** Operator actions this release can apply to a job. */
+export interface JobActions {
+  readonly retry: boolean;
+  readonly cancel: boolean;
+}
+
 export interface JobStatus {
   readonly id: Uuid;
   readonly type: string;
-  readonly state: string;
+  readonly state: JobState;
   readonly attempts: number;
   readonly maxAttempts: number;
   readonly createdAt: UtcDateTime;
@@ -225,6 +232,7 @@ export interface JobStatus {
   readonly completedAt?: UtcDateTime;
   readonly failure?: JobFailure;
   readonly version: ResourceVersion;
+  readonly actions: JobActions;
 }
 
 /** Response of `GET /api/v1/setup`; tells the browser whether first run is open. */
@@ -274,6 +282,15 @@ export interface StorageSummary {
 export type StorageProviderKind = 'filesystem' | 'azureBlob' | 's3';
 
 /**
+ * `managedIdentity` submits no secret and is the recommended default; the
+ * other two are bounded ephemeral secrets used for one throwaway client.
+ */
+export type AzureCredentialKind =
+  | 'managedIdentity'
+  | 'accountKey'
+  | 'sasToken';
+
+/**
  * A candidate storage configuration. Secrets are only ever held in memory for
  * the length of one validation request and are never persisted anywhere.
  */
@@ -286,24 +303,45 @@ export interface StorageValidationRequest {
     readonly accountName: string;
     readonly container: string;
     readonly endpointSuffix?: string;
-    readonly credentialKind: 'accountKey' | 'sasToken';
+    readonly credentialKind: AzureCredentialKind;
+    /** Required for `accountKey`; never sent for `managedIdentity`. */
     readonly accountKey?: string;
+    /** Required for `sasToken`; never sent for `managedIdentity`. */
     readonly sasToken?: string;
   };
   readonly s3?: {
     readonly endpoint: string;
     readonly region: string;
     readonly bucket: string;
-    readonly accessKeyId: string;
-    readonly secretAccessKey: string;
     readonly forcePathStyle: boolean;
+    /** Sent with `secretAccessKey`, or both omitted for an anonymous client. */
+    readonly accessKeyId?: string;
+    readonly secretAccessKey?: string;
+    /** Only valid alongside an access key. */
+    readonly sessionToken?: string;
   };
 }
 
 export type StorageCheckStatus = 'passed' | 'failed' | 'skipped';
 
+/** The five checks a validation always answers with, in this order. */
+export type StorageCheckId =
+  | 'reachable'
+  | 'authenticated'
+  | 'read'
+  | 'write'
+  | 'delete';
+
+export const storageCheckOrder: readonly StorageCheckId[] = [
+  'reachable',
+  'authenticated',
+  'read',
+  'write',
+  'delete',
+];
+
 export interface StorageValidationCheck {
-  readonly id: 'reachable' | 'authenticated' | 'read' | 'write' | 'delete';
+  readonly id: StorageCheckId;
   readonly status: StorageCheckStatus;
   /** Redacted, human-readable outcome; never contains a submitted secret. */
   readonly detail?: string;
@@ -312,7 +350,7 @@ export interface StorageValidationCheck {
 /** Response of `GET /api/v1/admin/storage/validate`; no credential involved. */
 export interface StorageValidationSupport {
   readonly supported: boolean;
-  readonly providers?: readonly StorageProviderKind[];
+  readonly providers: readonly StorageProviderKind[];
 }
 
 export interface StorageValidationResponse {
@@ -320,4 +358,29 @@ export interface StorageValidationResponse {
   readonly provider: StorageProviderKind;
   readonly checks: readonly StorageValidationCheck[];
   readonly message?: string;
+}
+
+export interface RetentionPolicies {
+  readonly trashRetentionDays: number;
+  readonly purgeGraceDays: number;
+}
+
+export interface SharingPolicies {
+  readonly publicLinksEnabled: boolean;
+  readonly maxLinkLifetimeDays: number;
+  readonly requirePasswordForPublicLinks: boolean;
+}
+
+/** A `null` quota means the tenant has no limit; zero would allow nothing. */
+export interface QuotaPolicies {
+  readonly storageBytes: number | null;
+  readonly dailyTransformPixels: number | null;
+  readonly concurrentUploads: number | null;
+}
+
+export interface TenantPolicies {
+  readonly retention: RetentionPolicies;
+  readonly sharing: SharingPolicies;
+  readonly quotas: QuotaPolicies;
+  readonly version: ResourceVersion;
 }

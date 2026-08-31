@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { VistaraApiError } from '../generated/client';
 import { isStaleVersion, isStateConflict, versionTag } from '../versionTag';
+import { describeRetryAfter, VistaraThrottledError } from './throttling';
 import { PlatformApiClient } from './platformClient';
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
@@ -235,12 +236,13 @@ describe('platform tenant administration client', () => {
       jsonResponse({
         id: 'job-1',
         type: 'derivatives',
-        state: 'Failed',
+        state: 'deadLettered',
         attempts: 3,
         maxAttempts: 5,
         createdAt: '2026-02-01T00:00:00Z',
         availableAt: '2026-02-01T00:05:00Z',
         version: 4,
+        actions: { retry: true, cancel: false },
       }),
     );
     const client = new PlatformApiClient({ fetch });
@@ -248,7 +250,8 @@ describe('platform tenant administration client', () => {
     const job = await client.getJob('job/1');
 
     expect(fetch.mock.calls[0]![0]).toBe('/api/v1/jobs/job%2F1');
-    expect(job.state).toBe('Failed');
+    expect(job.state).toBe('deadLettered');
+    expect(job.actions).toEqual({ retry: true, cancel: false });
   });
 
   it('exposes only the routes the API branch publishes', () => {
@@ -264,6 +267,7 @@ describe('platform tenant administration client', () => {
         'createApiKey',
         'getCapabilities',
         'getJob',
+        'getPolicies',
         'getPreferences',
         'getSession',
         'getSetupState',
@@ -396,13 +400,13 @@ describe('versioned platform edits', () => {
     const client = new PlatformApiClient({ fetch });
 
     await client.listJobs({
-      states: ['DeadLettered', 'RetryScheduled'],
+      states: ['deadLettered', 'retryScheduled'],
       limit: 25,
     });
     await client.retryJob('job-1', { ifMatch: versionTag(2) });
 
     expect(fetch.mock.calls[0]![0]).toBe(
-      '/api/v1/jobs?states=DeadLettered&states=RetryScheduled&limit=25',
+      '/api/v1/jobs?states=deadLettered&states=retryScheduled&limit=25',
     );
     expect(fetch.mock.calls[2]![0]).toBe('/api/v1/jobs/job-1/retry');
     expect(
@@ -529,6 +533,118 @@ describe('storage administration client', () => {
     expect(String(init?.body)).toContain('super-secret-value');
     expect(result.valid).toBe(true);
     expect(JSON.stringify(client)).not.toContain('super-secret-value');
+  });
+});
+
+describe('throttling and cancellation', () => {
+  it('reads Retry-After from a throttled setup probe', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      new Response(
+        JSON.stringify({
+          type: 'about:blank',
+          title: 'setup.throttled',
+          status: 429,
+          code: 'setup.throttled',
+          errors: {},
+        }),
+        {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/problem+json',
+            'Retry-After': '30',
+          },
+        },
+      ),
+    );
+    const client = new PlatformApiClient({ fetch });
+
+    const error = await client
+      .getSetupState()
+      .catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(VistaraThrottledError);
+    expect((error as VistaraThrottledError).retryAfterSeconds).toBe(30);
+    expect((error as VistaraThrottledError).problem.code).toBe(
+      'setup.throttled',
+    );
+  });
+
+  it('describes a wait for a screen reader', () => {
+    expect(describeRetryAfter(undefined)).toContain('Wait a moment');
+    expect(describeRetryAfter(1)).toContain('a second');
+    expect(describeRetryAfter(30)).toContain('30 seconds');
+    expect(describeRetryAfter(240)).toContain('4 minutes');
+  });
+
+  it('passes an abort signal through to the validation request', async () => {
+    const controller = new AbortController();
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      jsonResponse({ supported: true, providers: ['s3'] }),
+    );
+    const client = new PlatformApiClient({ fetch });
+
+    await client.validateStorage(
+      { provider: 'filesystem', filesystem: { rootPath: '/srv/media' } },
+      { signal: controller.signal },
+    );
+
+    expect(fetch.mock.calls.at(-1)?.[1]?.signal).toBe(controller.signal);
+  });
+});
+
+describe('candidate storage credentials', () => {
+  it('sends an Azure managed identity without any secret member', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(jsonResponse(currentUser))
+      .mockResolvedValueOnce(
+        jsonResponse({ valid: true, provider: 'azureBlob', checks: [] }),
+      );
+    const client = new PlatformApiClient({ fetch });
+
+    await client.validateStorage({
+      provider: 'azureBlob',
+      azureBlob: {
+        accountName: 'vistaramedia',
+        container: 'originals',
+        credentialKind: 'managedIdentity',
+      },
+    });
+
+    const body = JSON.parse(String(fetch.mock.calls[1]![1]?.body)) as {
+      azureBlob: Record<string, unknown>;
+    };
+    expect(body.azureBlob.credentialKind).toBe('managedIdentity');
+    expect(body.azureBlob).not.toHaveProperty('accountKey');
+    expect(body.azureBlob).not.toHaveProperty('sasToken');
+  });
+
+  it('sends an S3 session token alongside the access key', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(jsonResponse(currentUser))
+      .mockResolvedValueOnce(
+        jsonResponse({ valid: true, provider: 's3', checks: [] }),
+      );
+    const client = new PlatformApiClient({ fetch });
+
+    await client.validateStorage({
+      provider: 's3',
+      s3: {
+        endpoint: 'https://s3.example',
+        region: 'eu-central-1',
+        bucket: 'vistara-media',
+        forcePathStyle: true,
+        accessKeyId: 'AKIAEXAMPLE',
+        secretAccessKey: 'secret-value',
+        sessionToken: 'session-value',
+      },
+    });
+
+    const body = JSON.parse(String(fetch.mock.calls[1]![1]?.body)) as {
+      s3: Record<string, unknown>;
+    };
+    expect(body.s3.sessionToken).toBe('session-value');
   });
 });
 

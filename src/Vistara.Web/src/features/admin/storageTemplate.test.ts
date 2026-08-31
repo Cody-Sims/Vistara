@@ -44,6 +44,7 @@ function s3Draft(): StorageDraft {
       bucket: 'vistara-media',
       accessKeyId: 'AKIAEXAMPLE',
       secretAccessKey: s3Secret,
+      sessionToken: '',
       forcePathStyle: true,
     },
   };
@@ -162,12 +163,124 @@ describe('validation request', () => {
       forcePathStyle: true,
     });
   });
+
+  it('sends a managed identity with no secret member at all', () => {
+    const draft = azureDraft();
+    const request = buildValidationRequest({
+      ...draft,
+      azureBlob: {
+        ...draft.azureBlob,
+        credentialKind: 'managedIdentity',
+        accountKey: '',
+      },
+    });
+
+    expect(request.azureBlob).toEqual({
+      accountName: 'vistaramedia',
+      container: 'originals',
+      credentialKind: 'managedIdentity',
+    });
+  });
+
+  it('sends an optional session token only with an access key', () => {
+    const draft = s3Draft();
+    const withToken = buildValidationRequest({
+      ...draft,
+      s3: { ...draft.s3, sessionToken: 'session-value' },
+    });
+
+    expect(withToken.s3?.sessionToken).toBe('session-value');
+
+    const anonymous = buildValidationRequest({
+      ...draft,
+      s3: {
+        ...draft.s3,
+        accessKeyId: '',
+        secretAccessKey: '',
+        sessionToken: '',
+      },
+    });
+
+    expect(anonymous.s3).toEqual({
+      endpoint: 'https://s3.eu-central-1.example',
+      region: 'eu-central-1',
+      bucket: 'vistara-media',
+      forcePathStyle: true,
+    });
+  });
 });
 
 describe('browser-side checks', () => {
   it('accepts a complete configuration', () => {
     expect(checkStorageDraft(azureDraft())).toEqual([]);
     expect(checkStorageDraft(s3Draft())).toEqual([]);
+  });
+
+  it('needs no credential for a managed identity', () => {
+    const draft = azureDraft();
+
+    expect(
+      checkStorageDraft({
+        ...draft,
+        azureBlob: {
+          ...draft.azureBlob,
+          credentialKind: 'managedIdentity',
+          accountKey: '',
+        },
+      }),
+    ).toEqual([]);
+  });
+
+  it('accepts an S3 candidate with no key at all', () => {
+    const draft = s3Draft();
+
+    expect(
+      checkStorageDraft({
+        ...draft,
+        s3: { ...draft.s3, accessKeyId: '', secretAccessKey: '' },
+      }),
+    ).toEqual([]);
+  });
+
+  it('requires both key members together and a token beside them', () => {
+    const draft = s3Draft();
+
+    expect(
+      checkStorageDraft({
+        ...draft,
+        s3: { ...draft.s3, secretAccessKey: '' },
+      }).map((problem) => problem.field),
+    ).toEqual(['s3.secretAccessKey']);
+    expect(
+      checkStorageDraft({
+        ...draft,
+        s3: { ...draft.s3, accessKeyId: '' },
+      }).map((problem) => problem.field),
+    ).toEqual(['s3.accessKeyId']);
+    expect(
+      checkStorageDraft({
+        ...draft,
+        s3: {
+          ...draft.s3,
+          accessKeyId: '',
+          secretAccessKey: '',
+          sessionToken: 'session-value',
+        },
+      }).map((problem) => problem.field),
+    ).toEqual(['s3.sessionToken']);
+  });
+
+  it('redacts a session token in the template', () => {
+    const draft = s3Draft();
+    const template = buildDeployTemplate({
+      ...draft,
+      s3: { ...draft.s3, sessionToken: 'session-value' },
+    });
+
+    expect(template.contents).toContain(
+      'VISTARA_STORAGE__S3__SESSION_TOKEN=${VISTARA_S3_SESSION_TOKEN}',
+    );
+    expect(template.contents).not.toContain('session-value');
   });
 
   it('applies Azure naming rules before any credential is sent', () => {
@@ -216,6 +329,7 @@ describe('browser-side checks', () => {
         bucket: 'A',
         accessKeyId: '',
         secretAccessKey: '',
+        sessionToken: '',
         forcePathStyle: false,
       },
     });
@@ -224,8 +338,6 @@ describe('browser-side checks', () => {
       's3.endpoint',
       's3.region',
       's3.bucket',
-      's3.accessKeyId',
-      's3.secretAccessKey',
     ]);
   });
 

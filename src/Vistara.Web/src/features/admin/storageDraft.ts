@@ -1,4 +1,7 @@
-import type { StorageProviderKind } from '../../api/platform';
+import type {
+  AzureCredentialKind,
+  StorageProviderKind,
+} from '../../api/platform';
 
 export interface FilesystemDraft {
   readonly rootPath: string;
@@ -10,7 +13,7 @@ export interface AzureBlobDraft {
   readonly accountName: string;
   readonly container: string;
   readonly endpointSuffix: string;
-  readonly credentialKind: 'accountKey' | 'sasToken';
+  readonly credentialKind: AzureCredentialKind;
   readonly accountKey: string;
   readonly sasToken: string;
 }
@@ -21,6 +24,7 @@ export interface S3Draft {
   readonly bucket: string;
   readonly accessKeyId: string;
   readonly secretAccessKey: string;
+  readonly sessionToken: string;
   readonly forcePathStyle: boolean;
 }
 
@@ -40,7 +44,8 @@ export const emptyStorageDraft: StorageDraft = {
     accountName: '',
     container: '',
     endpointSuffix: '',
-    credentialKind: 'accountKey',
+    // A managed identity needs no secret, so it is the safe default.
+    credentialKind: 'managedIdentity',
     accountKey: '',
     sasToken: '',
   },
@@ -50,6 +55,7 @@ export const emptyStorageDraft: StorageDraft = {
     bucket: '',
     accessKeyId: '',
     secretAccessKey: '',
+    sessionToken: '',
     forcePathStyle: true,
   },
 };
@@ -60,6 +66,7 @@ export const secretFields = [
   'azureBlob.sasToken',
   's3.accessKeyId',
   's3.secretAccessKey',
+  's3.sessionToken',
 ] as const;
 
 const listeners = new Set<() => void>();
@@ -105,6 +112,7 @@ export function storageDraftSecrets(): readonly string[] {
     draft.azureBlob.sasToken,
     draft.s3.accessKeyId,
     draft.s3.secretAccessKey,
+    draft.s3.sessionToken,
   ].filter(Boolean);
 }
 

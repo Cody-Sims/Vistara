@@ -11,6 +11,7 @@ const placeholders: Record<string, string> = {
   azureSasToken: '${VISTARA_AZURE_SAS_TOKEN}',
   s3AccessKeyId: '${VISTARA_S3_ACCESS_KEY_ID}',
   s3SecretAccessKey: '${VISTARA_S3_SECRET_ACCESS_KEY}',
+  s3SessionToken: '${VISTARA_S3_SESSION_TOKEN}',
 };
 
 /**
@@ -19,7 +20,10 @@ const placeholders: Record<string, string> = {
  * into a ticket, a screenshot, or a pull request.
  */
 export function buildDeployTemplate(draft: StorageDraft): DeployTemplate {
-  const carriesSecret = draft.provider !== 'filesystem';
+  const carriesSecret =
+    (draft.provider === 'azureBlob' &&
+      draft.azureBlob.credentialKind !== 'managedIdentity') ||
+    (draft.provider === 's3' && draft.s3.accessKeyId.length > 0);
   const lines: string[] = [
     '# Vistara storage configuration',
     '# Apply these values on the server, then restart the API and worker so',
@@ -54,11 +58,28 @@ export function buildDeployTemplate(draft: StorageDraft): DeployTemplate {
     }
 
     lines.push(
-      azure.credentialKind === 'sasToken'
-        ? `VISTARA_STORAGE__AZURE__SAS_TOKEN=${placeholders.azureSasToken}`
-        : `VISTARA_STORAGE__AZURE__ACCOUNT_KEY=${placeholders.azureAccountKey}`,
+      `VISTARA_STORAGE__AZURE__CREDENTIAL_KIND=${azure.credentialKind}`,
+    );
+    if (azure.credentialKind === 'accountKey') {
+      lines.push(
+        `VISTARA_STORAGE__AZURE__ACCOUNT_KEY=${placeholders.azureAccountKey}`,
+      );
+    }
+
+    if (azure.credentialKind === 'sasToken') {
+      lines.push(
+        `VISTARA_STORAGE__AZURE__SAS_TOKEN=${placeholders.azureSasToken}`,
+      );
+    }
+
+    lines.push(
       '',
-      '# Least privilege: grant only this container, not the whole account.',
+      azure.credentialKind === 'managedIdentity'
+        ? '# A managed identity needs no secret here. Grant it the Storage Blob'
+        : '# Least privilege: grant only this container, not the whole account.',
+      ...(azure.credentialKind === 'managedIdentity'
+        ? ['# Data Contributor role on this container only.']
+        : []),
     );
     if (azure.subscriptionId || azure.resourceGroup) {
       lines.push(
@@ -79,8 +100,19 @@ export function buildDeployTemplate(draft: StorageDraft): DeployTemplate {
       `VISTARA_STORAGE__S3__REGION=${s3.region}`,
       `VISTARA_STORAGE__S3__BUCKET=${s3.bucket}`,
       `VISTARA_STORAGE__S3__FORCE_PATH_STYLE=${String(s3.forcePathStyle)}`,
-      `VISTARA_STORAGE__S3__ACCESS_KEY_ID=${placeholders.s3AccessKeyId}`,
-      `VISTARA_STORAGE__S3__SECRET_ACCESS_KEY=${placeholders.s3SecretAccessKey}`,
+      ...(s3.accessKeyId
+        ? [
+            `VISTARA_STORAGE__S3__ACCESS_KEY_ID=${placeholders.s3AccessKeyId}`,
+            `VISTARA_STORAGE__S3__SECRET_ACCESS_KEY=${placeholders.s3SecretAccessKey}`,
+            ...(s3.sessionToken
+              ? [
+                  `VISTARA_STORAGE__S3__SESSION_TOKEN=${placeholders.s3SessionToken}`,
+                ]
+              : []),
+          ]
+        : [
+            '# No static key: the deployment uses the instance or workload role.',
+          ]),
       '',
       '# Least privilege: limit the policy to this bucket and the actions',
       '# s3:GetObject, s3:PutObject, s3:DeleteObject, s3:AbortMultipartUpload,',
@@ -118,20 +150,31 @@ export function buildValidationRequest(
         credentialKind: azure.credentialKind,
         ...(azure.credentialKind === 'accountKey'
           ? { accountKey: azure.accountKey }
-          : { sasToken: azure.sasToken }),
+          : {}),
+        ...(azure.credentialKind === 'sasToken'
+          ? { sasToken: azure.sasToken }
+          : {}),
       },
     };
   }
 
+  const s3 = draft.s3;
   return {
     provider: 's3',
     s3: {
-      endpoint: draft.s3.endpoint.trim(),
-      region: draft.s3.region.trim(),
-      bucket: draft.s3.bucket.trim(),
-      accessKeyId: draft.s3.accessKeyId,
-      secretAccessKey: draft.s3.secretAccessKey,
-      forcePathStyle: draft.s3.forcePathStyle,
+      endpoint: s3.endpoint.trim(),
+      region: s3.region.trim(),
+      bucket: s3.bucket.trim(),
+      forcePathStyle: s3.forcePathStyle,
+      // Both key members travel together, or neither does; the API reads that
+      // as a request for an anonymous client.
+      ...(s3.accessKeyId
+        ? {
+            accessKeyId: s3.accessKeyId,
+            secretAccessKey: s3.secretAccessKey,
+            ...(s3.sessionToken ? { sessionToken: s3.sessionToken } : {}),
+          }
+        : {}),
     },
   };
 }
@@ -236,17 +279,26 @@ export function checkStorageDraft(
     });
   }
 
-  if (requireCredentials && !s3.accessKeyId) {
+  // Keys are optional: omitting both asks for an anonymous client, which the
+  // deployment only honours for an endpoint host it already trusts.
+  if (s3.accessKeyId && !s3.secretAccessKey) {
     problems.push({
-      field: 's3.accessKeyId',
-      message: 'Enter the access key ID for the least-privilege user.',
+      field: 's3.secretAccessKey',
+      message: 'Enter the secret access key that belongs to this access key ID.',
     });
   }
 
-  if (requireCredentials && !s3.secretAccessKey) {
+  if (!s3.accessKeyId && s3.secretAccessKey) {
     problems.push({
-      field: 's3.secretAccessKey',
-      message: 'Enter the secret access key.',
+      field: 's3.accessKeyId',
+      message: 'Enter the access key ID, or clear the secret access key.',
+    });
+  }
+
+  if (s3.sessionToken && !s3.accessKeyId) {
+    problems.push({
+      field: 's3.sessionToken',
+      message: 'A session token is only valid alongside an access key.',
     });
   }
 

@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import type { Capabilities, PlatformApiClient } from '../../api/platform';
+import type { PlatformApiClient, TenantPolicies } from '../../api/platform';
 import { useRemoteResource } from '../../app/useRemoteResource';
 import {
   AdminFailure,
@@ -10,23 +10,28 @@ import {
 import { formatBytes } from './format';
 import styles from './admin.module.css';
 
-export type AdminPoliciesClient = Pick<PlatformApiClient, 'getCapabilities'>;
+export type AdminPoliciesClient = Pick<PlatformApiClient, 'getPolicies'>;
 
 interface AdminPoliciesPageProps {
   readonly client: AdminPoliciesClient;
 }
 
+/** A `null` quota means no limit at all, which is not the same as zero. */
+function describeQuota(
+  value: number | null,
+  format: (value: number) => string,
+): string {
+  return value === null ? 'Unlimited' : format(value);
+}
+
 export function AdminPoliciesPage({ client }: AdminPoliciesPageProps) {
-  const load = useCallback(
-    () => client.getCapabilities(),
-    [client],
-  );
-  const { state, reload } = useRemoteResource<Capabilities>(load);
+  const load = useCallback(() => client.getPolicies(), [client]);
+  const { state, reload } = useRemoteResource<TenantPolicies>(load);
 
   return (
     <AdminPage
       title="Policies"
-      description="The limits this deployment enforces right now. They come from the server configuration, so they are read-only here."
+      description="The retention, sharing, and quota limits this workspace enforces. A quota with no limit is shown as unlimited rather than as zero."
     >
       <p className={styles.announce} role="status" aria-live="polite">
         {state.kind === 'loading' ? 'Loading policies…' : ''}
@@ -39,7 +44,7 @@ export function AdminPoliciesPage({ client }: AdminPoliciesPageProps) {
       {state.kind === 'failed' ? (
         <AdminFailure
           title="Policies are unavailable"
-          description="The capability document could not be read, so no limits can be shown."
+          description="The policy could not be read. Enforcement on the server is unaffected."
           onRetry={reload}
         />
       ) : null}
@@ -47,41 +52,57 @@ export function AdminPoliciesPage({ client }: AdminPoliciesPageProps) {
       {state.kind === 'ready' ? (
         <dl className={styles.summary}>
           <div>
-            <dt>Largest upload</dt>
-            <dd>{formatBytes(state.value.upload.maxBytes)}</dd>
+            <dt>Trash retention</dt>
+            <dd>{state.value.retention.trashRetentionDays} days</dd>
+          </div>
+          <div>
+            <dt>Purge grace</dt>
+            <dd>{state.value.retention.purgeGraceDays} days</dd>
+          </div>
+          <div>
+            <dt>Public links</dt>
+            <dd>
+              {state.value.sharing.publicLinksEnabled ? 'Allowed' : 'Blocked'}
+            </dd>
+          </div>
+          <div>
+            <dt>Longest link lifetime</dt>
+            <dd>{state.value.sharing.maxLinkLifetimeDays} days</dd>
+          </div>
+          <div>
+            <dt>Password on public links</dt>
+            <dd>
+              {state.value.sharing.requirePasswordForPublicLinks
+                ? 'Required'
+                : 'Optional'}
+            </dd>
+          </div>
+          <div>
+            <dt>Storage quota</dt>
+            <dd>{describeQuota(state.value.quotas.storageBytes, formatBytes)}</dd>
+          </div>
+          <div>
+            <dt>Daily transform pixels</dt>
+            <dd>
+              {describeQuota(state.value.quotas.dailyTransformPixels, (value) =>
+                new Intl.NumberFormat().format(value),
+              )}
+            </dd>
           </div>
           <div>
             <dt>Concurrent uploads</dt>
             <dd>
-              {state.value.upload.concurrencyUnlimited
-                ? 'Unlimited'
-                : state.value.upload.maxConcurrentUploads}
+              {describeQuota(state.value.quotas.concurrentUploads, String)}
             </dd>
-          </div>
-          <div>
-            <dt>Transform deadline</dt>
-            <dd>{state.value.imaging.processingDeadlineSeconds}s</dd>
-          </div>
-          <div>
-            <dt>Largest page</dt>
-            <dd>{state.value.api.maxPageSize}</dd>
-          </div>
-          <div>
-            <dt>Proxy upload limit</dt>
-            <dd>{formatBytes(state.value.api.maxProxyUploadBytes)}</dd>
-          </div>
-          <div>
-            <dt>Full-text search</dt>
-            <dd>{state.value.search.text ? 'Enabled' : 'Disabled'}</dd>
           </div>
         </dl>
       ) : null}
 
       <AdminPendingContract
-        title="Retention, sharing, and quota policy"
-        description="Trash retention, public link rules, and tenant quotas are not part of the capability document and cannot be edited from the gallery yet."
+        title="Editing policy from the gallery"
+        description="Reading is wired to the published route. Editing needs the same screen to send a merge patch with the version it read, which is the next piece of work here."
         contract={
-          'GET /api/v1/admin/policies → { retention, sharing, quotas, version } with ETag "v{version}"; PATCH /api/v1/admin/policies with If-Match → 200, 412 stale, 409 conflict'
+          'PATCH /api/v1/admin/policies — If-Match: "v{version}", merge patch of retention, sharing, and quotas; an absent quota is unchanged and an explicit null clears the limit'
         }
       />
     </AdminPage>

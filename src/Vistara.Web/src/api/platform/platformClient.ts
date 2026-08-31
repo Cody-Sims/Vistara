@@ -3,6 +3,7 @@ import {
   type ApiClientOptions,
 } from '../generated/client';
 import type { ApiProblemDetails } from '../generated/models';
+import { readRetryAfterSeconds, VistaraThrottledError } from './throttling';
 import type { EntityTag } from '../generated/models';
 import type {
   ApiKeyCollection,
@@ -25,6 +26,7 @@ import type {
   StorageValidationRequest,
   StorageValidationResponse,
   StorageValidationSupport,
+  TenantPolicies,
   TenantMemberCollection,
   UpdateTenantMemberRequest,
   UpdateUserPreferencesRequest,
@@ -112,6 +114,10 @@ export class PlatformApiClient {
     });
   }
 
+  public getPolicies(): Promise<TenantPolicies> {
+    return this.#request<TenantPolicies>('GET', '/api/v1/admin/policies');
+  }
+
   public getStorageSummary(): Promise<StorageSummary> {
     return this.#request<StorageSummary>('GET', '/api/v1/admin/storage');
   }
@@ -133,11 +139,12 @@ export class PlatformApiClient {
    */
   public validateStorage(
     request: StorageValidationRequest,
+    options: { signal?: AbortSignal } = {},
   ): Promise<StorageValidationResponse> {
     return this.#request<StorageValidationResponse>(
       'POST',
       '/api/v1/admin/storage/validate',
-      { body: request },
+      { body: request, ...(options.signal ? { signal: options.signal } : {}) },
     );
   }
 
@@ -284,7 +291,7 @@ export class PlatformApiClient {
   async #request<T>(
     method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
     path: string,
-    options: { body?: unknown } = {},
+    options: { body?: unknown; signal?: AbortSignal } = {},
   ): Promise<T> {
     const response = await this.#send(method, path, options);
 
@@ -296,7 +303,7 @@ export class PlatformApiClient {
   async #send(
     method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
     path: string,
-    options: { body?: unknown; ifMatch?: EntityTag },
+    options: { body?: unknown; ifMatch?: EntityTag; signal?: AbortSignal },
   ): Promise<Response> {
     if (method !== 'GET' && !anonymousRoutes.has(path)) {
       await this.#ensureAntiforgeryToken();
@@ -317,12 +324,19 @@ export class PlatformApiClient {
       method,
       headers,
       credentials: 'same-origin',
+      ...(options.signal ? { signal: options.signal } : {}),
       body:
         options.body === undefined ? undefined : JSON.stringify(options.body),
     });
 
     if (!response.ok) {
-      throw new VistaraApiError(response.status, await readProblem(response));
+      const problem = await readProblem(response);
+      throw response.status === 429
+        ? new VistaraThrottledError(
+            problem,
+            readRetryAfterSeconds(response.headers),
+          )
+        : new VistaraApiError(response.status, problem);
     }
 
     return response;

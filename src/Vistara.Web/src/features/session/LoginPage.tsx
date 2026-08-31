@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { VistaraApiError } from '../../api/generated/client';
 import type { PlatformApiClient } from '../../api/platform';
+import { describeRetryAfter, VistaraThrottledError } from '../../api/platform';
 import { BrandMark } from '../../brand';
 import { safeDestination } from './safeDestination';
 import { useSession } from './sessionContext';
@@ -35,6 +36,7 @@ export function LoginPage({ setup }: LoginPageProps = {}) {
   const [setupState, setSetupState] = useState<'open' | 'closed' | 'unknown'>(
     'closed',
   );
+  const [setupThrottled, setSetupThrottled] = useState<string>();
 
   useEffect(() => {
     if (!setup) {
@@ -48,11 +50,16 @@ export function LoginPage({ setup }: LoginPageProps = {}) {
           setSetupState(state.available === true ? 'open' : 'closed');
         }
       },
-      () => {
+      (error: unknown) => {
         // A deployment that does not answer cannot say whether it has an owner,
         // so the way to first-run setup stays visible with that caveat.
-        if (active) {
-          setSetupState('unknown');
+        if (!active) {
+          return;
+        }
+
+        setSetupState('unknown');
+        if (error instanceof VistaraThrottledError) {
+          setSetupThrottled(describeRetryAfter(error.retryAfterSeconds));
         }
       },
     );
@@ -191,8 +198,10 @@ export function LoginPage({ setup }: LoginPageProps = {}) {
 
         {setupState === 'unknown' ? (
           <p className={styles.hint}>
-            This deployment does not report whether it has an owner. If it is
-            new,{' '}
+            {setupThrottled
+              ? `This deployment is answering setup checks slowly. ${setupThrottled} `
+              : 'This deployment does not report whether it has an owner. '}
+            If it is new,{' '}
             <Link className={styles.inlineLink} to="/setup">
               set up Vistara
             </Link>

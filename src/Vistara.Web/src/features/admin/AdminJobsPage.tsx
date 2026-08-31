@@ -6,7 +6,11 @@ import type {
   JobStatus,
   PlatformApiClient,
 } from '../../api/platform';
-import { isStaleVersion, versionTag } from '../../api/versionTag';
+import {
+  isStaleVersion,
+  isStateConflict,
+  versionTag,
+} from '../../api/versionTag';
 import { useRemoteResource } from '../../app/useRemoteResource';
 import {
   AdminEmpty,
@@ -27,19 +31,19 @@ interface AdminJobsPageProps {
 }
 
 const jobStates: readonly JobState[] = [
-  'Pending',
-  'Leased',
-  'RetryScheduled',
-  'Completed',
-  'DeadLettered',
+  'pending',
+  'leased',
+  'retryScheduled',
+  'completed',
+  'deadLettered',
 ];
 
 const stateLabels: Record<JobState, string> = {
-  Pending: 'Queued',
-  Leased: 'Running',
-  RetryScheduled: 'Retry scheduled',
-  Completed: 'Completed',
-  DeadLettered: 'Needs attention',
+  pending: 'Queued',
+  leased: 'Running',
+  retryScheduled: 'Retry scheduled',
+  completed: 'Completed',
+  deadLettered: 'Needs attention',
 };
 
 const filters: readonly { value: string; label: string }[] = [
@@ -85,9 +89,11 @@ export function AdminJobsPage({ client }: AdminJobsPageProps) {
       setFailure(
         isStaleVersion(error)
           ? `The ${job.type} job changed somewhere else. Refresh the queue and try again.`
-          : action === 'retry'
-            ? `The ${job.type} job could not be retried. The queue is unchanged.`
-            : `The ${job.type} job could not be cancelled. The queue is unchanged.`,
+          : isStateConflict(error) && action === 'cancel'
+            ? `This deployment cannot cancel a ${job.type} job. Let it finish or fail, then retry it.`
+            : action === 'retry'
+              ? `The ${job.type} job could not be retried. The queue is unchanged.`
+              : `The ${job.type} job could not be cancelled. The queue is unchanged.`,
       );
     } finally {
       setPending(undefined);
@@ -164,7 +170,7 @@ export function AdminJobsPage({ client }: AdminJobsPageProps) {
               <div className={styles.rowMain}>
                 <span className={styles.primaryCell}>{job.type}</span>
                 <span className={styles.badge} data-status={job.state}>
-                  {stateLabels[job.state as JobState] ?? job.state}
+                  {stateLabels[job.state] ?? job.state}
                 </span>
                 <span className={styles.secondaryCell}>
                   Created {formatMoment(job.createdAt)} · attempt {job.attempts}{' '}
@@ -179,8 +185,7 @@ export function AdminJobsPage({ client }: AdminJobsPageProps) {
                 ) : null}
               </div>
               <div className={styles.rowActions}>
-                {job.state === 'DeadLettered' ||
-                job.state === 'RetryScheduled' ? (
+                {job.actions.retry ? (
                   <button
                     aria-label={`Retry ${job.type} job`}
                     className={styles.secondaryButton}
@@ -191,7 +196,7 @@ export function AdminJobsPage({ client }: AdminJobsPageProps) {
                     {pending === job.id ? 'Working…' : 'Retry'}
                   </button>
                 ) : null}
-                {job.state === 'Pending' || job.state === 'Leased' ? (
+                {job.actions.cancel ? (
                   <button
                     aria-label={`Cancel ${job.type} job`}
                     className={styles.secondaryButton}

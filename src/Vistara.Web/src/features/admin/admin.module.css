@@ -225,6 +225,7 @@
 
 .badge[data-status="active"],
 .badge[data-status="healthy"],
+.badge[data-status="completed"],
 .badge[data-status="succeeded"] {
   border-color: color-mix(in srgb, var(--color-status-success) 45%, transparent);
   background: var(--color-status-success-soft);
@@ -232,6 +233,8 @@
 }
 
 .badge[data-status="invited"],
+.badge[data-status="pending"],
+.badge[data-status="leased"],
 .badge[data-status="queued"],
 .badge[data-status="running"] {
   border-color: color-mix(in srgb, var(--color-status-info) 45%, transparent);
@@ -240,6 +243,7 @@
 }
 
 .badge[data-status="degraded"],
+.badge[data-status="retryScheduled"],
 .badge[data-status="suspended"],
 .badge[data-status="cancelled"] {
   border-color: color-mix(in srgb, var(--color-status-warning) 45%, transparent);
@@ -249,7 +253,9 @@
 
 .badge[data-status="failed"],
 .badge[data-status="dead"],
+.badge[data-status="deadLettered"],
 .badge[data-status="denied"],
+.badge[data-status="rejected"],
 .badge[data-status="unavailable"] {
   border-color: color-mix(in srgb, var(--color-status-danger) 45%, transparent);
   background: var(--color-status-danger-soft);

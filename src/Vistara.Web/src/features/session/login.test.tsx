@@ -4,7 +4,7 @@ import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import { VistaraApiError } from '../../api/generated/client';
 import type { CurrentUser } from '../../api/platform';
-import { PlatformApiClient } from '../../api/platform';
+import { PlatformApiClient, VistaraThrottledError } from '../../api/platform';
 import { LoginPage } from './LoginPage';
 import { safeDestination } from './safeDestination';
 import { SessionProvider } from './SessionProvider';
@@ -200,6 +200,28 @@ describe('first-run discovery', () => {
     expect(
       screen.queryByRole('link', { name: /set up vistara/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it('keeps a way in when setup discovery is throttled', async () => {
+    renderLogin({
+      getSetupState: async () => {
+        throw new VistaraThrottledError(
+          {
+            type: 'about:blank',
+            title: 'setup.throttled',
+            status: 429,
+            code: 'setup.throttled',
+            errors: {},
+          },
+          20,
+        );
+      },
+    });
+
+    expect(
+      await screen.findByRole('link', { name: 'set up Vistara' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/20 seconds/)).toBeInTheDocument();
   });
 
   it('keeps a way in when the deployment cannot say', async () => {

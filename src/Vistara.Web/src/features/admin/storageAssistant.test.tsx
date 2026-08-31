@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { VistaraApiError } from '../../api/generated/client';
+import { VistaraThrottledError } from '../../api/platform';
 import type {
   StorageSummary,
   StorageValidationRequest,
@@ -56,9 +57,11 @@ interface Options {
   readonly getStorageSummary?: () => Promise<StorageSummary>;
   readonly validateStorage?: (
     request: StorageValidationRequest,
+    options?: { signal?: AbortSignal },
   ) => Promise<StorageValidationResponse>;
   readonly getStorageValidationSupport?: () => Promise<{
     supported: boolean;
+    providers: readonly ('filesystem' | 'azureBlob' | 's3')[];
   }>;
 }
 
@@ -68,9 +71,18 @@ function renderStorage(options: Options = {}) {
       options.getStorageSummary ?? (async () => summary),
     ),
     getStorageValidationSupport: vi.fn(
-      options.getStorageValidationSupport ?? (async () => ({ supported: true })),
+      options.getStorageValidationSupport ??
+        (async () => ({
+          supported: true,
+          providers: ['filesystem', 'azureBlob', 's3'] as const,
+        })),
     ),
-    validateStorage: vi.fn(
+    validateStorage: vi.fn<
+      (
+        request: StorageValidationRequest,
+        options?: { signal?: AbortSignal },
+      ) => Promise<StorageValidationResponse>
+    >(
       options.validateStorage ??
         (async () => ({
           valid: true,
@@ -176,11 +188,33 @@ describe('provider assistant', () => {
     expect(screen.getByLabelText('Subscription ID')).toBeInTheDocument();
     expect(screen.getByLabelText('Resource group')).toBeInTheDocument();
     expect(screen.getByText(/3 to 24 characters/)).toBeInTheDocument();
-    expect(screen.getByText(/Storage Blob Data Contributor/)).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/Storage Blob Data Contributor/),
+    ).not.toHaveLength(0);
+
+    // A managed identity is the default and asks for no secret at all.
+    expect(
+      screen.getByRole('radio', {
+        name: 'Use a managed identity (recommended)',
+      }),
+    ).toBeChecked();
+    expect(screen.queryByLabelText('Account key')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('SAS token')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('radio', { name: 'Use an account key' }));
+
     expect(screen.getByLabelText('Account key')).toHaveAttribute(
       'type',
       'password',
     );
+
+    await user.click(screen.getByRole('radio', { name: 'Use a SAS token' }));
+
+    expect(screen.getByLabelText('SAS token')).toHaveAttribute(
+      'type',
+      'password',
+    );
+    expect(screen.queryByLabelText('Account key')).not.toBeInTheDocument();
   });
 
   it('checks the configuration in the browser before sending a credential', async () => {
@@ -199,7 +233,7 @@ describe('provider assistant', () => {
       within(problems).getByText(/Enter the endpoint URL/),
     ).toBeInTheDocument();
     expect(
-      within(problems).getByText(/Enter the secret access key/),
+      within(problems).getByText(/Enter the bucket region/),
     ).toBeInTheDocument();
     expect(client.validateStorage).not.toHaveBeenCalled();
   });
@@ -212,21 +246,30 @@ describe('provider assistant', () => {
     await user.click(screen.getByRole('button', { name: 'Test connection' }));
 
     await waitFor(() =>
-      expect(client.validateStorage).toHaveBeenCalledWith({
-        provider: 's3',
-        s3: {
-          endpoint: 'https://s3.eu-central-1.example',
-          region: 'eu-central-1',
-          bucket: 'vistara-media',
-          accessKeyId: 'AKIAEXAMPLE',
-          secretAccessKey: secret,
-          forcePathStyle: true,
+      expect(client.validateStorage).toHaveBeenCalledWith(
+        {
+          provider: 's3',
+          s3: {
+            endpoint: 'https://s3.eu-central-1.example',
+            region: 'eu-central-1',
+            bucket: 'vistara-media',
+            accessKeyId: 'AKIAEXAMPLE',
+            secretAccessKey: secret,
+            forcePathStyle: true,
+          },
         },
-      }),
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      ),
     );
     expect(await screen.findByText('Connection succeeded.')).toBeInTheDocument();
+
+    // The five published checks always render, in the published order.
     const checks = screen.getByRole('list', { name: 'Connection checks' });
-    expect(within(checks).getAllByRole('listitem')).toHaveLength(2);
+    const rendered = within(checks).getAllByRole('listitem');
+    expect(rendered).toHaveLength(5);
+    expect(rendered[0]).toHaveTextContent('Endpoint reachable');
+    expect(rendered[4]).toHaveTextContent('Removed the probe object');
+    expect(rendered[2]).toHaveTextContent('Skipped');
   });
 
   it('reports a rejected connection without echoing the credential', async () => {
@@ -271,7 +314,7 @@ describe('provider assistant', () => {
     });
     await waitFor(() => expect(test).toBeDisabled());
     expect(
-      screen.getByText(/cannot test storage connections yet/),
+      screen.getByText(/cannot test storage connections/),
     ).toBeInTheDocument();
     expect(client.validateStorage).not.toHaveBeenCalled();
   });
@@ -308,6 +351,192 @@ describe('provider assistant', () => {
     await waitFor(() =>
       expect(screen.getByLabelText('Endpoint URL')).toHaveFocus(),
     );
+  });
+});
+
+describe('validation statuses', () => {
+  async function testWith(
+    validateStorage: () => Promise<StorageValidationResponse>,
+  ) {
+    const user = userEvent.setup();
+    renderStorage({ validateStorage });
+    await fillS3(user);
+    await user.click(screen.getByRole('button', { name: 'Test connection' }));
+    return user;
+  }
+
+  it('reports a throttled attempt with the wait the API published', async () => {
+    await testWith(async () => {
+      throw new VistaraThrottledError(
+        {
+          type: 'about:blank',
+          title: 'storage_validation.throttled',
+          status: 429,
+          code: 'storage_validation.throttled',
+          errors: {},
+        },
+        45,
+      );
+    });
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Too many validation attempts');
+    expect(alert).toHaveTextContent('45 seconds');
+    expect(alert.textContent).not.toContain(secret);
+  });
+
+  it('marks the members a 422 rejected', async () => {
+    await testWith(async () => {
+      throw new VistaraApiError(422, {
+        type: 'about:blank',
+        title: 'storage_validation.invalid_request',
+        status: 422,
+        code: 'storage_validation.invalid_request',
+        errors: { 's3.bucket': ['The bucket name is not allowed.'] },
+      });
+    });
+
+    const problems = await screen.findByRole('alert', {
+      name: 'Configuration problems',
+    });
+    expect(problems).toHaveTextContent('The bucket name is not allowed.');
+    expect(
+      screen.getByText(/rejected part of this configuration/),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Bucket')).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    );
+  });
+
+  it('explains a body the deployment refused as too large', async () => {
+    await testWith(async () => {
+      throw new VistaraApiError(413, {
+        type: 'about:blank',
+        title: 'storage_validation.body_too_large',
+        status: 413,
+        code: 'storage_validation.body_too_large',
+        errors: {},
+      });
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'too large to check',
+    );
+  });
+
+  it('explains a forbidden attempt without blaming the credential', async () => {
+    await testWith(async () => {
+      throw new VistaraApiError(403, {
+        type: 'about:blank',
+        title: 'storage_validation.forbidden',
+        status: 403,
+        code: 'storage_validation.forbidden',
+        errors: {},
+      });
+    });
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('workspace owner rights');
+    expect(alert).toHaveTextContent('Nothing was sent to the provider');
+  });
+
+  it('renders a failed validation as a completed answer, not an error', async () => {
+    await testWith(async () => ({
+      valid: false,
+      provider: 's3',
+      checks: [
+        { id: 'reachable', status: 'passed' },
+        {
+          id: 'authenticated',
+          status: 'failed',
+          detail: 'The credential was rejected.',
+        },
+        { id: 'read', status: 'skipped' },
+        { id: 'write', status: 'skipped' },
+        { id: 'delete', status: 'skipped' },
+      ],
+      message: 'The storage settings were rejected with the supplied credential.',
+    }));
+
+    const checks = await screen.findByRole('list', {
+      name: 'Connection checks',
+    });
+    expect(within(checks).getAllByRole('listitem')).toHaveLength(5);
+    expect(within(checks).getByText('The credential was rejected.')).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'rejected with the supplied credential',
+    );
+  });
+
+  it('reports a server-side timeout through its check detail', async () => {
+    await testWith(async () => ({
+      valid: false,
+      provider: 's3',
+      checks: [
+        {
+          id: 'reachable',
+          status: 'failed',
+          detail: 'The provider did not answer within the validation timeout.',
+        },
+        { id: 'authenticated', status: 'skipped' },
+        { id: 'read', status: 'skipped' },
+        { id: 'write', status: 'skipped' },
+        { id: 'delete', status: 'skipped' },
+      ],
+      message: 'The storage settings could not be checked within the timeout.',
+    }));
+
+    expect(
+      await screen.findByText(
+        'The provider did not answer within the validation timeout.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('cancels a running test and says so', async () => {
+    const user = userEvent.setup();
+    let release: ((value: StorageValidationResponse) => void) | undefined;
+    const { client } = renderStorage({
+      validateStorage: () =>
+        new Promise<StorageValidationResponse>((resolve) => {
+          release = resolve;
+        }),
+    });
+
+    await fillS3(user);
+    await user.click(screen.getByRole('button', { name: 'Test connection' }));
+
+    const cancel = await screen.findByRole('button', { name: 'Cancel test' });
+    await user.click(cancel);
+
+    expect(await screen.findByText('Test cancelled.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Secret access key')).toHaveValue('');
+    expect(document.body.innerHTML).not.toContain(secret);
+
+    const signal = client.validateStorage.mock.calls[0]![1]?.signal;
+    expect(signal?.aborted).toBe(true);
+
+    release?.({ valid: true, provider: 's3', checks: [] });
+  });
+
+  it('offers only the providers the deployment can validate', async () => {
+    renderStorage({
+      getStorageValidationSupport: async () => ({
+        supported: true,
+        providers: ['filesystem'],
+      }),
+    });
+
+    const group = await screen.findByRole('radiogroup', {
+      name: 'Storage provider',
+    });
+    await waitFor(() =>
+      expect(within(group).getAllByRole('radio')).toHaveLength(1),
+    );
+    expect(
+      within(group).getByRole('radio', { name: /Local filesystem/ }),
+    ).toBeInTheDocument();
   });
 });
 
@@ -426,6 +655,7 @@ describe('credential handling', () => {
     await user.click(
       await screen.findByRole('radio', { name: /Azure Blob Storage/ }),
     );
+    await user.click(screen.getByRole('radio', { name: 'Use an account key' }));
     await user.type(screen.getByLabelText('Account key'), 'azure-key-value');
 
     expect(storageDraftSecrets()).toHaveLength(1);

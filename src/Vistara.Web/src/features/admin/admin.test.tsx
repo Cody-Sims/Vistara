@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import { VistaraApiError } from '../../api/generated/client';
-import type { Capabilities, JobStatus, TenantMember } from '../../api/platform';
+import type { JobStatus, TenantMember } from '../../api/platform';
 import { AdminAuditPage } from './AdminAuditPage';
 import { AdminJobsPage } from './AdminJobsPage';
 import { AdminPoliciesPage } from './AdminPoliciesPage';
@@ -48,50 +48,6 @@ const members: readonly TenantMember[] = [
     version: 1,
   },
 ];
-
-const capabilities: Capabilities = {
-  schemaVersion: 1,
-  database: { provider: 'postgres' },
-  storage: {
-    provider: 's3',
-    directUpload: true,
-    multipartUpload: true,
-    rangeReads: true,
-    maxObjectBytes: 4_000_000_000,
-    maxMultipartParts: 10_000,
-    minMultipartPartBytes: 5_000_000,
-    maxMultipartPartBytes: 100_000_000,
-  },
-  imaging: {
-    provider: 'skia',
-    inputFormats: ['jpeg', 'png', 'webp'],
-    outputFormats: ['jpeg', 'webp'],
-    maxEncodedBytes: 50_000_000,
-    maxWidth: 12_000,
-    maxHeight: 12_000,
-    maxAggregatePixels: 100_000_000,
-    maxFrames: 1,
-    maxEstimatedDecodedBytes: 500_000_000,
-    processingDeadlineSeconds: 60,
-    maxConcurrentTransforms: 4,
-  },
-  upload: {
-    maxBytes: 1_000_000_000,
-    maxConcurrentUploads: 4,
-    concurrencyUnlimited: false,
-    multipartThresholdBytes: 20_000_000,
-    proxyUpload: true,
-    directUpload: true,
-    multipartUpload: true,
-  },
-  search: {
-    text: true,
-    facets: false,
-    timeline: true,
-    providerNativeFullText: true,
-  },
-  api: { defaultPageSize: 50, maxPageSize: 200, maxProxyUploadBytes: 100_000_000 },
-};
 
 describe('administration: people', () => {
   it('lists the members of the active tenant', async () => {
@@ -301,25 +257,27 @@ describe('administration: people', () => {
 const job: JobStatus = {
   id: 'job-1',
   type: 'derivatives',
-  state: 'DeadLettered',
+  state: 'deadLettered',
   attempts: 3,
   maxAttempts: 5,
   createdAt: '2026-02-10T08:00:00Z',
   availableAt: '2026-02-10T08:05:00Z',
   failure: { code: 'imaging.decode_failed', summary: 'The decoder rejected it.' },
   version: 4,
+  actions: { retry: true, cancel: false },
 };
 
 describe('administration: jobs', () => {
-  const queued = {
+  const queued: JobStatus = {
     id: 'job-2',
     type: 'purge',
-    state: 'Pending' as const,
+    state: 'pending',
     attempts: 0,
     maxAttempts: 5,
     createdAt: '2026-02-10T08:30:00Z',
     availableAt: '2026-02-10T08:30:00Z',
     version: 1,
+    actions: { retry: false, cancel: true },
   };
 
   it('filters the queue through the address', async () => {
@@ -333,19 +291,21 @@ describe('administration: jobs', () => {
     );
 
     await screen.findByText('derivatives');
-    await user.selectOptions(screen.getByLabelText('Show jobs'), 'DeadLettered');
+    await user.selectOptions(screen.getByLabelText('Show jobs'), 'deadLettered');
 
     await waitFor(() =>
-      expect(router.state.location.search).toBe('?state=DeadLettered'),
+      expect(router.state.location.search).toBe('?state=deadLettered'),
     );
     expect(listJobs).toHaveBeenLastCalledWith(
-      expect.objectContaining({ states: ['DeadLettered'] }),
+      expect.objectContaining({ states: ['deadLettered'] }),
     );
   });
 
   it('retries a dead-lettered job with its version and refreshes', async () => {
     const user = userEvent.setup();
-    const retryJob = vi.fn(async () => ({ data: { ...job, state: 'Pending' } }));
+    const retryJob = vi.fn(async () => ({
+      data: { ...job, state: 'pending' as const },
+    }));
     const listJobs = vi.fn(async () => ({ items: [job, queued] }));
     renderRoute(
       <AdminJobsPage client={{ listJobs, retryJob, cancelJob: vi.fn() }} />,
@@ -425,28 +385,66 @@ describe('administration: jobs', () => {
 });
 
 describe('administration: policies', () => {
-  it('shows the enforced limits the deployment publishes', async () => {
-    renderRoute(
-      <AdminPoliciesPage
-        client={{ getCapabilities: vi.fn(async () => capabilities) }}
-      />,
-    );
+  const policies = {
+    retention: { trashRetentionDays: 30, purgeGraceDays: 7 },
+    sharing: {
+      publicLinksEnabled: true,
+      maxLinkLifetimeDays: 30,
+      requirePasswordForPublicLinks: false,
+    },
+    quotas: {
+      storageBytes: 10_000_000_000,
+      dailyTransformPixels: null,
+      concurrentUploads: 4,
+    },
+    version: 3,
+  };
 
-    expect(await screen.findByText('200')).toBeInTheDocument();
-    expect(
-      screen.getByText(/PATCH \/api\/v1\/admin\/policies/),
-    ).toBeInTheDocument();
+  it('reads the enforced policy from the published route', async () => {
+    const getPolicies = vi.fn(async () => policies);
+    renderRoute(<AdminPoliciesPage client={{ getPolicies }} />);
+
+    expect(await screen.findAllByText('30 days')).toHaveLength(2);
+    expect(screen.getByText('10 GB')).toBeInTheDocument();
+    expect(screen.getByText('Allowed')).toBeInTheDocument();
+    expect(getPolicies).toHaveBeenCalledTimes(1);
   });
 
-  it('offers no editing while the policy route is unavailable', async () => {
+  it('shows an absent quota as unlimited rather than as zero', async () => {
     renderRoute(
       <AdminPoliciesPage
-        client={{ getCapabilities: vi.fn(async () => capabilities) }}
+        client={{
+          getPolicies: vi.fn(async () => ({
+            ...policies,
+            quotas: {
+              storageBytes: null,
+              dailyTransformPixels: null,
+              concurrentUploads: null,
+            },
+          })),
+        }}
       />,
     );
 
-    await screen.findByText('200');
-    expect(screen.queryByRole('button', { name: 'Save policies' })).toBeNull();
+    expect(await screen.findAllByText('Unlimited')).toHaveLength(3);
+    expect(screen.queryByText('0 B')).not.toBeInTheDocument();
+  });
+
+  it('retries a failed policy read', async () => {
+    const user = userEvent.setup();
+    const getPolicies = vi
+      .fn()
+      .mockRejectedValueOnce(apiError(503))
+      .mockResolvedValueOnce(policies);
+    renderRoute(<AdminPoliciesPage client={{ getPolicies }} />);
+
+    expect(
+      await screen.findByRole('heading', { name: 'Policies are unavailable' }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+
+    expect(await screen.findAllByText('30 days')).toHaveLength(2);
   });
 });
 

@@ -3,7 +3,6 @@ import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   ApiKeyCollection,
-  Capabilities,
   JobStatus,
   TenantCollection,
   TenantMemberCollection,
@@ -41,54 +40,16 @@ const members: TenantMemberCollection = {
   ],
 };
 
-const capabilities: Capabilities = {
-  schemaVersion: 1,
-  database: { provider: 'sqlite' },
-  storage: {
-    provider: 'filesystem',
-    directUpload: false,
-    multipartUpload: false,
-    rangeReads: true,
-    maxObjectBytes: 1_000_000,
-    maxMultipartParts: 1,
-    minMultipartPartBytes: 1,
-    maxMultipartPartBytes: 1,
-  },
-  imaging: {
-    provider: 'skia',
-    inputFormats: ['jpeg'],
-    outputFormats: ['webp'],
-    maxEncodedBytes: 1_000_000,
-    maxWidth: 8000,
-    maxHeight: 8000,
-    maxAggregatePixels: 1_000_000,
-    maxFrames: 1,
-    maxEstimatedDecodedBytes: 1_000_000,
-    processingDeadlineSeconds: 30,
-    maxConcurrentTransforms: 2,
-  },
-  upload: {
-    maxBytes: 1_000_000,
-    maxConcurrentUploads: 2,
-    concurrencyUnlimited: false,
-    multipartThresholdBytes: 1_000_000,
-    proxyUpload: true,
-    directUpload: false,
-    multipartUpload: false,
-  },
-  search: { text: true, facets: false, timeline: true, providerNativeFullText: false },
-  api: { defaultPageSize: 50, maxPageSize: 100, maxProxyUploadBytes: 1_000_000 },
-};
-
 const job: JobStatus = {
   id: 'job-1',
   type: 'derivatives',
-  state: 'Completed',
+  state: 'completed',
   attempts: 1,
   maxAttempts: 3,
   createdAt: '2026-01-01T00:00:00Z',
   availableAt: '2026-01-01T00:00:00Z',
   version: 1,
+  actions: { retry: false, cancel: false },
 };
 
 const tenants: TenantCollection = {
@@ -196,7 +157,10 @@ const pages: readonly { name: string; element: React.ReactNode }[] = [
             pendingUploadBytes: 0,
           }),
           validateStorage: vi.fn(),
-          getStorageValidationSupport: async () => ({ supported: true }),
+          getStorageValidationSupport: async () => ({
+            supported: true,
+            providers: ['filesystem', 'azureBlob', 's3'] as const,
+          }),
         }}
       />,
       '/admin/storage',
@@ -219,7 +183,22 @@ const pages: readonly { name: string; element: React.ReactNode }[] = [
     name: 'administration policies',
     element: routed(
       <AdminPoliciesPage
-        client={{ getCapabilities: async () => capabilities }}
+        client={{
+          getPolicies: async () => ({
+            retention: { trashRetentionDays: 30, purgeGraceDays: 7 },
+            sharing: {
+              publicLinksEnabled: true,
+              maxLinkLifetimeDays: 30,
+              requirePasswordForPublicLinks: false,
+            },
+            quotas: {
+              storageBytes: null,
+              dailyTransformPixels: null,
+              concurrentUploads: 4,
+            },
+            version: 3,
+          }),
+        }}
       />,
       '/admin/policies',
     ),
