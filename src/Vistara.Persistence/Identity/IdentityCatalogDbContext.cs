@@ -8,18 +8,34 @@ namespace Vistara.Persistence.Identity;
 
 /// <summary>
 /// Reads and writes the tenant-independent identity tables (<c>users</c>,
-/// <c>local_identities</c>, and <c>local_credentials</c>). Those tables carry
-/// no tenant column and are excluded from row-level security, so a browser
-/// sign-in can resolve a principal before a tenant scope exists.
+/// <c>local_identities</c>, <c>local_credentials</c>, and
+/// <c>external_identities</c>). Those tables carry no tenant column and are
+/// excluded from row-level security, so a browser sign-in or an external
+/// provider callback can resolve a principal before a tenant scope exists.
 /// </summary>
 public sealed class IdentityCatalogDbContext(
     DbContextOptions<IdentityCatalogDbContext> options) : DbContext(options)
 {
+    /// <summary>Storage bound of <c>external_identities.issuer</c>.</summary>
+    internal const int MaxIssuerLength = 2048;
+
+    /// <summary>Storage bound of <c>external_identities.subject</c>.</summary>
+    internal const int MaxSubjectLength = 512;
+
     public DbSet<UserRow> Users => Set<UserRow>();
 
     public DbSet<LocalIdentityRow> LocalIdentities => Set<LocalIdentityRow>();
 
     public DbSet<LocalCredentialRow> LocalCredentials => Set<LocalCredentialRow>();
+
+    /// <summary>
+    /// Links to identities owned by an external provider. The unique
+    /// <c>(issuer, subject)</c> pair is the only authorization key: the issuer
+    /// pins the provider and its identity-provider tenant, and the subject is
+    /// the provider's immutable object identifier.
+    /// </summary>
+    public DbSet<ExternalIdentityRow> ExternalIdentities =>
+        Set<ExternalIdentityRow>();
 
     public DbSet<UserPreferenceRow> UserPreferences => Set<UserPreferenceRow>();
 
@@ -60,6 +76,15 @@ public sealed class IdentityCatalogDbContext(
             entity.HasIndex(row => row.UserId);
             entity.Property(row => row.PasswordHash).HasMaxLength(512);
             entity.Property(row => row.Version).IsConcurrencyToken();
+        });
+        modelBuilder.Entity<ExternalIdentityRow>(entity =>
+        {
+            entity.ToTable("external_identities");
+            entity.HasKey(row => row.Id);
+            entity.HasIndex(row => new { row.Issuer, row.Subject }).IsUnique();
+            entity.HasIndex(row => row.UserId);
+            entity.Property(row => row.Issuer).HasMaxLength(MaxIssuerLength);
+            entity.Property(row => row.Subject).HasMaxLength(MaxSubjectLength);
         });
         modelBuilder.Entity<UserPreferenceRow>(entity =>
         {
