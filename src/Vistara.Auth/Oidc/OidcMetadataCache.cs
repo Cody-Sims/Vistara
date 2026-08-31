@@ -202,6 +202,14 @@ public sealed class OidcMetadataCache : IOidcMetadataProvider, IDisposable
             using HttpResponseMessage response = await _httpClient
                 .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token)
                 .ConfigureAwait(false);
+
+            // A followed redirect would mean the body came from a URL that
+            // never passed the authority check performed before the request.
+            if (!OidcRequestIntegrity.CameFromRequestedUri(response, address))
+            {
+                return null;
+            }
+
             return response.StatusCode != HttpStatusCode.OK ||
                 !IsJson(response.Content.Headers.ContentType) ||
                 response.Content.Headers.ContentLength > MaximumDocumentBytes

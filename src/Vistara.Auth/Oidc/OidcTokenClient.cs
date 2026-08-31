@@ -126,6 +126,15 @@ public sealed class OidcTokenClient
             using HttpResponseMessage response = await _httpClient
                 .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token)
                 .ConfigureAwait(false);
+
+            // A followed redirect would mean the tokens came from a URL that
+            // never passed the authority check, and the client credential was
+            // already posted to it. Fail closed before reading the body.
+            if (!OidcRequestIntegrity.CameFromRequestedUri(response, metadata.TokenEndpoint))
+            {
+                return Result.Failure<OidcTokenSet>(OidcErrors.TokenExchangeFailed);
+            }
+
             if (IsTransientFailure(response.StatusCode))
             {
                 return Result.Failure<OidcTokenSet>(OidcErrors.TokenEndpointUnavailable);

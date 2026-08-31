@@ -191,6 +191,18 @@ internal sealed class OidcHttpTestTransport : HttpMessageHandler
 
     internal TimeSpan TokenDelay { get; set; }
 
+    /// <summary>
+    /// When set, every response reports this URL as the one the request
+    /// finally reached, reproducing the rewrite a followed redirect performs.
+    /// </summary>
+    internal Uri? RedirectedTo { get; set; }
+
+    /// <summary>
+    /// Simulates a handler that returns a response carrying no originating
+    /// request, which the redirect check must treat as unverifiable.
+    /// </summary>
+    internal bool StripRequestMessage { get; set; }
+
     internal IReadOnlyList<Uri> RequestedUris
     {
         get
@@ -275,21 +287,41 @@ internal sealed class OidcHttpTestTransport : HttpMessageHandler
         if (uri == _metadataAddress)
         {
             await DelayAsync(MetadataDelay, cancellationToken).ConfigureAwait(false);
-            return (MetadataResponse ?? (() => Json("{}")))();
+            return Attach(request, (MetadataResponse ?? (() => Json("{}")))());
         }
 
         if (uri == _jwksUri)
         {
-            return (JwksResponse ?? (() => Json("{\"keys\":[]}")))();
+            return Attach(request, (JwksResponse ?? (() => Json("{\"keys\":[]}")))());
         }
 
         if (uri == _tokenEndpoint)
         {
             await DelayAsync(TokenDelay, cancellationToken).ConfigureAwait(false);
-            return (TokenResponse ?? (() => Json("{}")))();
+            return Attach(request, (TokenResponse ?? (() => Json("{}")))());
         }
 
-        return new HttpResponseMessage(HttpStatusCode.NotFound);
+        return Attach(request, new HttpResponseMessage(HttpStatusCode.NotFound));
+    }
+
+    /// <summary>
+    /// Real handlers stamp the originating request onto the response, and the
+    /// redirect check depends on it. The stub must behave the same way, and
+    /// <see cref="RedirectedTo"/> lets a test simulate the rewrite a followed
+    /// redirect performs.
+    /// </summary>
+    private HttpResponseMessage Attach(HttpRequestMessage request, HttpResponseMessage response)
+    {
+        if (StripRequestMessage)
+        {
+            response.RequestMessage = null;
+            return response;
+        }
+
+        response.RequestMessage = RedirectedTo is null
+            ? request
+            : new HttpRequestMessage(request.Method, RedirectedTo);
+        return response;
     }
 
     private static async Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
