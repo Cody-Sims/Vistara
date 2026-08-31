@@ -135,6 +135,24 @@ public sealed class RelationalMediaCatalogStore(
         return row is null ? null : ToMedia(row);
     }
 
+    public async ValueTask<PersistedDerivativeMedia?> FindAssetRenditionAsync(
+        Guid tenantId,
+        Guid assetId,
+        Guid renditionId,
+        CancellationToken cancellationToken)
+    {
+        EnsureTenant(tenantId);
+        DerivativeRequestRow? row = await _context
+            .Set<DerivativeRequestRow>()
+            .AsNoTracking()
+            .SingleOrDefaultAsync(
+                candidate =>
+                    candidate.Id == renditionId &&
+                    candidate.AssetId == assetId,
+                cancellationToken);
+        return row is null ? null : ToMedia(row);
+    }
+
     public async ValueTask<PersistedDerivativeMedia?> FindDerivativeAsync(
         Guid tenantId,
         string pipelineId,

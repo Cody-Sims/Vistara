@@ -37,6 +37,11 @@ public sealed class MediaDeliveryEndpointMappingTests
                 StringComparison.OrdinalIgnoreCase) == true);
         AssertMethods(
             endpoints,
+            "/delivery/assets/{assetId:guid}/{renditionId:guid}",
+            "GET",
+            "HEAD");
+        AssertMethods(
+            endpoints,
             "/api/v1/assets/{assetId:guid}/original",
             "GET",
             "HEAD");

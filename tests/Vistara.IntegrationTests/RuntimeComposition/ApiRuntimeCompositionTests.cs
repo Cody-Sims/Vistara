@@ -141,6 +141,9 @@ public sealed class ApiRuntimeCompositionTests
             Assert.Contains(
                 "/delivery/{pipeline}/{sourceHash}/{recipeHash}.{extension}",
                 routes);
+            Assert.Contains(
+                "/delivery/assets/{assetId:guid}/{renditionId:guid}",
+                routes);
             Assert.Single(routes, route => route == "/api/v1/assets");
             Assert.Single(routes, route => route == "/health/live");
             Assert.Single(routes, route => route == "/health/ready");

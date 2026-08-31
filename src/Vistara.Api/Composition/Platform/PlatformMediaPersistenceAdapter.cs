@@ -86,7 +86,19 @@ internal sealed class PlatformMediaDeliveryAuthorizationPort(
                     : MediaDeliveryAccessStatus.Concealed);
     }
 
-    public async ValueTask<MediaDeliveryAccess> AuthorizeOriginalAsync(
+    public ValueTask<MediaDeliveryAccess> AuthorizeAssetRenditionAsync(
+        HttpContext context,
+        Guid assetId,
+        CancellationToken cancellationToken) =>
+        AuthorizeAssetReadAsync(context, assetId, cancellationToken);
+
+    public ValueTask<MediaDeliveryAccess> AuthorizeOriginalAsync(
+        HttpContext context,
+        Guid assetId,
+        CancellationToken cancellationToken) =>
+        AuthorizeAssetReadAsync(context, assetId, cancellationToken);
+
+    private async ValueTask<MediaDeliveryAccess> AuthorizeAssetReadAsync(
         HttpContext context,
         Guid assetId,
         CancellationToken cancellationToken)
@@ -219,6 +231,32 @@ internal sealed class PlatformMediaDeliveryApplicationPort(
         return derivative is null
             ? MediaDeliveryResult.NotFound()
             : await ResolveDerivativeAsync(derivative, cancellationToken);
+    }
+
+    public async ValueTask<MediaDeliveryResult> ResolveAssetRenditionAsync(
+        MediaRenditionScope scope,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        PersistedDerivativeMedia? derivative =
+            await media.FindAssetRenditionAsync(
+                scope.TenantId,
+                scope.AssetId,
+                scope.RenditionId,
+                cancellationToken);
+        if (derivative is null)
+        {
+            return MediaDeliveryResult.NotFound();
+        }
+
+        if (derivative.State != "Ready")
+        {
+            return derivative.State is "Queued" or "Processing"
+                ? MediaDeliveryResult.Queued()
+                : MediaDeliveryResult.NotFound();
+        }
+
+        return await ResolveDerivativeAsync(derivative, cancellationToken);
     }
 
     public async ValueTask<MediaDeliveryResult> ResolveOriginalAsync(

@@ -103,6 +103,11 @@ public interface IMediaDeliveryAuthorizationPort
         MediaDeliveryCredential? credential,
         CancellationToken cancellationToken);
 
+    ValueTask<MediaDeliveryAccess> AuthorizeAssetRenditionAsync(
+        HttpContext context,
+        Guid assetId,
+        CancellationToken cancellationToken);
+
     ValueTask<MediaDeliveryAccess> AuthorizeOriginalAsync(
         HttpContext context,
         Guid assetId,
@@ -151,6 +156,43 @@ public sealed record MediaAssetScope
     public Guid TenantId { get; }
 
     public Guid AssetId { get; }
+}
+
+public sealed record MediaRenditionScope
+{
+    public MediaRenditionScope(Guid tenantId, Guid assetId, Guid renditionId)
+    {
+        if (tenantId == Guid.Empty || tenantId.Version != 7)
+        {
+            throw new ArgumentException(
+                "The tenant ID must be UUIDv7.",
+                nameof(tenantId));
+        }
+
+        if (assetId == Guid.Empty || assetId.Version != 7)
+        {
+            throw new ArgumentException(
+                "The asset ID must be UUIDv7.",
+                nameof(assetId));
+        }
+
+        if (renditionId == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "The rendition ID must be a non-empty identifier.",
+                nameof(renditionId));
+        }
+
+        TenantId = tenantId;
+        AssetId = assetId;
+        RenditionId = renditionId;
+    }
+
+    public Guid TenantId { get; }
+
+    public Guid AssetId { get; }
+
+    public Guid RenditionId { get; }
 }
 
 public sealed record MediaDerivativeRequest
@@ -355,6 +397,10 @@ public interface IMediaDeliveryApplicationPort
     ValueTask<MediaDeliveryResult> ResolvePrivateDerivativeAsync(
         MediaTenantScope scope,
         MediaDerivativeRequest request,
+        CancellationToken cancellationToken);
+
+    ValueTask<MediaDeliveryResult> ResolveAssetRenditionAsync(
+        MediaRenditionScope scope,
         CancellationToken cancellationToken);
 
     ValueTask<MediaDeliveryResult> ResolveOriginalAsync(

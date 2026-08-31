@@ -25,12 +25,16 @@ public sealed class MediaDeliveryEndpointContractTests
         "/media/{pipeline}/{sourceHash}/{recipeHash}.{extension}";
     private const string PrivateRoute =
         "/delivery/{pipeline}/{sourceHash}/{recipeHash}.{extension}";
+    private const string AssetRenditionRoute =
+        "/delivery/assets/{assetId:guid}/{renditionId:guid}";
     private const string OriginalRoute =
         "/api/v1/assets/{assetId:guid}/original";
     private static readonly Guid TenantId =
         Guid.Parse("01990a2a-bc00-7000-8000-000000000301");
     private static readonly Guid AssetId =
         Guid.Parse("01990a2a-bc00-7000-8000-000000000302");
+    private static readonly Guid RenditionId =
+        Guid.Parse("01990a2a-bc00-7000-8000-000000000303");
     private static readonly byte[] Content = Encoding.ASCII.GetBytes("0123456789");
 
     [Fact]
@@ -491,6 +495,171 @@ public sealed class MediaDeliveryEndpointContractTests
     }
 
     [Fact]
+    public async Task Asset_rendition_streams_ready_bytes_with_private_cache_and_no_topology_leakage()
+    {
+        var source = new FakeMediaContentSource(Content);
+        var authorization = new FakeMediaAuthorizationPort();
+        var application = new FakeMediaApplicationPort
+        {
+            AssetRenditionResult = MediaDeliveryResult.Ready(
+                Representation(source, "image/webp")),
+        };
+
+        TestResponse response = await SendAsync(
+            authorization,
+            application,
+            "GET",
+            AssetRenditionRoute);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("0123456789", response.BodyText);
+        Assert.Equal("image/webp", response.ContentType);
+        Assert.Equal($"\"{Sha256}\"", response.Headers.ETag.ToString());
+        Assert.Equal(
+            MediaDeliveryHttpContract.PrivateNoStoreCacheControl,
+            response.Headers.CacheControl.ToString());
+        Assert.Equal("bytes", response.Headers.AcceptRanges.ToString());
+        Assert.Equal("nosniff", response.Headers.XContentTypeOptions.ToString());
+        Assert.False(response.Headers.ContainsKey("Content-Disposition"));
+        Assert.Equal(1, authorization.AssetRenditionAuthorizeCalls);
+        Assert.Equal(AssetId, authorization.LastAssetRenditionAssetId);
+        Assert.Equal(TenantId, application.LastRenditionScope?.TenantId);
+        Assert.Equal(AssetId, application.LastRenditionScope?.AssetId);
+        Assert.Equal(RenditionId, application.LastRenditionScope?.RenditionId);
+    }
+
+    [Fact]
+    public async Task Asset_rendition_serves_ranges_and_conditional_requests()
+    {
+        var rangeSource = new FakeMediaContentSource(Content);
+        var conditionalSource = new FakeMediaContentSource(Content);
+
+        TestResponse partial = await SendAsync(
+            new FakeMediaAuthorizationPort(),
+            new FakeMediaApplicationPort
+            {
+                AssetRenditionResult = MediaDeliveryResult.Ready(
+                    Representation(rangeSource, "image/webp")),
+            },
+            "GET",
+            AssetRenditionRoute,
+            headers: new Dictionary<string, string>
+            {
+                ["Range"] = "bytes=2-5",
+            });
+        TestResponse notModified = await SendAsync(
+            new FakeMediaAuthorizationPort(),
+            new FakeMediaApplicationPort
+            {
+                AssetRenditionResult = MediaDeliveryResult.Ready(
+                    Representation(conditionalSource, "image/webp")),
+            },
+            "GET",
+            AssetRenditionRoute,
+            headers: new Dictionary<string, string>
+            {
+                ["If-None-Match"] = $"\"{Sha256}\"",
+            });
+
+        Assert.Equal(HttpStatusCode.PartialContent, partial.StatusCode);
+        Assert.Equal("2345", partial.BodyText);
+        Assert.Equal("bytes 2-5/10", partial.Headers.ContentRange.ToString());
+        Assert.Equal(HttpStatusCode.NotModified, notModified.StatusCode);
+        Assert.Empty(notModified.Body);
+        Assert.Equal(0, conditionalSource.OpenCalls);
+    }
+
+    [Fact]
+    public async Task Asset_rendition_requires_authentication_and_conceals_other_denials()
+    {
+        var application = new FakeMediaApplicationPort
+        {
+            AssetRenditionResult = MediaDeliveryResult.Ready(
+                Representation(new FakeMediaContentSource(Content), "image/webp")),
+        };
+
+        TestResponse unauthenticated = await SendAsync(
+            new FakeMediaAuthorizationPort
+            {
+                AssetRenditionAccess = MediaDeliveryAccess.Denied(
+                    MediaDeliveryAccessStatus.Unauthenticated),
+            },
+            application,
+            "GET",
+            AssetRenditionRoute);
+        TestResponse forbidden = await SendAsync(
+            new FakeMediaAuthorizationPort
+            {
+                AssetRenditionAccess = MediaDeliveryAccess.Denied(
+                    MediaDeliveryAccessStatus.Forbidden),
+            },
+            application,
+            "GET",
+            AssetRenditionRoute);
+        TestResponse concealed = await SendAsync(
+            new FakeMediaAuthorizationPort
+            {
+                AssetRenditionAccess = MediaDeliveryAccess.Denied(
+                    MediaDeliveryAccessStatus.Concealed),
+            },
+            application,
+            "GET",
+            AssetRenditionRoute);
+        TestResponse otherAsset = await SendAsync(
+            new FakeMediaAuthorizationPort
+            {
+                AssetRenditionAccess = MediaDeliveryAccess.AuthorizedAsset(
+                    TenantId,
+                    Guid.Parse("01990a2a-bc00-7000-8000-000000000398")),
+            },
+            application,
+            "GET",
+            AssetRenditionRoute);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticated.StatusCode);
+        Assert.Equal("authentication_required", ProblemCode(unauthenticated));
+        Assert.Equal(HttpStatusCode.NotFound, forbidden.StatusCode);
+        Assert.Equal("media_not_found", ProblemCode(forbidden));
+        Assert.Equal(HttpStatusCode.NotFound, concealed.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, otherAsset.StatusCode);
+        Assert.Equal(
+            MediaDeliveryHttpContract.NoStoreCacheControl,
+            concealed.Headers.CacheControl.ToString());
+        Assert.Equal(0, application.AssetRenditionResolveCalls);
+    }
+
+    [Fact]
+    public async Task Asset_rendition_reports_unknown_as_not_found_and_pending_as_queued()
+    {
+        TestResponse missing = await SendAsync(
+            new FakeMediaAuthorizationPort(),
+            new FakeMediaApplicationPort
+            {
+                AssetRenditionResult = MediaDeliveryResult.NotFound(),
+            },
+            "GET",
+            AssetRenditionRoute);
+        TestResponse queued = await SendAsync(
+            new FakeMediaAuthorizationPort(),
+            new FakeMediaApplicationPort
+            {
+                AssetRenditionResult = MediaDeliveryResult.Queued(),
+            },
+            "GET",
+            AssetRenditionRoute);
+
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+        Assert.Equal("media_not_found", ProblemCode(missing));
+        Assert.Equal(HttpStatusCode.Accepted, queued.StatusCode);
+        Assert.Equal(
+            MediaDeliveryHttpContract.NoStoreCacheControl,
+            queued.Headers.CacheControl.ToString());
+        Assert.Equal(
+            "queued",
+            queued.Json().RootElement.GetProperty("state").GetString());
+    }
+
+    [Fact]
     public async Task Original_filename_is_sanitized_without_header_injection()
     {
         var application = new FakeMediaApplicationPort
@@ -727,12 +896,17 @@ public sealed class MediaDeliveryEndpointContractTests
             .Replace(
                 "{assetId:guid}",
                 AssetId.ToString("D"),
+                StringComparison.Ordinal)
+            .Replace(
+                "{renditionId:guid}",
+                RenditionId.ToString("D"),
                 StringComparison.Ordinal);
         context.Request.RouteValues["pipeline"] = "v1";
         context.Request.RouteValues["sourceHash"] = SourceHash;
         context.Request.RouteValues["recipeHash"] = RecipeHash;
         context.Request.RouteValues["extension"] = "webp";
         context.Request.RouteValues["assetId"] = AssetId.ToString("D");
+        context.Request.RouteValues["renditionId"] = RenditionId.ToString("D");
         context.Response.Body = new MemoryStream();
         context.TraceIdentifier = "trace-media-delivery";
         configureContext?.Invoke(context);
@@ -783,6 +957,13 @@ public sealed class MediaDeliveryEndpointContractTests
         public MediaDeliveryAccess OriginalAccess { get; init; } =
             MediaDeliveryAccess.AuthorizedAsset(TenantId, AssetId);
 
+        public MediaDeliveryAccess AssetRenditionAccess { get; init; } =
+            MediaDeliveryAccess.AuthorizedAsset(TenantId, AssetId);
+
+        public int AssetRenditionAuthorizeCalls { get; private set; }
+
+        public Guid? LastAssetRenditionAssetId { get; private set; }
+
         public int PrivateAuthorizeCalls { get; private set; }
 
         public MediaDeliveryCredential? LastCredential { get; private set; }
@@ -808,6 +989,18 @@ public sealed class MediaDeliveryEndpointContractTests
             return ValueTask.FromResult(PrivateAccess);
         }
 
+        public ValueTask<MediaDeliveryAccess> AuthorizeAssetRenditionAsync(
+            HttpContext context,
+            Guid assetId,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AssetRenditionAuthorizeCalls++;
+            LastAssetRenditionAssetId = assetId;
+            LastRequestPath = context.Request.Path.ToString();
+            return ValueTask.FromResult(AssetRenditionAccess);
+        }
+
         public ValueTask<MediaDeliveryAccess> AuthorizeOriginalAsync(
             HttpContext context,
             Guid assetId,
@@ -825,6 +1018,13 @@ public sealed class MediaDeliveryEndpointContractTests
 
         public MediaDeliveryResult OriginalResult { get; init; } =
             MediaDeliveryResult.NotFound();
+
+        public MediaDeliveryResult AssetRenditionResult { get; init; } =
+            MediaDeliveryResult.NotFound();
+
+        public MediaRenditionScope? LastRenditionScope { get; private set; }
+
+        public int AssetRenditionResolveCalls { get; private set; }
 
         public Exception? Exception { get; init; }
 
@@ -858,6 +1058,16 @@ public sealed class MediaDeliveryEndpointContractTests
             PrivateResolveCalls++;
             ThrowIfNeeded(cancellationToken);
             return ValueTask.FromResult(PrivateResult);
+        }
+
+        public ValueTask<MediaDeliveryResult> ResolveAssetRenditionAsync(
+            MediaRenditionScope scope,
+            CancellationToken cancellationToken)
+        {
+            AssetRenditionResolveCalls++;
+            LastRenditionScope = scope;
+            ThrowIfNeeded(cancellationToken);
+            return ValueTask.FromResult(AssetRenditionResult);
         }
 
         public ValueTask<MediaDeliveryResult> ResolveOriginalAsync(

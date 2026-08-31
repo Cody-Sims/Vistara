@@ -55,6 +55,23 @@ public static class MediaDeliveryEndpointMapping
                         .GetRequiredService<IMediaDeliveryApplicationPort>(),
                     cancellationToken));
         endpoints.MapMethods(
+            "/delivery/assets/{assetId:guid}/{renditionId:guid}",
+            GetAndHeadMethods,
+            (
+                Guid assetId,
+                Guid renditionId,
+                HttpContext context,
+                CancellationToken cancellationToken) =>
+                MediaDeliveryEndpoint.AssetRenditionAsync(
+                    context,
+                    assetId,
+                    renditionId,
+                    context.RequestServices
+                        .GetRequiredService<IMediaDeliveryAuthorizationPort>(),
+                    context.RequestServices
+                        .GetRequiredService<IMediaDeliveryApplicationPort>(),
+                    cancellationToken));
+        endpoints.MapMethods(
             "/api/v1/assets/{assetId:guid}/original",
             GetAndHeadMethods,
             (

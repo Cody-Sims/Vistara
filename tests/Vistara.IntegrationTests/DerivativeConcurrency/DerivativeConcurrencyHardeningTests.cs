@@ -492,6 +492,11 @@ public sealed class DerivativeConcurrencyHardeningTests
             CancellationToken cancellationToken) =>
             throw new NotSupportedException();
 
+        public ValueTask<MediaDeliveryResult> ResolveAssetRenditionAsync(
+            MediaRenditionScope scope,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
         public ValueTask<MediaDeliveryResult> ResolveOriginalAsync(
             MediaAssetScope scope,
             CancellationToken cancellationToken) =>
