@@ -7,6 +7,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/Vistara.Domain/Vistara.Domain.csproj" />
     <ProjectReference Include="../../src/Vistara.Application/Vistara.Application.csproj" />
+    <ProjectReference Include="../../src/Vistara.Auth/Vistara.Auth.csproj" />
   </ItemGroup>
 
   <ItemGroup>
