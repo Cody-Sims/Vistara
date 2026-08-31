@@ -1,6 +1,6 @@
 using System.Data;
 using System.Data.Common;
-using System.Text;
+using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Vistara.Application.Common.Auditing;
@@ -171,33 +171,158 @@ public sealed record LocalFirstOwnerCredential : FirstOwnerCredential
         });
 }
 
-/// <summary>Provider keys the store accepts for an external first owner.</summary>
+/// <summary>
+/// Provider keys the store accepts for an external first owner. A key is not a
+/// label: it selects one exact issuer policy, and an issuer that does not match
+/// that policy character for character is refused.
+/// </summary>
 public static class ExternalFirstOwnerProviders
 {
-    /// <summary>Microsoft Entra ID.</summary>
+    /// <summary>Microsoft Entra ID in the public cloud.</summary>
     public const string Entra = "entra";
 
-    private static readonly HashSet<string> Supported =
-        new(StringComparer.Ordinal) { Entra };
+    private static readonly Dictionary<string, ExternalIssuerPolicy> Policies =
+        new(StringComparer.Ordinal)
+        {
+            [Entra] = ExternalIssuerPolicy.EntraPublicCloud,
+        };
 
     /// <summary>
     /// Normalizes a provider key and reports whether the store supports it.
     /// Unknown providers fail closed rather than reaching the database.
     /// </summary>
-    public static bool TryNormalize(string? provider, out string normalized)
+    public static bool TryNormalize(string? provider, out string normalized) =>
+        TryResolve(provider, out normalized, out _);
+
+    internal static bool TryResolve(
+        string? provider,
+        out string normalized,
+        out ExternalIssuerPolicy policy)
     {
         normalized = provider?.Trim().ToLowerInvariant() ?? string.Empty;
-        return Supported.Contains(normalized);
+        return Policies.TryGetValue(normalized, out policy!);
     }
 }
 
 /// <summary>
-/// A directory identity for the hosted entry point, keyed by provider,
+/// The single issuer shape one provider is allowed to present. The policy names
+/// an exact DNS authority and version segment, so the only accepted issuer for a
+/// directory tenant is <c>https://{authority}/{tid}/{version}</c> on the default
+/// HTTPS port with no user information, query, fragment, or extra path.
+/// </summary>
+internal sealed class ExternalIssuerPolicy
+{
+    /// <summary>
+    /// Microsoft Entra ID public cloud. Legacy <c>sts.windows.net</c> and
+    /// sovereign authorities are absent on purpose: the approved provider
+    /// contract does not emit them, so they must not be accepted.
+    /// </summary>
+    internal static readonly ExternalIssuerPolicy EntraPublicCloud =
+        new("login.microsoftonline.com", "v2.0");
+
+    private ExternalIssuerPolicy(string authority, string version)
+    {
+        Authority = authority;
+        Version = version;
+    }
+
+    internal string Authority { get; }
+
+    internal string Version { get; }
+
+    /// <summary>The one issuer string this policy stores for a directory tenant.</summary>
+    internal string CanonicalIssuer(Guid directoryTenantId) =>
+        string.Create(
+            CultureInfo.InvariantCulture,
+            $"https://{Authority}/{directoryTenantId:D}/{Version}");
+
+    /// <summary>
+    /// Reports whether a candidate issuer is the canonical issuer for
+    /// <paramref name="directoryTenantId"/>. Only surrounding whitespace, host
+    /// and tenant letter case, and one trailing slash may differ; everything
+    /// else, including encoded characters, is rejected before parsing.
+    /// </summary>
+    internal bool Accepts(string candidate, Guid directoryTenantId)
+    {
+        if (candidate.Length is 0 or > 256 || !IsPlainAscii(candidate))
+        {
+            return false;
+        }
+
+        // Dot segments are rejected before Uri collapses them into something
+        // that resembles the canonical path.
+        if (candidate.Contains("..", StringComparison.Ordinal) ||
+            candidate.Contains("/./", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!Uri.TryCreate(candidate, UriKind.Absolute, out Uri? issuer) ||
+            issuer.Scheme != Uri.UriSchemeHttps ||
+            !issuer.IsDefaultPort ||
+            issuer.UserInfo.Length > 0 ||
+            issuer.Query.Length > 0 ||
+            issuer.Fragment.Length > 0 ||
+            issuer.HostNameType != UriHostNameType.Dns)
+        {
+            return false;
+        }
+
+        // Host comparison is case-insensitive because DNS is; a trailing dot,
+        // an added label, or a punycode form is a different host and fails.
+        if (!string.Equals(issuer.Host, Authority, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(issuer.IdnHost, Authority, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string path = issuer.AbsolutePath;
+        if (path.EndsWith('/'))
+        {
+            path = path[..^1];
+        }
+
+        // A leading empty part plus exactly the tenant and version segments:
+        // an empty middle segment, a prefix such as common, or any extra path
+        // yields a different part count and fails.
+        string[] parts = path.Split('/');
+        return parts.Length == 3 &&
+            parts[0].Length == 0 &&
+            Guid.TryParseExact(parts[1], "D", out Guid tenant) &&
+            tenant == directoryTenantId &&
+            string.Equals(parts[2], Version, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Rejects control characters, non-ASCII text, percent-encoding, and
+    /// backslashes before <see cref="Uri"/> can normalize them into something
+    /// that resembles the canonical issuer.
+    /// </summary>
+    private static bool IsPlainAscii(string candidate)
+    {
+        foreach (char character in candidate)
+        {
+            if (character is '%' or '\\' or '<' or '>' ||
+                character > '\u007e' ||
+                char.IsControl(character))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+}
+
+/// <summary>
+/// A directory identity for the hosted entry point, identified by provider,
 /// directory tenant identifier (Entra <c>tid</c>) and object identifier (Entra
-/// <c>oid</c>). The key is stored as the issuer that binds the provider to the
-/// directory plus the object identifier as the subject, which is the pair every
-/// external sign-in already resolves users by. Email and display name are
-/// profile attributes and never part of the key.
+/// <c>oid</c>). The provider is validation input rather than a stored column: it
+/// selects the issuer policy, and the persisted key is the canonical issuer
+/// (which embeds the provider authority and the directory tenant) together with
+/// the object identifier as the subject, the pair external sign-in resolves
+/// users by. Email and display name are profile attributes and never part of
+/// the key.
 /// </summary>
 public sealed record ExternalFirstOwnerCredential : FirstOwnerCredential
 {
@@ -224,13 +349,6 @@ public sealed record ExternalFirstOwnerCredential : FirstOwnerCredential
                 nameof(provider));
         }
 
-        if (directoryTenantId == Guid.Empty)
-        {
-            throw new ArgumentException(
-                "The directory tenant identifier is required.",
-                nameof(directoryTenantId));
-        }
-
         if (objectId == Guid.Empty)
         {
             throw new ArgumentException(
@@ -242,19 +360,22 @@ public sealed record ExternalFirstOwnerCredential : FirstOwnerCredential
         Provider = normalizedProvider;
         DirectoryTenantId = directoryTenantId;
         ObjectId = objectId;
-        Issuer = NormalizeIssuer(issuer, directoryTenantId);
+        Issuer = NormalizeIssuer(normalizedProvider, issuer, directoryTenantId);
         Subject = SubjectFor(objectId);
     }
 
     public Guid ExternalIdentityId { get; }
 
-    /// <summary>The normalized provider key, for example <c>entra</c>.</summary>
+    /// <summary>
+    /// The normalized provider key, for example <c>entra</c>. It selects the
+    /// issuer policy and is not persisted as its own column.
+    /// </summary>
     public string Provider { get; }
 
     /// <summary>
-    /// The normalized token issuer. It is bound to
-    /// <see cref="DirectoryTenantId"/>, so a multi-tenant or common-endpoint
-    /// issuer cannot claim ownership.
+    /// The canonical issuer for <see cref="Provider"/> and
+    /// <see cref="DirectoryTenantId"/>. It is generated from the policy rather
+    /// than copied from the caller, so no supplied text reaches the database.
     /// </summary>
     public string Issuer { get; }
 
@@ -301,14 +422,22 @@ public sealed record ExternalFirstOwnerCredential : FirstOwnerCredential
         });
 
     /// <summary>
-    /// Normalizes the issuer and proves it belongs to the claimed directory
-    /// tenant. The identifier must appear as a path segment, which rejects the
-    /// multi-tenant common endpoint and any issuer from another directory.
-    /// Sign-in must normalize a token issuer through this method before it
-    /// looks an owner up, because the stored key is the normalized form.
+    /// Returns the one issuer string <paramref name="provider"/> may present for
+    /// a directory tenant. Provisioning stores this value and sign-in must
+    /// compare identifier tokens against it.
     /// </summary>
-    public static string NormalizeIssuer(string issuer, Guid directoryTenantId)
+    public static string CanonicalIssuer(string provider, Guid directoryTenantId)
     {
+        if (!ExternalFirstOwnerProviders.TryResolve(
+                provider,
+                out _,
+                out ExternalIssuerPolicy policy))
+        {
+            throw new ArgumentException(
+                $"'{provider}' is not a supported external identity provider.",
+                nameof(provider));
+        }
+
         if (directoryTenantId == Guid.Empty)
         {
             throw new ArgumentException(
@@ -316,52 +445,52 @@ public sealed record ExternalFirstOwnerCredential : FirstOwnerCredential
                 nameof(directoryTenantId));
         }
 
-        if (!ExternalIssuer.Create(issuer ?? string.Empty)
-                .TryGetValue(out ExternalIssuer normalized))
+        return policy.CanonicalIssuer(directoryTenantId);
+    }
+
+    /// <summary>
+    /// Validates an issuer against the policy the provider selects and returns
+    /// the canonical form. Sign-in and identifier-token validation must run a
+    /// token issuer through this method before comparing it with a stored
+    /// identity, because the stored key is always the canonical form.
+    /// </summary>
+    public static string NormalizeIssuer(
+        string provider,
+        string issuer,
+        Guid directoryTenantId)
+    {
+        if (!ExternalFirstOwnerProviders.TryResolve(
+                provider,
+                out string normalizedProvider,
+                out ExternalIssuerPolicy policy))
         {
             throw new ArgumentException(
-                "The external issuer must be an absolute URL without a query or fragment.",
+                $"'{provider}' is not a supported external identity provider.",
+                nameof(provider));
+        }
+
+        if (directoryTenantId == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "The directory tenant identifier is required.",
+                nameof(directoryTenantId));
+        }
+
+        string candidate = issuer?.Trim() ?? string.Empty;
+        if (!policy.Accepts(candidate, directoryTenantId))
+        {
+            throw new ArgumentException(
+                $"The {normalizedProvider} issuer must be " +
+                $"'{policy.CanonicalIssuer(directoryTenantId)}'.",
                 nameof(issuer));
         }
 
-        var parsed = new Uri(normalized.Value, UriKind.Absolute);
-        if (parsed.Scheme != Uri.UriSchemeHttps)
-        {
-            throw new ArgumentException(
-                "The external issuer must use HTTPS.",
-                nameof(issuer));
-        }
-
-        string canonical = directoryTenantId.ToString("D");
-        var path = new StringBuilder();
-        bool bound = false;
-        foreach (string segment in parsed.Segments)
-        {
-            string name = segment.TrimEnd('/');
-            if (Guid.TryParseExact(name, "D", out Guid candidate) &&
-                candidate == directoryTenantId)
-            {
-                bound = true;
-                _ = path.Append(canonical).Append(segment[name.Length..]);
-                continue;
-            }
-
-            _ = path.Append(segment);
-        }
-
-        if (!bound)
-        {
-            throw new ArgumentException(
-                "The external issuer must be bound to the directory tenant identifier.",
-                nameof(issuer));
-        }
-
-        return (parsed.GetLeftPart(UriPartial.Authority) + path).TrimEnd('/');
+        return policy.CanonicalIssuer(directoryTenantId);
     }
 
     /// <summary>
     /// Returns the stored subject for a directory object identifier. Sign-in
-    /// must resolve owners by this form together with the normalized issuer.
+    /// must resolve owners by this form together with the canonical issuer.
     /// </summary>
     public static string SubjectFor(Guid objectId)
     {

@@ -267,10 +267,18 @@ public sealed class FirstOwnerProvisioningTests
             row.Subject,
             StringComparison.OrdinalIgnoreCase);
 
+        // The schema has no provider column: the provider is carried by the
+        // canonical issuer authority its policy pins.
+        Assert.StartsWith(
+            "https://login.microsoftonline.com/",
+            row.Issuer,
+            StringComparison.Ordinal);
+
         // Sign-in resolves the owner by the same normalized pair.
         Assert.Equal(
             row.Issuer,
             ExternalFirstOwnerCredential.NormalizeIssuer(
+                ExternalFirstOwnerProviders.Entra,
                 EntraIssuer(directory) + "/",
                 directory));
         Assert.Equal(
@@ -469,28 +477,139 @@ public sealed class FirstOwnerProvisioningTests
     }
 
     [Fact]
-    public void An_external_credential_requires_an_issuer_bound_to_the_directory()
+    public void A_provider_selects_one_exact_issuer_policy()
     {
         Guid directory = Guid.NewGuid();
 
-        Assert.ThrowsAny<ArgumentException>(() => NewExternalCredential(
-            directoryTenantId: directory,
-            issuer: "https://login.microsoftonline.com/common/v2.0"));
-        Assert.ThrowsAny<ArgumentException>(() => NewExternalCredential(
-            directoryTenantId: directory,
-            issuer: FormattableString.Invariant(
-                $"https://login.microsoftonline.com/{Guid.NewGuid():D}/v2.0")));
-        Assert.ThrowsAny<ArgumentException>(() => NewExternalCredential(
-            directoryTenantId: directory,
-            issuer: FormattableString.Invariant(
-                $"http://login.microsoftonline.com/{directory:D}/v2.0")));
-        Assert.ThrowsAny<ArgumentException>(() => NewExternalCredential(
-            directoryTenantId: directory,
-            issuer: "not-a-uri"));
-        Assert.ThrowsAny<ArgumentException>(() => NewExternalCredential(
-            directoryTenantId: directory,
-            issuer: FormattableString.Invariant(
-                $"https://login.microsoftonline.com/{directory:N}/v2.0")));
+        Assert.Equal(
+            EntraIssuer(directory),
+            ExternalFirstOwnerCredential.CanonicalIssuer(
+                ExternalFirstOwnerProviders.Entra,
+                directory));
+        Assert.ThrowsAny<ArgumentException>(
+            () => ExternalFirstOwnerCredential.CanonicalIssuer("okta", directory));
+
+        // The provider is load-bearing: a canonical Entra issuer is still
+        // refused for any other provider key.
+        Assert.ThrowsAny<ArgumentException>(
+            () => ExternalFirstOwnerCredential.NormalizeIssuer(
+                "okta",
+                EntraIssuer(directory),
+                directory));
+        Assert.Equal(
+            EntraIssuer(directory),
+            ExternalFirstOwnerCredential.NormalizeIssuer(
+                ExternalFirstOwnerProviders.Entra,
+                EntraIssuer(directory),
+                directory));
+    }
+
+    [Fact]
+    public void An_entra_issuer_must_be_the_canonical_public_cloud_authority()
+    {
+        Guid directory = Guid.NewGuid();
+        string canonical = EntraIssuer(directory);
+
+        string[] accepted =
+        [
+            canonical,
+            canonical + "/",
+            "  " + canonical + "  ",
+            canonical.Replace(
+                "login.microsoftonline.com",
+                "LOGIN.MicrosoftOnline.COM",
+                StringComparison.Ordinal),
+            canonical.Replace(
+                directory.ToString("D"),
+                directory.ToString("D").ToUpperInvariant(),
+                StringComparison.Ordinal),
+        ];
+
+        Assert.All(
+            accepted,
+            issuer => Assert.Equal(
+                canonical,
+                ExternalFirstOwnerCredential.NormalizeIssuer(
+                    ExternalFirstOwnerProviders.Entra,
+                    issuer,
+                    directory)));
+    }
+
+    [Fact]
+    public void An_entra_issuer_outside_the_canonical_form_is_rejected()
+    {
+        Guid directory = Guid.NewGuid();
+        string tid = directory.ToString("D");
+        string[] rejected =
+        [
+            // Wrong or hostile authority, including suffix and prefix confusion.
+            $"https://evil.test/{tid}/v2.0",
+            $"https://login.microsoftonline.com.evil.test/{tid}/v2.0",
+            $"https://login.microsoftonline.com./{tid}/v2.0",
+            $"https://evil-login.microsoftonline.com/{tid}/v2.0",
+            $"https://sub.login.microsoftonline.com/{tid}/v2.0",
+            $"https://login.microsoftonline.com@evil.test/{tid}/v2.0",
+            $"https://evil.test@login.microsoftonline.com/{tid}/v2.0",
+            $"https://login.microsoftonline.com:8443/{tid}/v2.0",
+            $"https://20.190.128.10/{tid}/v2.0",
+            $"https://[2603:1030::1]/{tid}/v2.0",
+            $"https://login.micros\u043efton\u2024ine.com/{tid}/v2.0",
+            $"https://xn--lgin-microsoftonline-3kb.com/{tid}/v2.0",
+
+            // Legacy and sovereign authorities the approved contract omits.
+            $"https://sts.windows.net/{tid}/",
+            $"https://login.microsoftonline.us/{tid}/v2.0",
+            $"https://login.partner.microsoftonline.cn/{tid}/v2.0",
+
+            // Wrong scheme or non-absolute issuers.
+            $"http://login.microsoftonline.com/{tid}/v2.0",
+            $"//login.microsoftonline.com/{tid}/v2.0",
+            "not-a-uri",
+            string.Empty,
+
+            // Multi-tenant endpoints, including common placed before the tenant.
+            "https://login.microsoftonline.com/common/v2.0",
+            "https://login.microsoftonline.com/organizations/v2.0",
+            "https://login.microsoftonline.com/consumers/v2.0",
+            $"https://login.microsoftonline.com/common/{tid}/v2.0",
+            $"https://login.microsoftonline.com/{tid}/common/v2.0",
+
+            // Wrong tenant, tenant format, version, or path shape.
+            $"https://login.microsoftonline.com/{Guid.NewGuid():D}/v2.0",
+            $"https://login.microsoftonline.com/{directory:N}/v2.0",
+            $"https://login.microsoftonline.com/{{{tid}}}/v2.0",
+            $"https://login.microsoftonline.com/{tid}/v1.0",
+            $"https://login.microsoftonline.com/{tid}/V2.0",
+            $"https://login.microsoftonline.com/{tid}",
+            $"https://login.microsoftonline.com/{tid}/v2.0/extra",
+            $"https://login.microsoftonline.com//{tid}//v2.0",
+            $"https://login.microsoftonline.com/{tid}/../{tid}/v2.0",
+
+            // Encoded path tricks and delimiters.
+            $"https://login.microsoftonline.com/{tid}%2Fv2.0",
+            $"https://login.microsoftonline.com/%2E%2E/{tid}/v2.0",
+            $"https://login.microsoftonline.com/{tid}/v2.0%00",
+            $"https://login.microsoftonline.com\\{tid}\\v2.0",
+
+            // Query and fragment payloads.
+            $"https://login.microsoftonline.com/{tid}/v2.0?next=https://evil.test",
+            $"https://login.microsoftonline.com/{tid}/v2.0#evil",
+        ];
+
+        Assert.All(
+            rejected,
+            issuer =>
+            {
+                _ = Assert.ThrowsAny<ArgumentException>(
+                    () => ExternalFirstOwnerCredential.NormalizeIssuer(
+                        ExternalFirstOwnerProviders.Entra,
+                        issuer,
+                        directory));
+                _ = Assert.ThrowsAny<ArgumentException>(
+                    () => NewExternalCredential(
+                        directoryTenantId: directory,
+                        issuer: issuer));
+            });
     }
 
     [Fact]
