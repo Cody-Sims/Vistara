@@ -46,6 +46,12 @@ LABEL org.opencontainers.image.title="Vistara migrations" \
 
 ENV DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp/.net
 
+# The .NET runtime image omits GSSAPI, which Npgsql loads while negotiating
+# authentication; without it every migration run starts with a library error.
+RUN apt-get update && \
+    apt-get install --yes --no-install-recommends libgssapi-krb5-2 && \
+    rm --recursive --force /var/lib/apt/lists/*
+
 RUN mkdir --parents /var/lib/vistara/data && \
     chown "$APP_UID:$APP_UID" /var/lib/vistara/data
 
