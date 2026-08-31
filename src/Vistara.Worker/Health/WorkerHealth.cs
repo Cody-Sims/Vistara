@@ -442,19 +442,20 @@ internal sealed class WorkerDatabaseHealthProbe(IServiceProvider services)
         HealthDependency.Database,
         HealthReasonCodes.DependencyUnavailable)
 {
-    protected override async ValueTask CheckCoreAsync(
+    /// <summary>
+    /// Runs a real round trip on the context's own connection rather than
+    /// <c>CanConnectAsync</c>. The worker holds no tenant scope while probing,
+    /// so a query routed through the EF pipeline is rejected by the tenant
+    /// interceptor before it reaches the server, and a connection that opens is
+    /// not evidence that the database answers.
+    /// </summary>
+    protected override ValueTask CheckCoreAsync(
         IServiceProvider services,
-        CancellationToken cancellationToken)
-    {
-        bool canConnect = await services
-            .GetRequiredService<VistaraDbContext>()
-            .Database
-            .CanConnectAsync(cancellationToken);
-        if (!canConnect)
-        {
-            throw new InvalidOperationException();
-        }
-    }
+        CancellationToken cancellationToken) =>
+        ExecuteSchemaQueryAsync(
+            services.GetRequiredService<VistaraDbContext>(),
+            "SELECT 1",
+            cancellationToken);
 }
 
 internal sealed class WorkerSchemaHealthProbe(IServiceProvider services)

@@ -160,6 +160,41 @@ public sealed class WorkerHealthWiringTests
         }
     }
 
+    [Fact]
+    public async Task Worker_readiness_fails_when_the_database_cannot_answer_a_query()
+    {
+        string root = CreateScratchRoot();
+        try
+        {
+            // The file opens as a connection but rejects every statement, which
+            // is what an unreachable or refusing database looks like to a probe
+            // that only asks whether a connection can be established.
+            string database = Path.Combine(root, "corrupt.db");
+            await File.WriteAllBytesAsync(
+                database,
+                "this is deliberately not a database"u8.ToArray(),
+                CancellationToken.None);
+            await using ServiceProvider provider =
+                BuildProvider($"Data Source={database}", root);
+
+            WorkerHealthSnapshot snapshot = await provider
+                .GetRequiredService<WorkerHealthMonitor>()
+                .EvaluateAsync(CancellationToken.None);
+
+            HealthCheckResult check = Assert.Single(
+                snapshot.Readiness.Checks,
+                candidate => candidate.Dependency == HealthDependency.Database);
+            Assert.Equal(HealthState.Unhealthy, check.State);
+            Assert.Equal(
+                HealthReasonCodes.DependencyUnavailable,
+                check.ReasonCode);
+        }
+        finally
+        {
+            DeleteScratchRoot(root);
+        }
+    }
+
     private static async Task WaitForSnapshotAsync(IWorkerHealthState state)
     {
         for (int attempt = 0; attempt < 100 && state.Current is null; attempt++)

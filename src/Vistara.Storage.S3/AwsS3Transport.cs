@@ -324,7 +324,9 @@ internal sealed class AwsS3Transport : IS3Transport
                 throw Unknown(error);
             }
 
-            foreach (S3Object item in response.S3Objects)
+            // AWSSDK v4 leaves response collections null rather than empty, so
+            // an empty page must not be enumerated directly.
+            foreach (S3Object item in response.S3Objects ?? [])
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 yield return await RequireHeadAsync(item.Key, cancellationToken);
@@ -508,7 +510,9 @@ internal sealed class AwsS3Transport : IS3Transport
                         "The S3 service returned multipart inventory for a different upload.");
                 }
 
-                foreach (PartDetail part in response.Parts)
+                // AWSSDK v4 leaves response collections null rather than empty,
+                // so an upload with no parts must not be enumerated directly.
+                foreach (PartDetail part in response.Parts ?? [])
                 {
                     if (part.PartNumber is not { } partNumber ||
                         part.Size is not { } size ||

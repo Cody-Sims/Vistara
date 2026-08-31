@@ -1,4 +1,7 @@
+using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Sockets;
+using System.Text;
 using Amazon.Runtime;
 using Amazon.S3;
 using Vistara.Application.Common.Storage;
@@ -148,6 +151,53 @@ public sealed class AwsS3TransportTests
             AwsS3Transport.ClassifyCompletion(exception).ToString());
     }
 
+    [Fact]
+    public async Task An_empty_listing_yields_no_entries_instead_of_faulting()
+    {
+        using var service = new StubS3Service(
+            """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+              <Name>vistara-test</Name>
+              <Prefix>health/</Prefix>
+              <KeyCount>0</KeyCount>
+              <MaxKeys>1000</MaxKeys>
+              <IsTruncated>false</IsTruncated>
+            </ListBucketResult>
+            """);
+        await using S3BlobStore store = new(
+            StubOptions(service.Endpoint),
+            new BasicAWSCredentials("test-access-key", "test-secret-key"),
+            new FixedTimeProvider(Now));
+
+        // The readiness probe lists a sentinel prefix that is empty on a
+        // freshly provisioned bucket. AWSSDK v4 reports an empty page as a null
+        // collection, which must not surface as a storage failure.
+        List<BlobHead> heads = [];
+        await foreach (BlobHead head in store.ListAsync(
+                           new BlobListOptions("health/"),
+                           CancellationToken.None))
+        {
+            heads.Add(head);
+        }
+
+        Assert.Empty(heads);
+        Assert.Contains(
+            service.Requests,
+            request =>
+                request.Contains("list-type=2", StringComparison.Ordinal) &&
+                request.Contains("health", StringComparison.Ordinal));
+    }
+
+    private static S3BlobStoreOptions StubOptions(Uri endpoint) =>
+        new(S3ProviderKind.Minio, "vistara-test", "us-east-1")
+        {
+            ServiceUrl = endpoint,
+            ForcePathStyle = true,
+            AllowInsecureHttp = true,
+            AllowedEndpointHosts = [endpoint.Host],
+        };
+
     private static S3BlobStoreOptions MinioOptions() =>
         new(S3ProviderKind.Minio, "vistara-test", "us-east-1")
         {
@@ -172,5 +222,66 @@ public sealed class AwsS3TransportTests
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    /// <summary>
+    /// Answers S3 requests on loopback with a fixed body so listing behaviour
+    /// is exercised through the real AWS SDK response pipeline.
+    /// </summary>
+    private sealed class StubS3Service : IDisposable
+    {
+        private readonly HttpListener _listener = new();
+        private readonly ConcurrentQueue<string> _requests = new();
+
+        public StubS3Service(string body)
+        {
+            int port = FreePort();
+            Endpoint = new Uri($"http://127.0.0.1:{port}");
+            _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+            _listener.Start();
+            _ = Task.Run(async () =>
+            {
+                while (_listener.IsListening)
+                {
+                    HttpListenerContext context;
+                    try
+                    {
+                        context = await _listener.GetContextAsync();
+                    }
+                    catch (Exception)
+                    {
+                        return;
+                    }
+
+                    _requests.Enqueue(context.Request.Url!.PathAndQuery);
+                    byte[] payload = Encoding.UTF8.GetBytes(body);
+                    context.Response.StatusCode = 200;
+                    context.Response.ContentType = "application/xml";
+                    context.Response.ContentLength64 = payload.Length;
+                    await context.Response.OutputStream.WriteAsync(payload);
+                    context.Response.Close();
+                }
+            });
+        }
+
+        public Uri Endpoint { get; }
+
+        public IReadOnlyCollection<string> Requests => [.. _requests];
+
+        public void Dispose() => ((IDisposable)_listener).Dispose();
+
+        private static int FreePort()
+        {
+            var probe = new TcpListener(IPAddress.Loopback, 0);
+            probe.Start();
+            try
+            {
+                return ((IPEndPoint)probe.LocalEndpoint).Port;
+            }
+            finally
+            {
+                probe.Stop();
+            }
+        }
     }
 }

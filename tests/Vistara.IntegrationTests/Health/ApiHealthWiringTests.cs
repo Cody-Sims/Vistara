@@ -274,7 +274,141 @@ public sealed class ApiHealthWiringTests
             scope.ServiceProvider.GetServices<IHealthDependencyProbe>().Count());
     }
 
+    [Fact]
+    public async Task Readiness_fails_when_the_database_cannot_answer_a_query()
+    {
+        string root = Path.Combine(
+            AppContext.BaseDirectory,
+            "eng",
+            "tests",
+            "api-health",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            // The file opens as a connection but rejects every statement, which
+            // is what an unreachable or refusing database looks like to a probe
+            // that only asks whether a connection can be established.
+            string database = Path.Combine(root, "corrupt.db");
+            await File.WriteAllBytesAsync(
+                database,
+                "this is deliberately not a database"u8.ToArray(),
+                CancellationToken.None);
+
+            HealthReport report = await EvaluateReadinessAsync(
+                $"Data Source={database}",
+                root,
+                new UnscopedTenantScope());
+
+            HealthCheckResult database_ = Assert.Single(
+                report.Checks,
+                check => check.Dependency == HealthDependency.Database);
+            Assert.Equal(HealthState.Unhealthy, database_.State);
+            Assert.Equal(
+                HealthReasonCodes.DependencyUnavailable,
+                database_.ReasonCode);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Readiness_probes_do_not_require_an_ambient_tenant_scope()
+    {
+        string root = Path.Combine(
+            AppContext.BaseDirectory,
+            "eng",
+            "tests",
+            "api-health",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string connectionString =
+            $"Data Source=ApiHealthTenant-{Guid.NewGuid():N};Mode=Memory;Cache=Shared";
+        await using var anchor = new SqliteConnection(connectionString);
+        await anchor.OpenAsync(CancellationToken.None);
+        try
+        {
+            DbContextOptions<VistaraDbContext> contextOptions =
+                new DbContextOptionsBuilder<VistaraDbContext>()
+                    .UseSqlite(connectionString)
+                    .Options;
+            await using (var context = new VistaraDbContext(
+                             contextOptions,
+                             new FixedTenantScope(Guid.CreateVersion7())))
+            {
+                await context.Database.EnsureCreatedAsync(CancellationToken.None);
+            }
+
+            // Readiness is anonymous, so no tenant is ever established for it.
+            // Every dependency probe must still answer, while tenant-scoped data
+            // access in the same scope keeps failing closed.
+            var unscoped = new UnscopedTenantScope();
+            HealthReport report = await EvaluateReadinessAsync(
+                connectionString,
+                root,
+                unscoped,
+                async scope =>
+                {
+                    VistaraDbContext context =
+                        scope.GetRequiredService<VistaraDbContext>();
+                    await Assert.ThrowsAsync<InvalidOperationException>(
+                        () => context.Assets.CountAsync());
+                });
+
+            Assert.True(
+                report.State == HealthState.Healthy,
+                HealthReportJson.Serialize(report));
+            Assert.Equal(Guid.Empty, unscoped.TenantId);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static bool DependencyMiddlewareRan { get; set; }
+
+    private static async Task<HealthReport> EvaluateReadinessAsync(
+        string connectionString,
+        string mediaRoot,
+        ITenantScope tenantScope,
+        Func<IServiceProvider, Task>? inspect = null)
+    {
+        IConfiguration configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Media:Storage:Provider"] = "Local",
+                ["Media:Storage:Local:RootPath"] = mediaRoot,
+                ["Media:Imaging:Provider"] = "NetVips",
+            })
+            .Build();
+        ServiceCollection services = [];
+        services.AddSingleton(tenantScope);
+        services.AddVistaraPersistence(options =>
+        {
+            options.Provider = VistaraDatabaseProvider.Sqlite;
+            options.ConnectionString = connectionString;
+        });
+        services.AddVistaraMedia(configuration);
+        services.AddVistaraApiHealth();
+        await using ServiceProvider provider = services.BuildServiceProvider();
+        await using AsyncServiceScope scope = provider.CreateAsyncScope();
+        if (inspect is not null)
+        {
+            await inspect(scope.ServiceProvider);
+        }
+
+        return await scope.ServiceProvider
+            .GetRequiredService<SafeHealthEvaluator>()
+            .EvaluateAsync(HealthEndpointKind.Readiness, CancellationToken.None);
+    }
+
+    private sealed class UnscopedTenantScope : ITenantScope
+    {
+        public Guid TenantId => Guid.Empty;
+    }
 
     private static string[] Routes(WebApplication app) =>
         [.. ((IEndpointRouteBuilder)app).DataSources
