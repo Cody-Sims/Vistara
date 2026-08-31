@@ -524,7 +524,8 @@ All management routes use `/api/v1`. JSON is camelCase. Timestamps are RFC 3339 
 | `GET /api/v1/assets/{id}/derivatives` | List available/requested derivatives |
 | `POST /api/v1/assets/bulk` | Bulk metadata, album, tag, favorite, trash actions |
 | `GET /media/{pipeline}/{sourceHash}/{recipeHash}.{ext}` | Public immutable derivative |
-| `GET /delivery/{grant}/{pipeline}/{sourceHash}/{recipeHash}.{ext}` | Revocable/private derivative |
+| `GET\|HEAD /delivery/{pipeline}/{sourceHash}/{recipeHash}.{ext}` | Authorized immutable derivative |
+| `GET\|HEAD /delivery/assets/{assetId}/{renditionId}` | Tenant-authorized private asset rendition |
 
 Transformation requests accept only:
 

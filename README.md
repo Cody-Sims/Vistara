@@ -41,7 +41,7 @@ An ASP.NET Core Minimal API under `/api/v1` covering:
 | Curation | `/api/v1/albums`, `/api/v1/tags`, `/api/v1/assets/{id}/favorite` |
 | Uploads | `POST /api/v1/uploads`, `PUT /api/v1/uploads/{id}/content`, `POST /api/v1/uploads/{id}/parts`, `POST /api/v1/uploads/{id}/commit`, `DELETE /api/v1/uploads/{id}` |
 | Derivatives | `GET /api/v1/derivative-presets`, `GET/POST /api/v1/assets/{id}/derivatives` |
-| Delivery | `GET` and `HEAD` on `/media/{pipeline}/{sourceHash}/{recipeHash}.{ext}` and `/delivery/{pipeline}/{sourceHash}/{recipeHash}.{ext}`, `GET /api/v1/assets/{id}/original` |
+| Delivery | `GET` and `HEAD` on `/media/{pipeline}/{sourceHash}/{recipeHash}.{ext}`, `/delivery/{pipeline}/{sourceHash}/{recipeHash}.{ext}`, `/delivery/assets/{assetId}/{renditionId}`, and `/api/v1/assets/{id}/original` |
 | Sharing | `/api/v1/shares`, `GET /api/v1/public/shares/{token}`, `POST /api/v1/public/shares/{token}/challenge` |
 | Lifecycle | `GET /api/v1/trash`, `POST /api/v1/trash/restore`, `POST /api/v1/trash/purge`, `POST /api/v1/trash/purge/{batchId}/confirm` |
 | Jobs | `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/retry`, `POST /api/v1/jobs/{id}/cancel` |
