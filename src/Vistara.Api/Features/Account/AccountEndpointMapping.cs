@@ -28,6 +28,7 @@ public static class AccountServiceCollectionExtensions
         services.TryAddScoped<TenantFactory>();
         services.TryAddScoped<IdentityFactory>();
         services.TryAddSingleton<ILocalPasswordHasher, Pbkdf2LocalPasswordHasher>();
+        services.TryAddSingleton<DummyLocalPasswordVerifier>();
         services.TryAddSingleton(new CookieAuthOptions());
         services.TryAddScoped<
             ILocalCredentialVerifier,

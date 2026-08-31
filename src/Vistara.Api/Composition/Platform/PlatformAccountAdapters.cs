@@ -20,7 +20,8 @@ namespace Vistara.Api.Composition.Platform;
 /// </summary>
 internal sealed class PlatformLocalCredentialVerifier(
     RelationalIdentityCatalog catalog,
-    ILocalPasswordHasher hasher) : ILocalCredentialVerifier
+    ILocalPasswordHasher hasher,
+    DummyLocalPasswordVerifier dummy) : ILocalCredentialVerifier
 {
     public async ValueTask<User?> VerifyAsync(
         string login,
@@ -35,13 +36,21 @@ internal sealed class PlatformLocalCredentialVerifier(
         Result<NormalizedLogin> normalized = NormalizedLogin.Create(login);
         if (!normalized.TryGetValue(out NormalizedLogin value))
         {
+            _ = dummy.ConsumeVerification(password);
             return null;
         }
 
         PersistedLocalCredential? credential =
             await catalog.FindCredentialAsync(value.Value, cancellationToken);
-        if (credential is null ||
-            !hasher.Verify(password, credential.PasswordHash))
+        if (credential is null)
+        {
+            // Absent logins run the same key derivation as present logins so a
+            // caller cannot distinguish them by response time.
+            _ = dummy.ConsumeVerification(password);
+            return null;
+        }
+
+        if (!hasher.Verify(password, credential.PasswordHash))
         {
             return null;
         }

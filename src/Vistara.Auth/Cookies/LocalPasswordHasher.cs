@@ -117,3 +117,40 @@ public sealed class Pbkdf2LocalPasswordHasher : ILocalPasswordHasher
             HashAlgorithmName.SHA256,
             HashByteLength);
 }
+
+/// <summary>
+/// Provides a fixed, real password verifier that is checked whenever a login
+/// does not resolve to a stored credential. Verifying it keeps the key
+/// derivation cost of an unknown login indistinguishable from a known login
+/// with a wrong password.
+/// </summary>
+public sealed class DummyLocalPasswordVerifier
+{
+    private readonly ILocalPasswordHasher _hasher;
+    private readonly Lazy<string> _verifier;
+
+    public DummyLocalPasswordVerifier(ILocalPasswordHasher hasher)
+    {
+        _hasher = hasher ?? throw new ArgumentNullException(nameof(hasher));
+        _verifier = new Lazy<string>(
+            () => _hasher.Hash(CreateUnguessableSecret(_hasher.MinimumPasswordLength)),
+            LazyThreadSafetyMode.ExecutionAndPublication);
+    }
+
+    /// <summary>The stored-shape verifier that no submitted password can match.</summary>
+    public string Verifier => _verifier.Value;
+
+    /// <summary>
+    /// Runs one key derivation against the fixed verifier and always reports
+    /// failure. The result is intentionally discarded by callers.
+    /// </summary>
+    public bool ConsumeVerification(string password) =>
+        _hasher.Verify(password ?? string.Empty, Verifier);
+
+    private static string CreateUnguessableSecret(int minimumLength)
+    {
+        int length = Math.Max(minimumLength, 32);
+        return Convert.ToBase64String(
+            System.Security.Cryptography.RandomNumberGenerator.GetBytes(length));
+    }
+}

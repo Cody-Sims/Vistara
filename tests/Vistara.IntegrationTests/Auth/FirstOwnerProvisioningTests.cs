@@ -97,7 +97,8 @@ public sealed class FirstOwnerProvisioningTests
 
         var verifier = new PlatformLocalCredentialVerifier(
             new RelationalIdentityCatalog(database.CreateCatalog()),
-            database.Hasher);
+            database.Hasher,
+            new DummyLocalPasswordVerifier(database.Hasher));
 
         User? matched = await verifier.VerifyAsync(
             "owner@example.com",
