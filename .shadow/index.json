@@ -61,6 +61,12 @@
       "title": "External compute remains an optional provider adapter",
       "status": "proposed",
       "file": ".shadow/decisions/DEC-0008.json"
+    },
+    {
+      "id": "DEC-0009",
+      "title": "Hosted Entra entry terminates in the existing Vistara cookie session",
+      "status": "proposed",
+      "file": ".shadow/decisions/DEC-0009.json"
     }
   ]
 }
