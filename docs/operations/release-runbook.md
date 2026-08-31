@@ -101,11 +101,14 @@ required check.
 5. Confirm `/health/startup`, `/health/ready`, and `/health/live` on every
    replica, then confirm queue depth and job failure rates return to baseline.
 
-Concurrent migration containers are safe: `deployment-gates.yml` proves that two
-bundles started at the same instant both succeed, that each migration is applied
-exactly once, and that a repeat run leaves the ledger unchanged. Runtime API and
-worker logins hold no DDL rights, so only the migration login can change the
-schema.
+Concurrent migration containers are safe: `deployment-gates.yml` proves that
+three bundles started at the same instant all succeed, that each migration is
+applied exactly once, that a repeat run leaves the ledger unchanged, and that a
+migration replayed over existing objects still fails the bundle. The bundles
+serialize on a session-scoped PostgreSQL advisory lock that is held for the
+whole run, so a bundle that loses the race waits and then re-reads the ledger
+instead of replaying stale work. Runtime API and worker logins hold no DDL
+rights, so only the migration login can change the schema.
 
 ## Schema change policy
 

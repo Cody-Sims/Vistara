@@ -9,6 +9,21 @@ Runtime composition must call `UseVistaraMigrations` on the Npgsql provider
 options. It must not call `Migrate` automatically; migration bundles or an
 explicit deployment step own schema changes.
 
+## Concurrent migration safety
+
+`PostgresMigrationLockHistoryRepository` replaces the provider history
+repository so that a migration run holds a session-scoped advisory lock
+(`pg_advisory_lock`) for its entire duration. The provider default locks the
+history table inside each migration transaction, which releases the lock on
+every commit; a bundle that loses that race resumes the migration list it
+computed earlier and replays data definition statements over objects that
+already exist. The advisory lock is independent of transactions and of any
+table, so it also covers creating the history table on a fresh database.
+
+A bundle waits up to fifteen minutes for the lock. Set
+`VISTARA_MIGRATION_LOCK_TIMEOUT_SECONDS` to change that bound. Genuine
+migration errors are never suppressed: only the wait is serialized.
+
 ## Tenant row-level security
 
 The initial migration enables and forces RLS on every tenant-owned table and
