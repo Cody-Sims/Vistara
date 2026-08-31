@@ -127,6 +127,9 @@ public sealed class ApiRuntimeCompositionTests
                 .Cast<string>()
                 .ToArray();
             Assert.Contains("/api/v1/events", routes);
+            Assert.Contains("/api/v1/setup", routes);
+            Assert.Contains("/api/v1/capabilities", routes);
+            Assert.Contains("/api/v1/admin/storage/validate", routes);
             Assert.Contains("/api/v1/derivative-presets", routes);
             Assert.Contains("/api/v1/assets/{assetId:guid}/original", routes);
             Assert.Contains(
