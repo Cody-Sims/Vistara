@@ -178,6 +178,7 @@ export function galleryRoutes(
     {
       path: '/setup',
       errorElement: <RouteErrorBoundary />,
+      hydrateFallbackElement: <InitialLoadingPage />,
       ...deferred('Set up Vistara', async () => ({
         Component: (await import('./deferredScreens')).SetupScreen,
       })),
