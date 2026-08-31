@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Xml.Linq;
 using Azure.Core;
@@ -189,6 +190,50 @@ public sealed class DataProtectionCompositionTests
     }
 
     [Fact]
+    public async Task Sovereign_azure_clouds_are_rejected_until_audience_and_authority_exist()
+    {
+        string[] sovereignBlobHosts =
+        [
+            "vistarakeys.blob.core.usgovcloudapi.net",
+            "vistarakeys.blob.core.chinacloudapi.cn",
+            "vistarakeys.blob.core.cloudapi.de",
+        ];
+        foreach (string host in sovereignBlobHosts)
+        {
+            OptionsValidationException error = await AssertInvalidAsync(
+                WithSetting("BlobServiceUri", $"https://{host}"));
+            AssertSovereignFailure(error, "BlobServiceUri", host);
+        }
+
+        string[] sovereignVaultHosts =
+        [
+            "vistara-keyring.vault.usgovcloudapi.net",
+            "vistara-keyring.vault.azure.cn",
+            "vistara-keyring.vault.microsoftazure.de",
+        ];
+        foreach (string host in sovereignVaultHosts)
+        {
+            OptionsValidationException error = await AssertInvalidAsync(
+                WithSetting("KeyVaultKeyIdentifier", $"https://{host}/keys/{KeyName}"));
+            AssertSovereignFailure(error, "KeyVaultKeyIdentifier", host);
+        }
+    }
+
+    private static void AssertSovereignFailure(
+        OptionsValidationException error,
+        string key,
+        string host)
+    {
+        string rendered = error.ToString();
+        Assert.Contains(
+            $"'{SecurityDataProtectionOptions.SectionName}:{key}'",
+            rendered,
+            StringComparison.Ordinal);
+        Assert.Contains("public Azure", rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain(host, rendered, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Versioned_key_identifiers_and_invalid_names_are_rejected()
     {
         await AssertInvalidAsync(WithSetting(
@@ -244,7 +289,10 @@ public sealed class DataProtectionCompositionTests
         HostApplicationBuilder builder = CreateBuilder(
             EnabledSettings(),
             Environments.Production);
-        builder.Services.AddSingleton<IDataProtectionRuntimeDependencies>(runtime);
+        builder.Services.AddVistaraApiDataProtection(
+            builder.Configuration,
+            builder.Environment,
+            runtime);
         builder.Services.AddVistaraApiSecurity(
             builder.Configuration,
             builder.Environment);
@@ -260,6 +308,10 @@ public sealed class DataProtectionCompositionTests
             1,
             builder.Services.Count(descriptor =>
                 descriptor.ServiceType == typeof(IVistaraDataProtectionRegistration)));
+        Assert.Equal(
+            1,
+            builder.Services.Count(descriptor =>
+                descriptor.ServiceType == typeof(IDataProtectionRuntimeDependencies)));
 
         using IHost host = builder.Build();
         await host.StartAsync();
@@ -273,6 +325,78 @@ public sealed class DataProtectionCompositionTests
         Assert.Same(
             runtime,
             host.Services.GetRequiredService<IDataProtectionRuntimeDependencies>());
+    }
+
+    [Fact]
+    public void Pre_registered_dependencies_without_an_explicit_seam_fail_at_registration()
+    {
+        var runtime = new FakeRuntime(new InMemoryXmlRepository());
+        Action<IServiceCollection>[] registrationShapes =
+        [
+            services => services.AddSingleton<IDataProtectionRuntimeDependencies>(runtime),
+            services => services.AddSingleton<IDataProtectionRuntimeDependencies>(
+                _ => runtime),
+            services => services.AddSingleton<IDataProtectionRuntimeDependencies,
+                UnreachableRuntime>(),
+            services => services.AddScoped<IDataProtectionRuntimeDependencies,
+                UnreachableRuntime>(),
+        ];
+
+        foreach (Action<IServiceCollection> shape in registrationShapes)
+        {
+            HostApplicationBuilder builder = CreateBuilder(
+                EnabledSettings(),
+                Environments.Production);
+            shape(builder.Services);
+
+            InvalidOperationException error =
+                Assert.Throws<InvalidOperationException>(() =>
+                    builder.Services.AddVistaraApiDataProtection(
+                        builder.Configuration,
+                        builder.Environment));
+
+            Assert.Contains(
+                nameof(IDataProtectionRuntimeDependencies),
+                error.Message,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                builder.Services,
+                descriptor => descriptor.ServiceType == typeof(IDataProtectionProvider));
+            Assert.Equal(0, runtime.PersistenceConfigurations);
+            Assert.Equal(0, runtime.ProtectionConfigurations);
+        }
+    }
+
+    [Fact]
+    public void Default_production_path_builds_the_live_dependencies_without_contacting_azure()
+    {
+        HostApplicationBuilder builder = CreateBuilder(
+            EnabledSettings(),
+            Environments.Production);
+        builder.Services.AddVistaraApiSecurity(
+            builder.Configuration,
+            builder.Environment);
+
+        Assert.Equal(
+            1,
+            builder.Services.Count(descriptor =>
+                descriptor.ServiceType == typeof(IDataProtectionProvider)));
+
+        using IHost host = builder.Build();
+
+        IDataProtectionRuntimeDependencies dependencies =
+            host.Services.GetRequiredService<IDataProtectionRuntimeDependencies>();
+        Assert.Equal(
+            "DefaultDataProtectionRuntimeDependencies",
+            dependencies.GetType().Name);
+        Assert.Same(
+            dependencies,
+            host.Services.GetRequiredService<IDataProtectionRuntimeDependencies>());
+        Assert.NotNull(host.Services.GetService<DataProtectionCredentialSource>());
+        Assert.Equal(
+            Discriminator,
+            host.Services.GetRequiredService<IOptions<DataProtectionOptions>>()
+                .Value.ApplicationDiscriminator);
     }
 
     private static async Task<OptionsValidationException> AssertInvalidAsync(
@@ -388,6 +512,18 @@ public sealed class DataProtectionCompositionTests
                     options.XmlEncryptor = new RecordingXmlEncryptor();
                 });
         }
+    }
+
+    private sealed class UnreachableRuntime : IDataProtectionRuntimeDependencies
+    {
+        public TokenCredential CreateManagedIdentityCredential(string clientId) =>
+            throw new UnreachableException();
+
+        public void ConfigureKeyPersistence(IDataProtectionBuilder builder) =>
+            throw new UnreachableException();
+
+        public void ConfigureKeyProtection(IDataProtectionBuilder builder) =>
+            throw new UnreachableException();
     }
 
     private sealed class FakeTokenCredential : TokenCredential

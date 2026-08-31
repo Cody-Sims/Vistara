@@ -72,8 +72,19 @@ public static class DataProtectionServiceCollectionExtensions
     public static IServiceCollection AddVistaraApiDataProtection(
         this IServiceCollection services,
         IConfiguration configuration,
+        IHostEnvironment environment) =>
+        AddVistaraApiDataProtection(services, configuration, environment, runtime: null);
+
+    /// <summary>
+    /// Registers the shared key ring with an explicit Azure dependency seam.
+    /// Tests pass a double here; production passes <see langword="null" /> and
+    /// gets the live Azure dependencies.
+    /// </summary>
+    public static IServiceCollection AddVistaraApiDataProtection(
+        this IServiceCollection services,
+        IConfiguration configuration,
         IHostEnvironment environment,
-        IDataProtectionRuntimeDependencies? runtime = null)
+        IDataProtectionRuntimeDependencies? runtime)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
@@ -104,8 +115,9 @@ public static class DataProtectionServiceCollectionExtensions
         }
 
         IDataProtectionRuntimeDependencies dependencies =
-            runtime ?? ResolveRegisteredDependencies(services);
-        services.TryAddSingleton(dependencies);
+            ResolveDependencies(services, runtime);
+        services.RemoveAll<IDataProtectionRuntimeDependencies>();
+        services.AddSingleton(dependencies);
         services.TryAddSingleton<DataProtectionCredentialSource>();
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<
@@ -123,12 +135,36 @@ public static class DataProtectionServiceCollectionExtensions
             configuration[$"{SecurityDataProtectionOptions.SectionName}:Enabled"],
             out bool enabled) && enabled;
 
-    private static IDataProtectionRuntimeDependencies ResolveRegisteredDependencies(
-        IServiceCollection services) =>
-        services.FirstOrDefault(descriptor =>
-                descriptor.ServiceType == typeof(IDataProtectionRuntimeDependencies))
-            ?.ImplementationInstance as IDataProtectionRuntimeDependencies ??
-        new DefaultDataProtectionRuntimeDependencies();
+    /// <summary>
+    /// Key persistence and protection are configured while the container is
+    /// still being built, so a container-resolved dependency cannot be honoured.
+    /// A pre-registration is therefore rejected instead of being silently
+    /// replaced by the live Azure dependencies.
+    /// </summary>
+    private static IDataProtectionRuntimeDependencies ResolveDependencies(
+        IServiceCollection services,
+        IDataProtectionRuntimeDependencies? runtime)
+    {
+        if (runtime is not null)
+        {
+            return runtime;
+        }
+
+        if (services.Any(descriptor =>
+                descriptor.ServiceType == typeof(IDataProtectionRuntimeDependencies)))
+        {
+            throw new InvalidOperationException(
+                $"'{nameof(IDataProtectionRuntimeDependencies)}' is already "
+                + "registered in the service collection. Pass it to "
+                + $"'{nameof(AddVistaraApiDataProtection)}' explicitly; a "
+                + "container registration cannot be honoured because the key "
+                + "ring is configured before the container exists, and "
+                + "ignoring it would silently fall back to live Azure "
+                + "clients.");
+        }
+
+        return new DefaultDataProtectionRuntimeDependencies();
+    }
 }
 
 internal sealed class VistaraDataProtectionDiscriminatorOptions(
@@ -187,18 +223,26 @@ internal sealed class DefaultDataProtectionRuntimeDependencies :
 
 internal static class SecurityDataProtectionEndpoints
 {
-    internal static readonly string[] TrustedBlobHostSuffixes =
+    // Wave 8 provisions public Azure only. Sovereign clouds need a matching
+    // BlobClientOptions.Audience and Key Vault authority, which this
+    // composition does not configure, so they are rejected rather than
+    // silently pointed at the public-cloud audience.
+    internal const string PublicBlobHostSuffix = ".blob.core.windows.net";
+
+    internal const string PublicVaultHostSuffix = ".vault.azure.net";
+
+    internal static readonly string[] SovereignBlobHostSuffixes =
     [
-        ".blob.core.windows.net",
         ".blob.core.usgovcloudapi.net",
         ".blob.core.chinacloudapi.cn",
+        ".blob.core.cloudapi.de",
     ];
 
-    internal static readonly string[] TrustedVaultHostSuffixes =
+    internal static readonly string[] SovereignVaultHostSuffixes =
     [
-        ".vault.azure.net",
         ".vault.usgovcloudapi.net",
         ".vault.azure.cn",
+        ".vault.microsoftazure.de",
     ];
 
     internal static Uri ContainerUri(SecurityDataProtectionOptions options)
@@ -211,7 +255,7 @@ internal static class SecurityDataProtectionEndpoints
 
     internal static bool IsTrustedEndpoint(
         string? value,
-        IReadOnlyList<string> trustedHostSuffixes,
+        string trustedHostSuffix,
         out Uri? uri)
     {
         uri = null;
@@ -224,8 +268,7 @@ internal static class SecurityDataProtectionEndpoints
             candidate.UserInfo.Length != 0 ||
             candidate.Query.Length != 0 ||
             candidate.Fragment.Length != 0 ||
-            !trustedHostSuffixes.Any(suffix =>
-                candidate.Host.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))
+            !candidate.Host.EndsWith(trustedHostSuffix, StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
@@ -233,6 +276,13 @@ internal static class SecurityDataProtectionEndpoints
         uri = candidate;
         return true;
     }
+
+    internal static bool IsSovereignEndpoint(
+        string? value,
+        IReadOnlyList<string> sovereignHostSuffixes) =>
+        Uri.TryCreate(value, UriKind.Absolute, out Uri? candidate) &&
+        sovereignHostSuffixes.Any(suffix =>
+            candidate.Host.EndsWith(suffix, StringComparison.OrdinalIgnoreCase));
 }
 
 internal sealed class SecurityDataProtectionOptionsValidator(
@@ -350,14 +400,21 @@ internal sealed class SecurityDataProtectionOptionsValidator(
 
         if (!SecurityDataProtectionEndpoints.IsTrustedEndpoint(
                 options.BlobServiceUri,
-                SecurityDataProtectionEndpoints.TrustedBlobHostSuffixes,
+                SecurityDataProtectionEndpoints.PublicBlobHostSuffix,
                 out Uri? serviceUri) ||
             !string.Equals(serviceUri!.AbsolutePath, "/", StringComparison.Ordinal))
         {
             failures.Add(
-                $"'{Section}:BlobServiceUri' must be an HTTPS Azure Blob "
-                + "service endpoint on the default port with no path, query or "
-                + "credentials.");
+                SecurityDataProtectionEndpoints.IsSovereignEndpoint(
+                    options.BlobServiceUri,
+                    SecurityDataProtectionEndpoints.SovereignBlobHostSuffixes)
+                    ? $"'{Section}:BlobServiceUri' must target the public Azure "
+                        + "cloud; sovereign Azure clouds are unsupported here "
+                        + "because the shared key ring configures no matching "
+                        + "Blob service audience."
+                    : $"'{Section}:BlobServiceUri' must be an HTTPS public Azure "
+                        + "Blob service endpoint on the default port with no "
+                        + "path, query or credentials.");
         }
 
         if (!IsValidContainerName(options.BlobContainerName))
@@ -391,13 +448,20 @@ internal sealed class SecurityDataProtectionOptionsValidator(
 
         if (!SecurityDataProtectionEndpoints.IsTrustedEndpoint(
                 keyIdentifier,
-                SecurityDataProtectionEndpoints.TrustedVaultHostSuffixes,
+                SecurityDataProtectionEndpoints.PublicVaultHostSuffix,
                 out Uri? uri))
         {
             failures.Add(
-                $"'{Section}:KeyVaultKeyIdentifier' must be an HTTPS Azure Key "
-                + "Vault endpoint on the default port with no query or "
-                + "credentials.");
+                SecurityDataProtectionEndpoints.IsSovereignEndpoint(
+                    keyIdentifier,
+                    SecurityDataProtectionEndpoints.SovereignVaultHostSuffixes)
+                    ? $"'{Section}:KeyVaultKeyIdentifier' must target the public "
+                        + "Azure cloud; sovereign Azure clouds are unsupported "
+                        + "here because the shared key ring configures no "
+                        + "matching Key Vault authority."
+                    : $"'{Section}:KeyVaultKeyIdentifier' must be an HTTPS public "
+                        + "Azure Key Vault endpoint on the default port with no "
+                        + "query or credentials.");
             return;
         }
 
