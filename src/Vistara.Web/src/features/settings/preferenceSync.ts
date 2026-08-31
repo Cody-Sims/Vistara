@@ -110,6 +110,11 @@ export class PreferenceSync {
     this.#adopted = result;
     this.#base = result;
     this.#publishDocument(result.data);
+    if (this.#state !== idle) {
+      // A freshly read document answers whatever the last attempt reported.
+      this.#publish(idle);
+    }
+
     this.#start();
   };
 

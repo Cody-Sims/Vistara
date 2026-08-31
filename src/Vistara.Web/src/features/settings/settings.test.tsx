@@ -348,6 +348,26 @@ describe('settings: device preferences', () => {
     expect(document.documentElement.dataset.reducedMotion).toBe('true');
   });
 
+  it('clears the alert once the preferences are read again', async () => {
+    const user = userEvent.setup();
+    renderSettings({
+      updatePreferences: async () => {
+        throw apiError(412);
+      },
+    });
+
+    await user.click(await screen.findByRole('radio', { name: 'Compact' }));
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole('button', { name: 'Reload preferences' }),
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument(),
+    );
+  });
+
   it('applies the preferences stored for the account on arrival', async () => {
     renderSettings({
       getPreferences: async () => ({

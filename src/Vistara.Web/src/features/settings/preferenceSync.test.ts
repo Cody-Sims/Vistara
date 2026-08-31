@@ -286,6 +286,23 @@ describe('preference synchronisation', () => {
     expect(api.updatePreferences).not.toHaveBeenCalled();
   });
 
+  it('clears a reported failure once the document is read again', async () => {
+    const api = server();
+    api.updatePreferences.mockImplementation(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    const { sync } = start(api);
+
+    sync.save({ density: 'compact' });
+    await sync.settled();
+    expect(sync.state.failure).toBe('unreachable');
+
+    sync.adopt({ data: { ...stored, version: 4 }, etag: '"v4"' });
+    await sync.settled();
+
+    expect(sync.state).toEqual({ saving: false, saved: false });
+  });
+
   it('notifies subscribers while a change is in flight and once it lands', async () => {
     const api = server();
     const { sync } = start(api);
