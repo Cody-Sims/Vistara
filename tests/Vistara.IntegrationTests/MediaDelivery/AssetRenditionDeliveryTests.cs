@@ -10,15 +10,21 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Vistara.Api.Composition.Platform;
+using Vistara.Api.Composition.Runtime;
 using Vistara.Api.Features.Media;
 using Vistara.Application.Common.Imaging;
 using Vistara.Application.Common.Storage;
 using Vistara.Application.Derivatives;
 using Vistara.Application.Gallery.Queries;
+using Vistara.Application.Identity;
 using Vistara.Application.Jobs;
+using Vistara.Application.Tenancy;
+using Vistara.Auth.ApiKeys;
 using Vistara.Contracts.Media;
 using Vistara.Domain.Common;
+using Vistara.Domain.Identity;
 using Vistara.Domain.Jobs;
+using Vistara.Domain.Tenancy;
 using Vistara.IntegrationTests.DerivativeWorker;
 using Vistara.Persistence;
 using Vistara.Persistence.Derivatives;
@@ -154,6 +160,137 @@ public sealed class AssetRenditionDeliveryTests
     }
 
     [Fact]
+    public async Task Trashing_and_purging_the_asset_conceals_its_advertised_rendition()
+    {
+        await using AssetRenditionDeliveryHarness harness =
+            await AssetRenditionDeliveryHarness.CreateAsync();
+        ReadyRendition rendition = await harness.AddReadyRenditionAsync();
+        string path = $"/delivery/assets/{harness.AssetId:D}/{rendition.RequestId:D}";
+
+        DeliveryResponse ready = await harness.SendAsync(
+            path,
+            harness.OwnerPrincipal());
+        await harness.TrashAssetAsync();
+        DeliveryResponse trashed = await harness.SendAsync(
+            path,
+            harness.OwnerPrincipal());
+        DeliveryResponse trashedHead = await harness.SendAsync(
+            path,
+            harness.OwnerPrincipal(),
+            method: HttpMethods.Head);
+        await harness.PurgeAssetAsync();
+        DeliveryResponse purged = await harness.SendAsync(
+            path,
+            harness.OwnerPrincipal());
+
+        Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
+        Assert.Equal(rendition.Content, ready.Body);
+        Assert.Equal(HttpStatusCode.NotFound, trashed.StatusCode);
+        Assert.Equal("media_not_found", trashed.ProblemCode());
+        Assert.NotEqual(rendition.Content, trashed.Body);
+        Assert.Equal(HttpStatusCode.NotFound, trashedHead.StatusCode);
+        Assert.Empty(trashedHead.Body);
+        Assert.Equal(HttpStatusCode.NotFound, purged.StatusCode);
+        Assert.All(
+            new[] { trashed, purged },
+            response => Assert.Equal(
+                MediaDeliveryHttpContract.NoStoreCacheControl,
+                response.Headers.CacheControl.ToString()));
+    }
+
+    [Fact]
+    public async Task Real_api_key_streams_the_advertised_rendition_through_the_platform()
+    {
+        await using AssetRenditionDeliveryHarness harness =
+            await AssetRenditionDeliveryHarness.CreateAsync();
+        ReadyRendition rendition = await harness.AddReadyRenditionAsync();
+        AssetDeliverySource advertised = await harness.ReadAdvertisedRenditionAsync();
+        string apiKey = await harness.IssueApiKeyAsync(
+            harness.TenantId,
+            harness.OwnerId);
+
+        DeliveryResponse response = await harness.SendThroughPlatformAsync(
+            advertised.Path,
+            apiKey: apiKey);
+        DeliveryResponse head = await harness.SendThroughPlatformAsync(
+            advertised.Path,
+            method: HttpMethods.Head,
+            apiKey: apiKey);
+        DeliveryResponse ranged = await harness.SendThroughPlatformAsync(
+            advertised.Path,
+            apiKey: apiKey,
+            headers: new Dictionary<string, string> { ["Range"] = "bytes=4-9" });
+        DeliveryResponse forged = await harness.SendThroughPlatformAsync(
+            advertised.Path,
+            apiKey: $"{apiKey[..^4]}zzzz");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(rendition.Content, response.Body);
+        Assert.Equal("image/webp", response.ContentType);
+        Assert.Equal($"\"{rendition.Sha256}\"", response.Headers.ETag.ToString());
+        Assert.Equal(
+            MediaDeliveryHttpContract.PrivateNoStoreCacheControl,
+            response.Headers.CacheControl.ToString());
+        Assert.Equal("bytes", response.Headers.AcceptRanges.ToString());
+        Assert.Equal("nosniff", response.Headers.XContentTypeOptions.ToString());
+        Assert.Equal(HttpStatusCode.OK, head.StatusCode);
+        Assert.Empty(head.Body);
+        Assert.Equal(rendition.Content.Length, head.ContentLength);
+        Assert.Equal(HttpStatusCode.PartialContent, ranged.StatusCode);
+        Assert.Equal(rendition.Content[4..10], ranged.Body);
+        Assert.Equal(
+            $"bytes 4-9/{rendition.Content.Length}",
+            ranged.Headers.ContentRange.ToString());
+        Assert.NotEqual(HttpStatusCode.OK, forged.StatusCode);
+        Assert.NotEqual(rendition.Content, forged.Body);
+    }
+
+    [Fact]
+    public async Task Platform_pipeline_denies_anonymous_cross_tenant_and_trashed_requests()
+    {
+        await using AssetRenditionDeliveryHarness harness =
+            await AssetRenditionDeliveryHarness.CreateAsync();
+        ReadyRendition rendition = await harness.AddReadyRenditionAsync();
+        AssetDeliverySource advertised = await harness.ReadAdvertisedRenditionAsync();
+        string ownerKey = await harness.IssueApiKeyAsync(
+            harness.TenantId,
+            harness.OwnerId);
+        string neighbourKey = await harness.IssueApiKeyAsync(
+            harness.OtherTenantId,
+            harness.OtherUserId);
+
+        DeliveryResponse anonymous = await harness.SendThroughPlatformAsync(
+            advertised.Path);
+        DeliveryResponse crossTenant = await harness.SendThroughPlatformAsync(
+            advertised.Path,
+            apiKey: neighbourKey);
+        await harness.TrashAssetAsync();
+        DeliveryResponse trashed = await harness.SendThroughPlatformAsync(
+            advertised.Path,
+            apiKey: ownerKey);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, crossTenant.StatusCode);
+        Assert.Equal("media_not_found", crossTenant.ProblemCode());
+        Assert.Equal(HttpStatusCode.NotFound, trashed.StatusCode);
+        Assert.Equal("media_not_found", trashed.ProblemCode());
+        Assert.All(
+            new[] { anonymous, crossTenant, trashed },
+            response =>
+            {
+                Assert.NotEqual(rendition.Content, response.Body);
+                Assert.DoesNotContain(
+                    rendition.StorageKey,
+                    response.BodyText,
+                    StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain(
+                    rendition.SourceSha256,
+                    response.BodyText,
+                    StringComparison.OrdinalIgnoreCase);
+            });
+    }
+
+    [Fact]
     public async Task Anonymous_cross_tenant_and_revoked_principals_never_receive_bytes()
     {
         await using AssetRenditionDeliveryHarness harness =
@@ -235,9 +372,12 @@ internal sealed class AssetRenditionDeliveryHarness : IAsyncDisposable
         new(2026, 8, 30, 12, 0, 0, TimeSpan.Zero);
     private static readonly ImagePipelineFingerprint Fingerprint =
         new("asset-rendition-delivery");
+    private const string ApiKeyPepper =
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
 
     private readonly string _scratchRoot;
     private readonly WebApplication _app;
+    private readonly WebApplication _platformApp;
     private readonly DbContextOptions<VistaraDbContext> _vistaraOptions;
     private readonly DbContextOptions<JobDbContext> _jobOptions;
     private readonly LocalBlobStore _blobStore;
@@ -248,6 +388,7 @@ internal sealed class AssetRenditionDeliveryHarness : IAsyncDisposable
     private AssetRenditionDeliveryHarness(
         string scratchRoot,
         WebApplication app,
+        WebApplication platformApp,
         DbContextOptions<VistaraDbContext> vistaraOptions,
         DbContextOptions<JobDbContext> jobOptions,
         LocalBlobStore blobStore,
@@ -261,6 +402,7 @@ internal sealed class AssetRenditionDeliveryHarness : IAsyncDisposable
     {
         _scratchRoot = scratchRoot;
         _app = app;
+        _platformApp = platformApp;
         _vistaraOptions = vistaraOptions;
         _jobOptions = jobOptions;
         _blobStore = blobStore;
@@ -331,14 +473,12 @@ internal sealed class AssetRenditionDeliveryHarness : IAsyncDisposable
             sourceSha256);
 
         var blobStore = new LocalBlobStore(new LocalBlobStoreOptions(mediaRoot));
-        WebApplicationBuilder builder = WebApplication.CreateBuilder();
-        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        var settings = new Dictionary<string, string?>
         {
             ["Persistence:Provider"] = "Sqlite",
             ["Persistence:ConnectionString"] = connectionString,
             ["Platform:Authentication:ApiKeys:CurrentPepperVersion"] = "v1",
-            ["Platform:Authentication:ApiKeys:Peppers:v1"] =
-                "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+            ["Platform:Authentication:ApiKeys:Peppers:v1"] = ApiKeyPepper,
             ["Platform:Authentication:Jwt:Issuers:0:ProfileId"] =
                 "asset-rendition-delivery",
             ["Platform:Authentication:Jwt:Issuers:0:Issuer"] =
@@ -348,20 +488,11 @@ internal sealed class AssetRenditionDeliveryHarness : IAsyncDisposable
                 "https://issuer.example/.well-known/openid-configuration",
             ["Platform:Authentication:Jwt:Issuers:0:AllowedAlgorithms:0"] =
                 "RS256",
-        });
-        builder.Services.AddSingleton<IBlobStore>(blobStore);
-        builder.Services.AddVistaraApiPlatform(builder.Configuration);
-        builder.Services.AddVistaraApiPersistence(builder.Configuration);
-        WebApplication app = builder.Build();
-        app.UseRouting();
-#pragma warning disable ASP0014
-        app.UseEndpoints(static _ => { });
-#pragma warning restore ASP0014
-        app.MapVistaraMedia();
-
+        };
         return new AssetRenditionDeliveryHarness(
             scratchRoot,
-            app,
+            CreateEndpointHost(settings, blobStore),
+            CreatePlatformHost(settings, blobStore),
             vistaraOptions,
             jobOptions,
             blobStore,
@@ -376,6 +507,154 @@ internal sealed class AssetRenditionDeliveryHarness : IAsyncDisposable
 
     internal ClaimsPrincipal OwnerPrincipal(string scope = "assets.read") =>
         Principal(TenantId, OwnerId, scope);
+
+    /// <summary>
+    /// Composes the delivery endpoints alone so tests can vary the principal
+    /// directly. The platform host below proves the same endpoints behind the
+    /// production middleware.
+    /// </summary>
+    private static WebApplication CreateEndpointHost(
+        IReadOnlyDictionary<string, string?> settings,
+        LocalBlobStore blobStore)
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.Configuration.AddInMemoryCollection(settings);
+        builder.Services.AddSingleton<IBlobStore>(blobStore);
+        builder.Services.AddVistaraApiPlatform(builder.Configuration);
+        builder.Services.AddVistaraApiPersistence(builder.Configuration);
+        WebApplication app = builder.Build();
+        app.UseRouting();
+#pragma warning disable ASP0014
+        app.UseEndpoints(static _ => { });
+#pragma warning restore ASP0014
+        app.MapVistaraMedia();
+        return app;
+    }
+
+    /// <summary>
+    /// Composes the production pipeline: rate limiting, authentication, tenant
+    /// context, antiforgery, and authorization, so requests carry only the
+    /// credentials a browser or client would send.
+    /// </summary>
+    private static WebApplication CreatePlatformHost(
+        IReadOnlyDictionary<string, string?> settings,
+        LocalBlobStore blobStore)
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.Configuration.AddInMemoryCollection(settings);
+        builder.Services.AddSingleton<IBlobStore>(blobStore);
+        builder.Services.AddVistaraApiRuntime(builder.Configuration);
+        builder.Services.AddVistaraApiPlatform(builder.Configuration);
+        builder.Services.AddVistaraApiPersistence(builder.Configuration);
+        WebApplication app = builder.Build();
+        app.UseVistaraPlatform();
+        app.MapVistaraMedia();
+        return app;
+    }
+
+    /// <summary>
+    /// Issues a read-scoped API key through the production key store and
+    /// returns the plaintext credential presented in <c>X-API-Key</c>.
+    /// </summary>
+    internal async Task<string> IssueApiKeyAsync(Guid tenantId, Guid userId)
+    {
+        Guid keyId = Guid.CreateVersion7();
+        byte[] secret = RandomNumberGenerator.GetBytes(32);
+        string encodedSecret = Convert.ToBase64String(secret)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+        string prefix = $"vst_v1{keyId:N}";
+        string digest = Convert.ToHexStringLower(
+            HMACSHA256.HashData(
+                Convert.FromBase64String(ApiKeyPepper),
+                secret));
+        Result<ApiKeyMetadata> metadata = ApiKeyMetadata.Create(
+            new ApiKeyId(keyId),
+            new TenantId(tenantId),
+            new UserId(userId),
+            prefix,
+            digest,
+            ApiKeyScope.ReadAssets,
+            DateTimeOffset.UtcNow,
+            null);
+        Assert.True(
+            metadata.TryGetValue(out ApiKeyMetadata? created),
+            metadata.Error?.Message);
+        await using AsyncServiceScope scope =
+            _platformApp.Services.CreateAsyncScope();
+        scope.ServiceProvider
+            .GetRequiredService<IMutableTenantScope>()
+            .Establish(tenantId);
+        Result added = await scope.ServiceProvider
+            .GetRequiredService<IApiKeyStore>()
+            .AddAsync(created!, CancellationToken.None);
+        Assert.True(added.IsSuccess, added.Error?.Message);
+        return $"{prefix}_{encodedSecret}";
+    }
+
+    /// <summary>
+    /// Replays a request through the production pipeline with no ambient tenant
+    /// scope, exactly as an unauthenticated socket would arrive.
+    /// </summary>
+    internal async Task<DeliveryResponse> SendThroughPlatformAsync(
+        string path,
+        string method = "GET",
+        string? apiKey = null,
+        IReadOnlyDictionary<string, string>? headers = null)
+    {
+        RequestDelegate pipeline = ((IApplicationBuilder)_platformApp).Build();
+        await using AsyncServiceScope scope =
+            _platformApp.Services.CreateAsyncScope();
+        var context = new DefaultHttpContext
+        {
+            RequestServices = scope.ServiceProvider,
+        };
+        context.Request.Method = method;
+        context.Request.Path = path;
+        context.Request.Scheme = "https";
+        context.Request.Host = new HostString("vistara.example");
+        context.Response.Body = new MemoryStream();
+        context.TraceIdentifier = "trace-platform-rendition";
+        if (apiKey is not null)
+        {
+            context.Request.Headers[
+                PlatformAuthenticationDefaults.ApiKeyHeaderName] = apiKey;
+        }
+
+        if (headers is not null)
+        {
+            foreach ((string name, string value) in headers)
+            {
+                context.Request.Headers[name] = value;
+            }
+        }
+
+        await pipeline(context);
+        return new DeliveryResponse(
+            (HttpStatusCode)context.Response.StatusCode,
+            context.Response.ContentType,
+            context.Response.ContentLength,
+            context.Response.Headers,
+            ((MemoryStream)context.Response.Body).ToArray());
+    }
+
+    internal Task TrashAssetAsync() => SetAssetStatusAsync("Trashed");
+
+    internal Task PurgeAssetAsync() => SetAssetStatusAsync("Purged");
+
+    private async Task SetAssetStatusAsync(string status)
+    {
+        await using var context = new VistaraDbContext(
+            _vistaraOptions,
+            new FixedTenantScope(TenantId));
+        AssetRow asset = await context.Assets.SingleAsync(
+            row => row.Id == AssetId);
+        asset.Status = status;
+        asset.UpdatedAtUtc = Now;
+        asset.Version++;
+        await context.SaveChangesAsync();
+    }
 
     internal async Task<ReadyRendition> AddReadyRenditionAsync()
     {
@@ -534,6 +813,7 @@ internal sealed class AssetRenditionDeliveryHarness : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        await _platformApp.DisposeAsync();
         await _app.DisposeAsync();
         SqliteConnection.ClearAllPools();
         if (Directory.Exists(_scratchRoot))

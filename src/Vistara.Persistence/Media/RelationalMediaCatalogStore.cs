@@ -135,6 +135,11 @@ public sealed class RelationalMediaCatalogStore(
         return row is null ? null : ToMedia(row);
     }
 
+    /// <summary>
+    /// Resolves a rendition only while its asset is servable. A trashed or
+    /// purged asset conceals every rendition URL the gallery advertised while
+    /// the asset was ready.
+    /// </summary>
     public async ValueTask<PersistedDerivativeMedia?> FindAssetRenditionAsync(
         Guid tenantId,
         Guid assetId,
@@ -142,14 +147,15 @@ public sealed class RelationalMediaCatalogStore(
         CancellationToken cancellationToken)
     {
         EnsureTenant(tenantId);
-        DerivativeRequestRow? row = await _context
-            .Set<DerivativeRequestRow>()
-            .AsNoTracking()
-            .SingleOrDefaultAsync(
-                candidate =>
-                    candidate.Id == renditionId &&
-                    candidate.AssetId == assetId,
-                cancellationToken);
+        DerivativeRequestRow? row = await (
+            from derivative in _context.Set<DerivativeRequestRow>().AsNoTracking()
+            join asset in _context.Assets.AsNoTracking()
+                on derivative.AssetId equals asset.Id
+            where derivative.Id == renditionId &&
+                derivative.AssetId == assetId &&
+                asset.Status == "Ready"
+            select derivative)
+            .SingleOrDefaultAsync(cancellationToken);
         return row is null ? null : ToMedia(row);
     }
 
