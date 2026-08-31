@@ -2,7 +2,11 @@
 
 This document describes the automated security controls that guard the
 repository and the operator duties that keep a running instance safe. Product
-security requirements live in `docs/specification.md`.
+security requirements live in `docs/specification.md`. The first-owner setup
+flow, the administrative access model, and the cloud storage onboarding
+assistant — including how candidate credentials are held and why applying a
+provider needs a restart — are documented in
+[Administration and cloud onboarding](admin-and-cloud-onboarding.md).
 
 ## Automated scanning
 
