@@ -358,6 +358,212 @@ public sealed class LocalBlobStoreTests
     }
 
     [Fact]
+    public async Task Local_reports_missing_objects_on_a_fresh_root()
+    {
+        string scratch = LocalTestDirectory.Create();
+        try
+        {
+            LocalBlobStore store = CreateStore(scratch);
+            BlobKey key = new("derivatives/v1/zz/does-not-exist.webp");
+
+            Assert.Null(await store.HeadAsync(key, CancellationToken.None));
+
+            BlobStoreException missing = await Assert.ThrowsAsync<BlobStoreException>(
+                async () => await store.OpenReadAsync(
+                    key,
+                    BlobReadOptions.Full,
+                    CancellationToken.None));
+            Assert.Equal(BlobStoreErrorCode.NotFound, missing.Code);
+
+            BlobDeleteResult deleted = await store.DeleteAsync(
+                key,
+                BlobDeleteOptions.None,
+                CancellationToken.None);
+            Assert.False(deleted.Deleted);
+            Assert.Empty(await ListKeysAsync(store, null));
+        }
+        finally
+        {
+            LocalTestDirectory.Delete(scratch);
+        }
+    }
+
+    [Fact]
+    public async Task Local_reports_missing_objects_beside_a_populated_shard()
+    {
+        string scratch = LocalTestDirectory.Create();
+        try
+        {
+            LocalBlobStore store = CreateStore(scratch);
+            BlobKey present = new("derivatives/v1/aa/source/recipe.webp");
+            await PutAsync(store, present, "published");
+            BlobKey absent = new("derivatives/v1/zz/does-not-exist.webp");
+
+            Assert.Null(await store.HeadAsync(absent, CancellationToken.None));
+            Assert.False((await store.DeleteAsync(
+                absent,
+                BlobDeleteOptions.None,
+                CancellationToken.None)).Deleted);
+            Assert.Equal([present.Value], await ListKeysAsync(store, "derivatives/"));
+        }
+        finally
+        {
+            LocalTestDirectory.Delete(scratch);
+        }
+    }
+
+    [Fact]
+    public async Task Local_still_enforces_delete_conditions_on_a_fresh_root()
+    {
+        string scratch = LocalTestDirectory.Create();
+        try
+        {
+            LocalBlobStore store = CreateStore(scratch);
+            BlobKey key = new("derivatives/v1/zz/conditional.webp");
+
+            BlobStoreException conflict = await Assert.ThrowsAsync<BlobStoreException>(
+                async () => await store.DeleteAsync(
+                    key,
+                    new BlobDeleteOptions(
+                        new BlobRequestConditions(new BlobVersion("expected"))),
+                    CancellationToken.None));
+
+            Assert.Equal(BlobStoreErrorCode.PreconditionFailed, conflict.Code);
+        }
+        finally
+        {
+            LocalTestDirectory.Delete(scratch);
+        }
+    }
+
+    [Fact]
+    public async Task Local_rejects_a_shard_directory_replaced_by_a_file()
+    {
+        string scratch = LocalTestDirectory.Create();
+        try
+        {
+            LocalBlobStore store = CreateStore(scratch);
+            BlobKey key = new("derivatives/v1/aa/wrong-type.webp");
+            await PutAsync(store, key, "published");
+            string shard = Path.GetDirectoryName(
+                Assert.Single(Directory.EnumerateFiles(
+                    scratch,
+                    "*.blob",
+                    SearchOption.AllDirectories)))!;
+            Directory.Delete(shard, recursive: true);
+            await File.WriteAllTextAsync(shard, "not-a-directory");
+
+            BlobStoreException error = await Assert.ThrowsAsync<BlobStoreException>(
+                async () => await store.HeadAsync(key, CancellationToken.None));
+
+            Assert.Equal(BlobStoreErrorCode.InvalidRequest, error.Code);
+        }
+        finally
+        {
+            LocalTestDirectory.Delete(scratch);
+        }
+    }
+
+    [Fact]
+    public async Task Local_rejects_a_symlinked_shard_directory()
+    {
+        string scratch = LocalTestDirectory.Create();
+        try
+        {
+            LocalBlobStore store = CreateStore(scratch);
+            BlobKey key = new("derivatives/v1/aa/symlinked-shard.webp");
+            await PutAsync(store, key, "published");
+            string shard = Path.GetDirectoryName(
+                Assert.Single(Directory.EnumerateFiles(
+                    scratch,
+                    "*.blob",
+                    SearchOption.AllDirectories)))!;
+            string outside = Path.Combine(scratch, "outside-shard");
+            Directory.CreateDirectory(outside);
+            Directory.Delete(shard, recursive: true);
+            if (!TryCreateDirectoryLink(shard, outside))
+            {
+                return;
+            }
+
+            BlobStoreException error = await Assert.ThrowsAsync<BlobStoreException>(
+                async () => await store.HeadAsync(key, CancellationToken.None));
+
+            Assert.Equal(BlobStoreErrorCode.InvalidRequest, error.Code);
+        }
+        finally
+        {
+            LocalTestDirectory.Delete(scratch);
+        }
+    }
+
+    [Fact]
+    public async Task Local_reports_a_removed_configured_root_as_an_explicit_failure()
+    {
+        string scratch = LocalTestDirectory.Create();
+        try
+        {
+            LocalBlobStore store = CreateStore(scratch);
+            BlobKey key = new("derivatives/v1/zz/removed-root.webp");
+            Directory.Delete(Path.Combine(scratch, "store"), recursive: true);
+
+            BlobStoreException error = await Assert.ThrowsAsync<BlobStoreException>(
+                async () => await store.HeadAsync(key, CancellationToken.None));
+
+            Assert.Equal(BlobStoreErrorCode.InvalidRequest, error.Code);
+        }
+        finally
+        {
+            LocalTestDirectory.Delete(scratch);
+        }
+    }
+
+    [Fact]
+    public async Task Local_listing_tolerates_objects_deleted_during_enumeration()
+    {
+        string scratch = LocalTestDirectory.Create();
+        try
+        {
+            LocalBlobStore store = CreateStore(scratch);
+            BlobKey[] keys = Enumerable.Range(0, 32)
+                .Select(index => new BlobKey($"contract/vanishing/{index}"))
+                .ToArray();
+            foreach (BlobKey key in keys)
+            {
+                await PutAsync(store, key, "listed");
+            }
+
+            Task deletions = Task.Run(async () =>
+            {
+                foreach (BlobKey key in keys)
+                {
+                    await store.DeleteAsync(
+                        key,
+                        BlobDeleteOptions.None,
+                        CancellationToken.None);
+                }
+            });
+
+            while (!deletions.IsCompleted)
+            {
+                IReadOnlyList<string> observed = await ListKeysAsync(
+                    store,
+                    "contract/vanishing/");
+                Assert.Subset(
+                    keys.Select(key => key.Value).ToHashSet(StringComparer.Ordinal),
+                    observed.ToHashSet(StringComparer.Ordinal));
+            }
+
+            await deletions;
+            Assert.Empty(await ListKeysAsync(store, "contract/vanishing/"));
+        }
+        finally
+        {
+            LocalTestDirectory.Delete(scratch);
+        }
+    }
+
+    [Fact]
     public void Local_rejects_a_symlinked_root()
     {
         string scratch = LocalTestDirectory.Create();
@@ -422,6 +628,21 @@ public sealed class LocalBlobStoreTests
             new TrackingReplayableContent(value),
             new BlobWriteOptions(contentType: new BlobMediaType("text/plain")),
             CancellationToken.None);
+
+    private static async Task<IReadOnlyList<string>> ListKeysAsync(
+        LocalBlobStore store,
+        string? prefix)
+    {
+        List<string> keys = [];
+        await foreach (BlobHead head in store.ListAsync(
+                           new BlobListOptions(prefix),
+                           CancellationToken.None))
+        {
+            keys.Add(head.Identity.Key.Value);
+        }
+
+        return keys;
+    }
 
     private static async Task<string> ReadTextAsync(LocalBlobStore store, BlobKey key)
     {

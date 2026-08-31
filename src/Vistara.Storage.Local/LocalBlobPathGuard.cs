@@ -91,65 +91,121 @@ internal sealed class LocalBlobPathGuard
     public void EnsureDirectoryIsSafe(string path)
     {
         path = EnsureUnderRoot(path);
-        FileAttributes attributes;
-        try
+        if (!TryProbe(path, out FileAttributes attributes))
         {
-            attributes = File.GetAttributes(path);
-        }
-        catch (Exception error) when (
-            error is FileNotFoundException or DirectoryNotFoundException)
-        {
-            throw InvalidPath("A required local blob directory does not exist.", error);
+            throw InvalidPath("A required local blob directory does not exist.");
         }
 
-        if ((attributes & FileAttributes.Directory) == 0 ||
-            (attributes & FileAttributes.ReparsePoint) != 0)
+        EnsureSafeDirectoryAttributes(attributes);
+    }
+
+    /// <summary>
+    /// Reports whether an existing directory is safe, treating absence as a
+    /// missing object rather than an invalid request.
+    /// </summary>
+    public bool TryEnsureDirectoryIsSafe(string path)
+    {
+        path = EnsureUnderRoot(path);
+        if (!TryProbe(path, out FileAttributes attributes))
         {
-            throw InvalidPath(
-                "Local blob paths cannot contain symbolic links or reparse points.");
+            return false;
         }
+
+        EnsureSafeDirectoryAttributes(attributes);
+        return true;
     }
 
     public bool EnsureFileIsSafeOrMissing(string path)
     {
         path = EnsureUnderRoot(path);
-        EnsureDirectoryChainIsSafe(Path.GetDirectoryName(path)!);
-        try
-        {
-            FileAttributes attributes = File.GetAttributes(path);
-            if ((attributes & FileAttributes.Directory) != 0 ||
-                (attributes & FileAttributes.ReparsePoint) != 0)
-            {
-                throw InvalidPath(
-                    "Local blob objects cannot be directories, symbolic links, or reparse points.");
-            }
-
-            return true;
-        }
-        catch (Exception error) when (
-            error is FileNotFoundException or DirectoryNotFoundException)
+        if (!TryEnsureDirectoryChainIsSafe(Path.GetDirectoryName(path)!) ||
+            !TryProbe(path, out FileAttributes attributes))
         {
             return false;
         }
-    }
 
-    public void EnsureDirectoryChainIsSafe(string directoryPath)
-    {
-        directoryPath = EnsureUnderRoot(directoryPath);
-        string relative = Path.GetRelativePath(RootPath, directoryPath);
-        string current = RootPath;
-        EnsureDirectoryIsSafe(current);
-        if (relative == ".")
+        if ((attributes & FileAttributes.Directory) != 0 ||
+            (attributes & FileAttributes.ReparsePoint) != 0)
         {
-            return;
+            throw InvalidPath(
+                "Local blob objects cannot be directories, symbolic links, or reparse points.");
         }
 
+        return true;
+    }
+
+    /// <summary>
+    /// Validates every component between the configured root and
+    /// <paramref name="directoryPath"/>, reporting <see langword="false"/> when
+    /// an intermediate directory has not been created yet.
+    /// </summary>
+    /// <remarks>
+    /// Shard directories are created lazily on write, so their absence means the
+    /// object is missing. The configured root itself is operator-owned: its
+    /// absence stays an explicit failure so an unmounted or misconfigured root is
+    /// never reported as an empty store.
+    /// </remarks>
+    public bool TryEnsureDirectoryChainIsSafe(string directoryPath)
+    {
+        directoryPath = EnsureUnderRoot(directoryPath);
+        EnsureDirectoryIsSafe(RootPath);
+        string relative = Path.GetRelativePath(RootPath, directoryPath);
+        if (relative == ".")
+        {
+            return true;
+        }
+
+        string current = RootPath;
         foreach (string segment in relative.Split(
                      [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
                      StringSplitOptions.RemoveEmptyEntries))
         {
             current = EnsureUnderRoot(Path.Combine(current, segment));
-            EnsureDirectoryIsSafe(current);
+            if (!TryEnsureDirectoryIsSafe(current))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Probes an existing entry beneath the root, reporting
+    /// <see langword="false"/> when it is absent.
+    /// </summary>
+    public bool TryGetAttributes(string path, out FileAttributes attributes)
+    {
+        path = EnsureUnderRoot(path);
+        return TryProbe(path, out attributes);
+    }
+
+    private static void EnsureSafeDirectoryAttributes(FileAttributes attributes)
+    {
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            throw InvalidPath(
+                "Local blob paths cannot contain symbolic links or reparse points.");
+        }
+
+        if ((attributes & FileAttributes.Directory) == 0)
+        {
+            throw InvalidPath("A local blob directory component is a file.");
+        }
+    }
+
+    private static bool TryProbe(string path, out FileAttributes attributes)
+    {
+        try
+        {
+            attributes = File.GetAttributes(path);
+            return true;
+        }
+        catch (Exception error) when (
+            error is FileNotFoundException or DirectoryNotFoundException)
+        {
+            attributes = default;
+            return false;
         }
     }
 
