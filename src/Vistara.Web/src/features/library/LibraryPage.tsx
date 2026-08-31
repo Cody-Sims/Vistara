@@ -13,6 +13,7 @@ import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import type {
   ApiResponse,
   AssetQueryStatus,
+  AssetSummary,
   TimelineGroup,
   TimelinePage,
   TimelineQuery,
@@ -299,6 +300,13 @@ export function LibraryPage({
     [allAssets, selection],
   );
   const queryClient = useQueryClient();
+  /**
+   * The assets a finished action applies to. A move to the trash removes them
+   * from the timeline, so the outcome and the undo would disappear with them;
+   * this keeps the surface on screen until the next selection.
+   */
+  const [settled, setSettled] = useState<readonly AssetSummary[]>([]);
+  const curationAssets = selectedAssets.length > 0 ? selectedAssets : settled;
   const defaultStore = useRestoration(
     address,
     focusedAssetId,
@@ -317,6 +325,7 @@ export function LibraryPage({
   function setState(next: LibraryState) {
     setSearchParams(libraryStateToSearchParams(next));
     setSelection(createSelectionState());
+    setSettled([]);
   }
 
   function submitSearch(event: FormEvent) {
@@ -503,6 +512,39 @@ export function LibraryPage({
         </div>
       ) : null}
 
+      {curation && curationAssets.length > 0 ? (
+        <CurationActions
+          assets={curationAssets}
+          client={curation.client}
+          onCurated={() => void refreshTimeline()}
+          onTrashed={(ids) => {
+            const gone = new Set(ids);
+            setSettled(
+              selectedAssets
+                .filter((asset) => gone.has(asset.id))
+                .map((asset) => ({ ...asset, status: 'trashed' as const })),
+            );
+            setSelection(
+              ids.reduce(
+                (current, id) =>
+                  isSelected(current, id)
+                    ? toggleSelection(current, id)
+                    : current,
+                selection,
+              ),
+            );
+            void refreshTimeline();
+          }}
+          onRestored={() => {
+            setSettled([]);
+            void refreshTimeline();
+          }}
+          {...(curation.canCurate === undefined
+            ? {}
+            : { canCurate: curation.canCurate })}
+        />
+      ) : null}
+
       {page && allAssets.length > 0 ? (
         <>
           <div className={styles.selectionBar}>
@@ -533,7 +575,10 @@ export function LibraryPage({
                 </span>
                 <button
                   className={styles.controlButton}
-                  onClick={() => setSelection(createSelectionState())}
+                  onClick={() => {
+                    setSelection(createSelectionState());
+                    setSettled([]);
+                  }}
                   type="button"
                 >
                   Clear selection
@@ -542,29 +587,6 @@ export function LibraryPage({
             ) : null}
           </div>
 
-          {curation && selectedAssets.length > 0 ? (
-            <CurationActions
-              assets={selectedAssets}
-              client={curation.client}
-              onCurated={() => void refreshTimeline()}
-              onTrashed={(ids) => {
-                setSelection(
-                  ids.reduce(
-                    (current, id) =>
-                      isSelected(current, id)
-                        ? toggleSelection(current, id)
-                        : current,
-                    selection,
-                  ),
-                );
-                void refreshTimeline();
-              }}
-              onRestored={() => void refreshTimeline()}
-              {...(curation.canCurate === undefined
-                ? {}
-                : { canCurate: curation.canCurate })}
-            />
-          ) : null}
 
           <div
             aria-label="Library timeline"
@@ -642,13 +664,14 @@ export function LibraryPage({
                               aria-label={`Select ${asset.title}`}
                               checked={selected}
                               className={styles.selectControl}
-                              onClick={(event: MouseEvent<HTMLInputElement>) =>
+                              onClick={(event: MouseEvent<HTMLInputElement>) => {
+                                setSettled([]);
                                 setSelection(
                                   event.shiftKey
                                     ? selectRange(selection, orderedIds, asset.id)
                                     : toggleSelection(selection, asset.id),
-                                )
-                              }
+                                );
+                              }}
                               readOnly
                               type="checkbox"
                             />

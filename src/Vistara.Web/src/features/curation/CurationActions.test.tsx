@@ -186,7 +186,7 @@ describe('curation actions', () => {
         'true',
       ),
     );
-    expect(screen.getByRole('status')).toHaveTextContent(
+    expect(screen.getByRole('status', { name: 'Curation result' })).toHaveTextContent(
       'Added to favorites: 1 image.',
     );
   });
@@ -207,7 +207,7 @@ describe('curation actions', () => {
         'false',
       ),
     );
-    expect(screen.getByRole('status')).toHaveTextContent(
+    expect(screen.getByRole('status', { name: 'Curation result' })).toHaveTextContent(
       'Added to favorites: no images. 1 image could not be updated.',
     );
   });
@@ -229,7 +229,7 @@ describe('curation actions', () => {
     expect(client.getAsset).toHaveBeenCalledWith('asset-1');
     expect(favoriteAsset.mock.calls[1]?.[1]).toMatchObject({ ifMatch: '"v7"' });
     await waitFor(() =>
-      expect(screen.getByRole('status')).toHaveTextContent(
+      expect(screen.getByRole('status', { name: 'Curation result' })).toHaveTextContent(
         'Added to favorites: 1 image. 1 image was refreshed before being applied.',
       ),
     );
@@ -253,7 +253,7 @@ describe('curation actions', () => {
     await waitFor(() => expect(addAssetTag).toHaveBeenCalledTimes(2));
     expect(addAssetTag.mock.calls[0]?.[0]).toBe('a');
     expect(addAssetTag.mock.calls[0]?.[1]).toBe('tag-1');
-    expect(screen.getByRole('status')).toHaveTextContent(
+    expect(screen.getByRole('status', { name: 'Curation result' })).toHaveTextContent(
       'Tagged Coast: 1 image. 1 image could not be updated.',
     );
     const outcomes = screen.getByRole('list', { name: 'Result for each image' });
@@ -315,7 +315,7 @@ describe('curation actions', () => {
         { idempotencyKey: 'key-1', ifMatch: '"v3"' },
       ),
     );
-    expect(screen.getByRole('status')).toHaveTextContent(
+    expect(screen.getByRole('status', { name: 'Curation result' })).toHaveTextContent(
       'Added to Summer: 1 image.',
     );
   });
@@ -394,7 +394,7 @@ describe('curation actions', () => {
       [{ id: 'asset-1', version: 4 }],
     );
     await waitFor(() =>
-      expect(screen.getByRole('status')).toHaveTextContent(
+      expect(screen.getByRole('status', { name: 'Curation result' })).toHaveTextContent(
         'Moved to trash: 1 image.',
       ),
     );
@@ -406,7 +406,7 @@ describe('curation actions', () => {
         { idempotencyKey: 'key-1' },
       ),
     );
-    expect(screen.getByRole('status')).toHaveTextContent(
+    expect(screen.getByRole('status', { name: 'Curation result' })).toHaveTextContent(
       'Restore queued for 1 image.',
     );
   });
@@ -474,6 +474,36 @@ describe('curation actions', () => {
 
     expect(
       await screen.findByRole('heading', { name: 'No albums yet' }),
+    ).toBeInTheDocument();
+  });
+
+  it('reports a partial trash of a mixed selection', async () => {
+    const client = makeClient({
+      bulkMutateAssets: vi.fn(async () => ({
+        data: [{ assetId: 'a', status: 'trashed', version: 4 }],
+      })),
+    });
+    const { user } = renderActions({
+      assets: [
+        asset({ id: 'a' }),
+        asset({ id: 'b', title: 'Still processing', status: 'processing' }),
+      ],
+      client,
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Move to trash' }));
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move 1 image to trash?',
+    });
+    await user.click(within(dialog).getByRole('button', { name: 'Move to trash' }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent('Moved to trash: 1 image.'),
+    );
+    expect(
+      screen.getByRole('button', { name: 'Undo move to trash' }),
     ).toBeInTheDocument();
   });
 

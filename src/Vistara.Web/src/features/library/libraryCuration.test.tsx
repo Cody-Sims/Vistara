@@ -163,9 +163,27 @@ describe('library curation', () => {
 
     await waitFor(() => expect(client.bulkMutateAssets).toHaveBeenCalled());
     await waitFor(() =>
-      expect(screen.queryByRole('group', { name: 'Curation actions' })).toBeNull(),
+      expect(screen.getByLabelText('Select Photo 0')).not.toBeChecked(),
     );
-    expect(screen.getByLabelText('Select Photo 0')).not.toBeChecked();
+
+    // What happened, and the undo, outlive the assets that left the timeline.
+    const report = screen.getByRole('group', { name: 'Curation actions' });
+    expect(
+      within(report).getByRole('status', { name: 'Curation result' }),
+    ).toHaveTextContent('Moved to trash: 1 image.');
+    expect(
+      within(report).getByRole('button', { name: 'Undo move to trash' }),
+    ).toBeInTheDocument();
+    expect(
+      within(report).queryByRole('button', { name: 'Move to trash' }),
+    ).toBeNull();
+
+    await user.click(screen.getByLabelText('Select Photo 1'));
+    expect(
+      within(
+        screen.getByRole('group', { name: 'Curation actions' }),
+      ).queryByRole('button', { name: 'Undo move to trash' }),
+    ).toBeNull();
   });
 
   it('hides the actions from a session that may not curate', async () => {

@@ -150,6 +150,10 @@ export function CurationActions({
   const allowed = canCurate ?? session.scopes.includes('metadata.manage');
   const targets = curationTargets(assets);
   const trashable = trashableTargets(targets);
+  /** Assets that already left the library cannot be curated any further. */
+  const actionable = targets.filter(
+    (target) => target.status !== 'trashed' && target.status !== 'purged',
+  );
   const panelId = useId();
   const headingId = useId();
   const reasonId = useId();
@@ -158,11 +162,16 @@ export function CurationActions({
 
   const [panel, setPanel] = useState<Panel>();
   const [busy, setBusy] = useState(false);
-  const [summary, setSummary] = useState<CurationSummary>();
-  const [details, setDetails] = useState<readonly CurationItemResult[]>([]);
-  const [undoable, setUndoable] = useState<readonly VersionedAssetReference[]>(
-    [],
-  );
+  /**
+   * What the last action did, tied to the assets it was asked about. A refresh
+   * that only changes versions keeps it; a different selection retires it.
+   */
+  const [outcome, setOutcome] = useState<{
+    readonly key: string;
+    readonly summary: CurationSummary;
+    readonly details: readonly CurationItemResult[];
+    readonly undoable: readonly VersionedAssetReference[];
+  }>();
   /**
    * The favourite state shown before, and after, the API answers. It is keyed
    * to the assets it was decided for, so the moment the caller hands over
@@ -184,6 +193,11 @@ export function CurationActions({
   const trashTrigger = useRef<HTMLButtonElement>(null);
   const confirmButton = useRef<HTMLButtonElement>(null);
 
+  const scope = targets.map((target) => target.id).join('|');
+  const shown = outcome?.key === scope ? outcome : undefined;
+  const summary = shown?.summary;
+  const details = shown?.details ?? [];
+  const undoable = shown?.undoable ?? [];
   const favorite = favoriteStateFor(targets);
   const identity = targets
     .map((target) => `${target.id}:${target.version}:${target.favorite}`)
@@ -193,13 +207,18 @@ export function CurationActions({
       ? favoriteOverride.value
       : favorite === 'all';
 
-  const report = useCallback(
-    (action: string, results: readonly CurationItemResult[]) => {
-      setSummary(summarizeCuration(action, results));
-      setDetails(results.length > 1 ? results : []);
-    },
-    [],
-  );
+  function report(
+    action: string,
+    results: readonly CurationItemResult[],
+    undo: readonly VersionedAssetReference[] = [],
+  ) {
+    setOutcome({
+      key: scope,
+      summary: summarizeCuration(action, results),
+      details: results.length > 1 ? results : [],
+      undoable: undo,
+    });
+  }
 
   const loadTags = useCallback(async () => {
     setTags({ kind: 'loading', items: [] });
@@ -272,7 +291,6 @@ export function CurationActions({
     run: (target: AssetSummary) => Promise<ApiResponse<AssetDetail>>,
   ) {
     setBusy(true);
-    setUndoable([]);
     const results: CurationItemResult[] = [];
     const updated: AssetSummary[] = [];
     for (const target of targets) {
@@ -366,7 +384,6 @@ export function CurationActions({
    */
   async function changeAlbum(value: AlbumSummary, add: boolean) {
     setBusy(true);
-    setUndoable([]);
     const items = toVersionedReferences(targets);
     const call = (album: AlbumSummary) =>
       add
@@ -510,11 +527,15 @@ export function CurationActions({
     }
 
     if (answer.kind === 'queued') {
-      setSummary({
-        message: `Move to trash queued for ${answer.job.submittedCount} images.`,
-        tone: 'success',
+      setOutcome({
+        key: scope,
+        summary: {
+          message: `Move to trash queued for ${answer.job.submittedCount} images.`,
+          tone: 'success',
+        },
+        details: [],
+        undoable: [],
       });
-      setDetails([]);
       setBusy(false);
       onTrashed?.(trashable.map((target) => target.id), []);
       return;
@@ -527,8 +548,7 @@ export function CurationActions({
       outcome: outcomeForTrashStatus(result.status),
     }));
     const restorable = restorableReferences(answer.results);
-    report('Moved to trash', results);
-    setUndoable(restorable);
+    report('Moved to trash', results, restorable);
     setBusy(false);
     onTrashed?.(
       results
@@ -547,27 +567,88 @@ export function CurationActions({
         items,
         createIdempotencyKey(),
       );
-      setUndoable([]);
-      setDetails([]);
-      setSummary({
-        message: `Restore queued for ${
-          job.submittedCount === 1 ? '1 image' : `${job.submittedCount} images`
-        }.`,
-        tone: 'success',
+      setOutcome({
+        key: scope,
+        summary: {
+          message: `Restore queued for ${
+            job.submittedCount === 1 ? '1 image' : `${job.submittedCount} images`
+          }.`,
+          tone: 'success',
+        },
+        details: [],
+        undoable: [],
       });
       onRestored?.(items.map((item) => item.id));
     } catch {
-      setSummary({
-        message: 'The restore could not be started. Open Trash to try again.',
-        tone: 'danger',
+      setOutcome({
+        key: scope,
+        summary: {
+          message: 'The restore could not be started. Open Trash to try again.',
+          tone: 'danger',
+        },
+        details: [],
+        undoable: [],
       });
     } finally {
       setBusy(false);
     }
   }
 
+  const reportNode = (
+    <div className={styles.report}>
+      <p
+        aria-label="Curation result"
+        aria-live="polite"
+        className={styles.summary}
+        data-tone={summary?.tone}
+        role="status"
+      >
+        {summary?.message ?? ''}
+      </p>
+      {undoable.length > 0 ? (
+        <button
+          className={styles.action}
+          disabled={busy}
+          onClick={() => void undoTrash()}
+          type="button"
+        >
+          Undo move to trash
+        </button>
+      ) : null}
+      {details.length > 0 ? (
+        <ul aria-label="Result for each image" className={styles.details}>
+          {details.map((result) => (
+            <li key={result.id}>
+              <span>{result.title}</span>
+              <span className={styles.outcome}>
+                {describeOutcome(result.outcome)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+
   if (!allowed || targets.length === 0) {
     return null;
+  }
+
+  /**
+   * Once every asset has left the library there is nothing left to act on,
+   * but what happened to them, and the undo, still belong on screen.
+   */
+  if (actionable.length === 0) {
+    return (
+      <section
+        aria-busy={busy}
+        aria-label="Curation actions"
+        className={styles.bar}
+        role="group"
+      >
+        {reportNode}
+      </section>
+    );
   }
 
   return (
@@ -831,38 +912,7 @@ export function CurationActions({
         </div>
       ) : null}
 
-      <div className={styles.report}>
-        <p
-          aria-live="polite"
-          className={styles.summary}
-          data-tone={summary?.tone}
-          role="status"
-        >
-          {summary?.message ?? ''}
-        </p>
-        {undoable.length > 0 ? (
-          <button
-            className={styles.action}
-            disabled={busy}
-            onClick={() => void undoTrash()}
-            type="button"
-          >
-            Undo move to trash
-          </button>
-        ) : null}
-        {details.length > 0 ? (
-          <ul aria-label="Result for each image" className={styles.details}>
-            {details.map((result) => (
-              <li key={result.id}>
-                <span>{result.title}</span>
-                <span className={styles.outcome}>
-                  {describeOutcome(result.outcome)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </div>
+      {reportNode}
     </section>
   );
 }
