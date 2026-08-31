@@ -1,4 +1,6 @@
 export interface AccountDataStores {
+  /** Extra in-memory caches to drop, such as an unsent storage draft. */
+  readonly inMemory?: readonly (() => void)[];
   /** TanStack Query cache holding tenant-scoped responses. */
   readonly queryCache?: { clear(): void };
   readonly sessionStorage?: Pick<
@@ -30,6 +32,9 @@ export async function clearAccountScopedData(
   stores: AccountDataStores = {},
 ): Promise<void> {
   stores.queryCache?.clear();
+  for (const clear of stores.inMemory ?? []) {
+    clear();
+  }
 
   const storage = stores.sessionStorage ?? readSessionStorage();
   if (storage) {

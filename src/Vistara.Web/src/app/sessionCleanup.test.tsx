@@ -4,6 +4,10 @@ import userEvent from '@testing-library/user-event';
 import { createMemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CurrentUser } from '../api/platform';
+import {
+  getStorageDraft,
+  updateProviderDraft,
+} from '../features/admin';
 import { useSession } from '../features/session';
 import { currentUser } from '../features/session/sessionTestData';
 import { ApplicationProviders } from './ApplicationProviders';
@@ -34,6 +38,7 @@ describe('application sign-out', () => {
       '{"scrollTop":420}',
     );
     sessionStorage.setItem('vistara:theme', 'dark');
+    updateProviderDraft('s3', { secretAccessKey: 'unsent-secret-value' });
 
     const client = {
       getSession: vi.fn(async (): Promise<CurrentUser> => currentUser()),
@@ -69,5 +74,6 @@ describe('application sign-out', () => {
       sessionStorage.getItem('vistara:route-restoration:/library'),
     ).toBeNull();
     expect(sessionStorage.getItem('vistara:theme')).toBe('dark');
+    expect(getStorageDraft().s3.secretAccessKey).toBe('');
   });
 });

@@ -1,6 +1,7 @@
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
 import { RouterProvider, type RouterProviderProps } from 'react-router-dom';
+import { clearStorageDraft } from '../features/admin';
 import {
   clearAccountScopedData,
   SessionProvider,
@@ -24,7 +25,11 @@ export function ApplicationProviders({
   // Signing out must leave nothing of the previous account behind: the shared
   // query cache, gallery session storage, and resumable upload database all go.
   const onSessionEnd = useCallback(
-    () => clearAccountScopedData({ queryCache: queryClient }),
+    () =>
+      clearAccountScopedData({
+        queryCache: queryClient,
+        inMemory: [clearStorageDraft],
+      }),
     [queryClient],
   );
 

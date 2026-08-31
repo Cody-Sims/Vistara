@@ -178,7 +178,19 @@ const pages: readonly { name: string; element: React.ReactNode }[] = [
   {
     name: 'administration storage',
     element: routed(
-      <AdminStoragePage client={{ getCapabilities: async () => capabilities }} />,
+      <AdminStoragePage
+        client={{
+          getStorageSummary: async () => ({
+            buckets: [],
+            originalBytes: 0,
+            derivativeBytes: 0,
+            stagingBytes: 0,
+            quotaBytes: 0,
+            pendingUploadBytes: 0,
+          }),
+          validateStorage: vi.fn(),
+        }}
+      />,
       '/admin/storage',
     ),
   },

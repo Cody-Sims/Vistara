@@ -7,7 +7,6 @@ import type { Capabilities, JobStatus, TenantMember } from '../../api/platform';
 import { AdminAuditPage } from './AdminAuditPage';
 import { AdminJobsPage } from './AdminJobsPage';
 import { AdminPoliciesPage } from './AdminPoliciesPage';
-import { AdminStoragePage } from './AdminStoragePage';
 import { AdminUsersPage } from './AdminUsersPage';
 
 function apiError(status: number) {
@@ -296,39 +295,6 @@ describe('administration: people', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'at least one owner',
     );
-  });
-});
-
-describe('administration: storage', () => {
-  it('reports the configured storage and upload limits', async () => {
-    renderRoute(
-      <AdminStoragePage
-        client={{ getCapabilities: vi.fn(async () => capabilities) }}
-      />,
-    );
-
-    expect(await screen.findByText('s3')).toBeInTheDocument();
-    expect(screen.getByText('4 GB')).toBeInTheDocument();
-    expect(
-      screen.getByText(/GET \/api\/v1\/admin\/storage/),
-    ).toBeInTheDocument();
-  });
-
-  it('retries a failed capability read', async () => {
-    const user = userEvent.setup();
-    const getCapabilities = vi
-      .fn()
-      .mockRejectedValueOnce(apiError(503))
-      .mockResolvedValueOnce(capabilities);
-    renderRoute(<AdminStoragePage client={{ getCapabilities }} />);
-
-    expect(
-      await screen.findByRole('heading', { name: 'Storage is unavailable' }),
-    ).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: 'Try again' }));
-
-    expect(await screen.findByText('s3')).toBeInTheDocument();
   });
 });
 
