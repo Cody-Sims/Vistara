@@ -8,6 +8,7 @@ using Vistara.Application.Tenancy;
 using Vistara.Application.Uploads;
 using Vistara.Application.Uploads.Quotas;
 using Vistara.Persistence.Auth;
+using Vistara.Persistence.Azure;
 using Vistara.Persistence.Derivatives;
 using Vistara.Persistence.Events;
 using Vistara.Persistence.Ingest;
@@ -28,6 +29,13 @@ public sealed class VistaraPersistenceOptions
     public VistaraDatabaseProvider Provider { get; set; }
 
     public string ConnectionString { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Optional Microsoft Entra ID token settings. When null the host
+    /// <c>Persistence:Azure</c> configuration decides, and an absent section
+    /// keeps password authentication.
+    /// </summary>
+    public PersistenceAzureOptions? Azure { get; set; }
 }
 
 public static class PersistenceServiceCollectionExtensions
@@ -49,79 +57,20 @@ public static class PersistenceServiceCollectionExtensions
         }
 
         services.AddSingleton(persistenceOptions);
+        if (persistenceOptions.Azure is not null)
+        {
+            persistenceOptions.Azure.Validate();
+            services.TryAddSingleton(persistenceOptions.Azure);
+        }
+
+        services.AddVistaraNpgsqlDataSources();
         services.AddSingleton<TenantDbContextFactory>();
-        services.AddDbContext<VistaraDbContext>(options =>
-        {
-            switch (persistenceOptions.Provider)
-            {
-                case VistaraDatabaseProvider.Sqlite:
-                    options.UseSqlite(persistenceOptions.ConnectionString);
-                    break;
-                case VistaraDatabaseProvider.PostgreSql:
-                    options.UseNpgsql(persistenceOptions.ConnectionString);
-                    break;
-                default:
-                    throw new ArgumentOutOfRangeException(
-                        nameof(configure),
-                        persistenceOptions.Provider,
-                        "The database provider is not supported.");
-            }
-        });
-        services.AddDbContext<AuthenticationCatalogDbContext>(options =>
-        {
-            if (persistenceOptions.Provider == VistaraDatabaseProvider.Sqlite)
-            {
-                options.UseSqlite(persistenceOptions.ConnectionString);
-            }
-            else
-            {
-                options.UseNpgsql(persistenceOptions.ConnectionString);
-            }
-        });
-        services.AddDbContext<Identity.IdentityCatalogDbContext>(options =>
-        {
-            if (persistenceOptions.Provider == VistaraDatabaseProvider.Sqlite)
-            {
-                options.UseSqlite(persistenceOptions.ConnectionString);
-            }
-            else
-            {
-                options.UseNpgsql(persistenceOptions.ConnectionString);
-            }
-        });
-        services.AddDbContext<JwtRevocationCatalogDbContext>(options =>
-        {
-            if (persistenceOptions.Provider == VistaraDatabaseProvider.Sqlite)
-            {
-                options.UseSqlite(persistenceOptions.ConnectionString);
-            }
-            else
-            {
-                options.UseNpgsql(persistenceOptions.ConnectionString);
-            }
-        });
-        services.AddDbContext<MediaCatalogDbContext>(options =>
-        {
-            if (persistenceOptions.Provider == VistaraDatabaseProvider.Sqlite)
-            {
-                options.UseSqlite(persistenceOptions.ConnectionString);
-            }
-            else
-            {
-                options.UseNpgsql(persistenceOptions.ConnectionString);
-            }
-        });
-        services.AddDbContext<RateLimitCatalogDbContext>(options =>
-        {
-            if (persistenceOptions.Provider == VistaraDatabaseProvider.Sqlite)
-            {
-                options.UseSqlite(persistenceOptions.ConnectionString);
-            }
-            else
-            {
-                options.UseNpgsql(persistenceOptions.ConnectionString);
-            }
-        });
+        services.AddVistaraRelationalDbContext<VistaraDbContext>(persistenceOptions);
+        services.AddVistaraRelationalDbContext<AuthenticationCatalogDbContext>(persistenceOptions);
+        services.AddVistaraRelationalDbContext<Identity.IdentityCatalogDbContext>(persistenceOptions);
+        services.AddVistaraRelationalDbContext<JwtRevocationCatalogDbContext>(persistenceOptions);
+        services.AddVistaraRelationalDbContext<MediaCatalogDbContext>(persistenceOptions);
+        services.AddVistaraRelationalDbContext<RateLimitCatalogDbContext>(persistenceOptions);
         services.AddScoped<RelationalAuthenticationStore>();
         services.AddScoped<Identity.RelationalIdentityCatalog>();
         services.AddScoped<Identity.RelationalUserPreferenceStore>();
@@ -147,5 +96,17 @@ public static class PersistenceServiceCollectionExtensions
         services.TryAddScoped<RelationalAssetIngestUnitOfWork>();
         services.TryAddScoped<RelationalIngestStore>();
         return services;
+    }
+
+    private static void AddVistaraRelationalDbContext<TContext>(
+        this IServiceCollection services,
+        VistaraPersistenceOptions persistenceOptions)
+        where TContext : DbContext
+    {
+        services.AddDbContext<TContext>((provider, options) =>
+            options.UseVistaraDatabase(
+                provider,
+                persistenceOptions.Provider,
+                persistenceOptions.ConnectionString));
     }
 }

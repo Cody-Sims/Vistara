@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Vistara.Application.Jobs;
+using Vistara.Persistence.Azure;
 
 namespace Vistara.Persistence.Jobs;
 
@@ -28,42 +29,17 @@ public static class JobPersistenceServiceCollectionExtensions
                 nameof(configure));
         }
 
-        services.AddDbContext<JobDbContext>(builder =>
-        {
-            if (options.Provider == VistaraDatabaseProvider.Sqlite)
-            {
-                builder.UseSqlite(options.ConnectionString);
-            }
-            else if (options.Provider == VistaraDatabaseProvider.PostgreSql)
-            {
-                builder.UseNpgsql(options.ConnectionString);
-            }
-            else
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(configure),
-                    options.Provider,
-                    "The job database provider is not supported.");
-            }
-        });
-        services.AddDbContext<WorkerTenantCatalogDbContext>(builder =>
-        {
-            if (options.Provider == VistaraDatabaseProvider.Sqlite)
-            {
-                builder.UseSqlite(options.ConnectionString);
-            }
-            else if (options.Provider == VistaraDatabaseProvider.PostgreSql)
-            {
-                builder.UseNpgsql(options.ConnectionString);
-            }
-            else
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(configure),
-                    options.Provider,
-                    "The worker tenant catalog provider is not supported.");
-            }
-        });
+        services.AddVistaraNpgsqlDataSources();
+        services.AddDbContext<JobDbContext>((provider, builder) =>
+            builder.UseVistaraDatabase(
+                provider,
+                options.Provider,
+                options.ConnectionString));
+        services.AddDbContext<WorkerTenantCatalogDbContext>((provider, builder) =>
+            builder.UseVistaraDatabase(
+                provider,
+                options.Provider,
+                options.ConnectionString));
         services.AddSingleton(new JobQueueOptions
         {
             ConfiguredWorkerCount = options.ConfiguredWorkerCount,
