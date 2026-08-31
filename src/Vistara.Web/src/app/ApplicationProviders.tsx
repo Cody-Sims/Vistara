@@ -1,6 +1,11 @@
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query';
+import { useCallback } from 'react';
 import { RouterProvider, type RouterProviderProps } from 'react-router-dom';
-import { SessionProvider, type SessionClient } from '../features/session';
+import {
+  clearAccountScopedData,
+  SessionProvider,
+  type SessionClient,
+} from '../features/session';
 import { platformClient } from './apiClients';
 
 interface ApplicationProvidersProps {
@@ -16,9 +21,20 @@ export function ApplicationProviders({
   sessionClient = platformClient,
   sessionMode = 'live',
 }: ApplicationProvidersProps) {
+  // Signing out must leave nothing of the previous account behind: the shared
+  // query cache, gallery session storage, and resumable upload database all go.
+  const onSessionEnd = useCallback(
+    () => clearAccountScopedData({ queryCache: queryClient }),
+    [queryClient],
+  );
+
   return (
     <QueryClientProvider client={queryClient}>
-      <SessionProvider client={sessionClient} mode={sessionMode}>
+      <SessionProvider
+        client={sessionClient}
+        mode={sessionMode}
+        onSessionEnd={onSessionEnd}
+      >
         <RouterProvider router={router} />
       </SessionProvider>
     </QueryClientProvider>

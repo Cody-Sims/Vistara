@@ -8,9 +8,10 @@ import {
   VistaraApiError,
   type VistaraApiClient,
 } from '../../api/generated/client';
-import type { EntityTag, Tag } from '../../api/generated/models';
+import type { Tag } from '../../api/generated/models';
 import styles from './tags.module.css';
 import { Skeleton } from '../../components';
+import { versionTag } from '../../api/versionTag';
 
 type TagsClient = Pick<
   VistaraApiClient,
@@ -370,9 +371,6 @@ export function TagsView({
   );
 }
 
-function versionTag(version: number): EntityTag {
-  return `"v${version}"`;
-}
 
 function isConflict(error: unknown): boolean {
   return error instanceof VistaraApiError && error.status === 412;

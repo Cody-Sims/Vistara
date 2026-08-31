@@ -16,6 +16,7 @@ import type {
 } from '../../api/generated/models';
 import styles from './albums.module.css';
 import { Skeleton } from '../../components';
+import { versionTag } from '../../api/versionTag';
 
 type AlbumsClient = Pick<VistaraApiClient, 'listAlbums' | 'createAlbum'>;
 
@@ -606,9 +607,6 @@ function AlbumItemRow({
   );
 }
 
-function versionTag(version: number): EntityTag {
-  return `"v${version}"`;
-}
 
 function isConflict(error: unknown): boolean {
   return error instanceof VistaraApiError && error.status === 412;

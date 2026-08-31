@@ -9,6 +9,7 @@ import type {
   VersionedAssetReference,
 } from '../../api/generated/models';
 import styles from './Shares.module.css';
+import { versionTag } from '../../api/versionTag';
 
 export type ShareCreationTarget =
   | { readonly kind: 'album'; readonly albumId: string }
@@ -168,7 +169,7 @@ export function ShareManager({
     try {
       await client.revokeShare(targetToRevoke.id, {
         idempotencyKey: createIdempotencyKey(),
-        ifMatch: `"v${targetToRevoke.version}"`,
+        ifMatch: versionTag(targetToRevoke.version),
       });
       setShares((current) =>
         current.map((item) =>
