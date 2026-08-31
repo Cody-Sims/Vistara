@@ -155,25 +155,60 @@ describe('expired session', () => {
     expect(router.state.location.search).toBe(before);
   });
 
-  it('never remembers an unsafe destination', async () => {
+  it('refuses an unsafe destination handed to the sign-in page', async () => {
     const fetch = vi
       .fn<typeof globalThis.fetch>()
-      .mockResolvedValueOnce(jsonResponse(currentUser()))
-      .mockResolvedValue(unauthorizedResponse());
+      .mockImplementationOnce(async () => unauthorizedResponse())
+      .mockImplementationOnce(async () =>
+        jsonResponse({ user: currentUser(), csrfToken: 'token-1' }),
+      )
+      .mockImplementation(async () => jsonResponse(currentUser()));
     const user = userEvent.setup();
-    const { client, router } = renderApplication(fetch, '/library');
-
-    await waitFor(() => expect(router.state.location.pathname).toBe('/library'));
-    await router.navigate('/library?redirect=https://example.invalid');
-    await client.listTenants().catch(() => undefined);
-
-    await waitFor(() => expect(router.state.location.pathname).toBe('/login'));
-    const destination = new URLSearchParams(router.state.location.search).get(
-      'returnTo',
+    const { router } = renderApplication(
+      fetch,
+      `/login?returnTo=${encodeURIComponent('https://evil.example/steal')}`,
     );
-    expect(destination?.startsWith('/')).toBe(true);
-    expect(destination).not.toContain('//');
 
+    await screen.findByRole('heading', { name: 'Sign in' });
     await user.click(screen.getByLabelText('Email address or user name'));
+    await user.paste('ada@example.test');
+    await user.click(screen.getByLabelText('Password'));
+    await user.paste('correct horse');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe('/library'),
+    );
+    expect(router.state.location.search).toBe('');
+    expect(
+      fetch.mock.calls.map(([input]) => String(input)),
+    ).not.toContain('https://evil.example/steal');
+  });
+
+  it('refuses a protocol-relative destination handed to the sign-in page', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockImplementationOnce(async () => unauthorizedResponse())
+      .mockImplementationOnce(async () =>
+        jsonResponse({ user: currentUser(), csrfToken: 'token-1' }),
+      )
+      .mockImplementation(async () => jsonResponse(currentUser()));
+    const user = userEvent.setup();
+    const { router } = renderApplication(
+      fetch,
+      `/login?returnTo=${encodeURIComponent('//evil.example/steal')}`,
+    );
+
+    await screen.findByRole('heading', { name: 'Sign in' });
+    await user.click(screen.getByLabelText('Email address or user name'));
+    await user.paste('ada@example.test');
+    await user.click(screen.getByLabelText('Password'));
+    await user.paste('correct horse');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe('/library'),
+    );
+    expect(router.state.location.pathname).toBe('/library');
   });
 });
