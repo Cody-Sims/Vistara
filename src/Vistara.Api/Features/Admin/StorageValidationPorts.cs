@@ -277,6 +277,9 @@ public static class StorageValidationDetails
 
     public const string CredentialRejected = "The credential was rejected.";
 
+    public const string AmbientCredentialRefused =
+        "Managed identity is only used against a first-party Azure endpoint.";
+
     public const string CredentialMissing =
         "No credential is available for this provider.";
 

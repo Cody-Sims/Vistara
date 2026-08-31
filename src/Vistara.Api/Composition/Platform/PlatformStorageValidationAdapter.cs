@@ -11,6 +11,7 @@ using Azure.Storage.Blobs.Models;
 using Microsoft.Extensions.Options;
 using Vistara.Api.Composition.Media;
 using Vistara.Api.Features.Admin;
+using Vistara.Storage.Azure;
 
 namespace Vistara.Api.Composition.Platform;
 
@@ -36,7 +37,24 @@ internal sealed class PlatformStorageValidationAdapter(
         ArgumentNullException.ThrowIfNull(candidate);
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (candidate.Endpoint is { } endpoint && !IsPermitted(endpoint))
+        // Trust is decided before anything resolves a name or builds a client,
+        // because an ambient managed identity would otherwise mint a real token
+        // for whatever host the submitted suffix happened to construct.
+        bool firstPartyAzure = false;
+        if (candidate.Kind == StorageCandidateKind.AzureBlob &&
+            !IsAzureEndpointPermitted(candidate, out firstPartyAzure, out string detail))
+        {
+            return StorageValidationOutcome.Rejected(
+                StorageValidationDetails.RejectedMessage,
+                detail);
+        }
+
+        // A first-party Azure host is trusted by name, so it needs no address
+        // policy: resolving it would only add a lookup that can fail for an
+        // account that does not exist yet.
+        if (!firstPartyAzure &&
+            candidate.Endpoint is { } endpoint &&
+            !IsPermitted(endpoint))
         {
             return StorageValidationOutcome.Rejected(
                 StorageValidationDetails.RejectedMessage,
@@ -89,6 +107,33 @@ internal sealed class PlatformStorageValidationAdapter(
                     StorageValidationDetails.Unreachable);
             }
         }
+    }
+
+    /// <summary>
+    /// Applies the production Azure endpoint policy to a candidate. Managed
+    /// identity is an ambient deployment credential, so it is only ever used
+    /// against a first-party Azure host for the named account; the operator's
+    /// trusted host list can admit an explicit secret to a private endpoint or
+    /// emulator, but it can never widen where an ambient token is sent, which
+    /// is the same rule the blob store enforces at startup.
+    /// </summary>
+    private bool IsAzureEndpointPermitted(
+        StorageValidationCandidate candidate,
+        out bool firstParty,
+        out string detail)
+    {
+        detail = StorageValidationDetails.EndpointRejected;
+        firstParty = AzureBlobStoreOptions.IsTrustedBlobEndpoint(
+            candidate.AccountName,
+            candidate.Endpoint);
+        if (candidate.AzureCredential == AzureCredentialKind.ManagedIdentity)
+        {
+            detail = StorageValidationDetails.AmbientCredentialRefused;
+            return firstParty;
+        }
+
+        return firstParty ||
+            (candidate.Endpoint is { } endpoint && IsExplicitlyTrusted(endpoint.Host));
     }
 
     /// <summary>

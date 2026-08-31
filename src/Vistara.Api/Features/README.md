@@ -206,6 +206,7 @@ fixed catalogue:
 `The endpoint is not an allowed validation target.` ·
 `The storage target could not be reached.` ·
 `The credential was rejected.` ·
+`Managed identity is only used against a first-party Azure endpoint.` ·
 `No credential is available for this provider.` ·
 `The container or bucket could not be listed with this credential.` ·
 `The probe object could not be written.` ·
@@ -222,9 +223,24 @@ the browser.
 Credential kinds:
 
 - `managedIdentity` is the default for `azureBlob` and submits no secret; the
-  deployment's workload or managed identity is used.
+  deployment's workload or managed identity is used. Because that credential is
+  ambient, it is only ever used against a **first-party Azure endpoint**: the
+  final host must equal `{accountName}` plus one of the trusted Azure Blob
+  suffixes published by `AzureBlobStoreOptions.TrustedBlobHostSuffixes`, which
+  is the same allowlist the blob store enforces at startup. The comparison runs
+  on the punycode host and rejects a non-default port, any path, a trailing dot,
+  and an address literal, so `core.windows.net.attacker.example`,
+  `evilcore.windows.net`, homoglyph, and case tricks all fail closed. The
+  operator's trusted host list cannot widen this: it may admit an explicit
+  secret to a private endpoint, but never an ambient token. A rejected candidate
+  is refused **before** any name resolution or client construction, so no token
+  is ever acquired for it.
+- Sovereign clouds are reached by naming their suffix, for example
+  `endpointSuffix: "core.usgovcloudapi.net"` or `"core.chinacloudapi.cn"`.
 - `accountKey` and `sasToken` are bounded ephemeral secrets used to build one
-  throwaway container client.
+  throwaway container client. They still require a first-party Azure host or a
+  host in the operator's trusted endpoint list, so an operator cannot be talked
+  into posting a storage key to an arbitrary host.
 - S3 accepts a static access key with an optional session token. Omitting both
   key members requests an anonymous client, which is only honoured when the
   endpoint host is already in the operator's trusted endpoint host list; a

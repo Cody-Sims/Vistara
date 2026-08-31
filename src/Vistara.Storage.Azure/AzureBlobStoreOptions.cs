@@ -17,7 +17,14 @@ public enum AzureBlobSasMode
 
 public sealed class AzureBlobStoreOptions
 {
-    private static readonly string[] TrustedBlobHostSuffixes =
+    /// <summary>
+    /// Every host suffix this deployment treats as a first-party Azure Blob
+    /// endpoint, including the sovereign clouds and their private-link forms.
+    /// Each begins with a dot, so a match is only ever on a label boundary and
+    /// a host such as <c>account.blob.core.windows.net.attacker.example</c>
+    /// cannot pass by merely containing a trusted string.
+    /// </summary>
+    public static IReadOnlyList<string> TrustedBlobHostSuffixes { get; } =
     [
         ".blob.core.windows.net",
         ".privatelink.blob.core.windows.net",
@@ -30,6 +37,55 @@ public sealed class AzureBlobStoreOptions
         ".blob.storage.azure.net",
         ".privatelink.blob.storage.azure.net",
     ];
+
+    /// <summary>
+    /// Decides whether an endpoint is a first-party Azure Blob service endpoint
+    /// for the named account. This is the single place that answers the
+    /// question, so anything that may hand an ambient credential to a host, the
+    /// blob store itself or a configuration validation, agrees on the answer.
+    /// The comparison runs on the punycode host, rejects a non-default port, a
+    /// path, a trailing dot, and an address literal, so suffix confusion,
+    /// homoglyph, and case tricks all fail closed.
+    /// </summary>
+    public static bool IsTrustedBlobEndpoint(string? accountName, Uri? serviceUri)
+    {
+        if (serviceUri is null ||
+            !serviceUri.IsAbsoluteUri ||
+            !IsAcceptableAccountName(accountName) ||
+            !string.Equals(
+                serviceUri.Scheme,
+                Uri.UriSchemeHttps,
+                StringComparison.OrdinalIgnoreCase) ||
+            !serviceUri.IsDefaultPort ||
+            !string.IsNullOrEmpty(serviceUri.UserInfo) ||
+            serviceUri.Query.Length != 0 ||
+            serviceUri.Fragment.Length != 0 ||
+            serviceUri.AbsolutePath != "/" ||
+            serviceUri.HostNameType != UriHostNameType.Dns)
+        {
+            return false;
+        }
+
+        string host = serviceUri.IdnHost;
+        if (host.Length == 0 ||
+            host.EndsWith('.') ||
+            host.Any(character => !char.IsAscii(character)))
+        {
+            return false;
+        }
+
+        return TrustedBlobHostSuffixes.Any(suffix =>
+            string.Equals(
+                host,
+                accountName + suffix,
+                StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsAcceptableAccountName(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        value.Length is >= 3 and <= 24 &&
+        value.All(character =>
+            char.IsAsciiLetterLower(character) || char.IsAsciiDigit(character));
 
     public AzureBlobStoreOptions(
         string accountName,
@@ -230,13 +286,7 @@ public sealed class AzureBlobStoreOptions
                     nameof(AllowedEndpointOrigins),
                     allowHttp: false).AbsoluteUri),
             StringComparer.OrdinalIgnoreCase);
-        bool trustedAzureEndpoint =
-            ServiceUri.IsDefaultPort &&
-            TrustedBlobHostSuffixes.Any(suffix =>
-                string.Equals(
-                    ServiceUri.Host,
-                    $"{AccountName}{suffix}",
-                    StringComparison.OrdinalIgnoreCase));
+        bool trustedAzureEndpoint = IsTrustedBlobEndpoint(AccountName, ServiceUri);
         if (EmulatorMode)
         {
             if (!IsLoopbackHost(ServiceUri))
