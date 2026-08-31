@@ -525,7 +525,7 @@ environment with private access if you keep the instance around.
 #### Create Vistara's least-privilege database roles
 
 **[Verified from `deploy/postgres/init-runtime-roles.sh`]** the Compose
-topology creates a schema-owning migrator plus DDL-free API and worker logins.
+topology creates a database-owning migrator plus DDL-free API and worker logins.
 Azure cannot run that init script, and Flexible Server is **not** a vanilla
 PostgreSQL install, so the ordering below matters.
 
@@ -596,6 +596,11 @@ would fail as `vistara_migrator`.
 ```sql
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO vistara_api_runtime, vistara_worker;
+
+-- Required on Azure: public is owned by azure_pg_admin, not by the database
+-- owner, so the migrator held CREATE only through PUBLIC. The revoke above
+-- would otherwise leave it unable to create any table, and migrations fail.
+GRANT CREATE ON SCHEMA public TO vistara_migrator;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE vistara_migrator IN SCHEMA public
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES
