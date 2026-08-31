@@ -234,3 +234,180 @@ describe('same-origin requests carrying a cookie session', () => {
     vi.unstubAllGlobals();
   });
 });
+
+describe('a request object refused for antiforgery', () => {
+  /** A request object needs an absolute URL; this page is the API's origin. */
+  function apiRequest(path: string, init: RequestInit = {}) {
+    return new Request(`${globalThis.location.origin}${path}`, init);
+  }
+
+  function rotating(token: string) {
+    const credentials = cookieCredentials(token);
+    credentials.useRefresher(async () => {
+      credentials.adopt({ csrfToken: 'rotated', authenticationKind: 'cookie' });
+    });
+    return credentials;
+  }
+
+  it('is sent again with the body the first attempt consumed', async () => {
+    const credentials = rotating('stale');
+    const inner = vi
+      .fn<typeof globalThis.fetch>()
+      .mockImplementationOnce(async (input, init) => {
+        await new Request(input as RequestInfo, init).text();
+        return antiforgeryRefusal();
+      })
+      .mockResolvedValueOnce(jsonResponse({ id: 'album-1' }, { status: 201 }));
+    const send = credentialedFetch(inner, credentials);
+
+    const response = await send(
+      apiRequest('/api/v1/albums', {
+        method: 'POST',
+        headers: {
+          'Idempotency-Key': 'key-1',
+          'Content-Type': 'application/json',
+        },
+        body: '{"name":"Summer"}',
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(inner).toHaveBeenCalledTimes(2);
+    const [replayed, replayedInit] = inner.mock.calls[1]!;
+    expect(replayed).toBeInstanceOf(Request);
+    const sent = new Request(replayed as RequestInfo, replayedInit);
+    expect(sent.method).toBe('POST');
+    expect(await sent.text()).toBe('{"name":"Summer"}');
+  });
+
+  it('keeps the headers the caller set and the rotated token', async () => {
+    const credentials = rotating('stale');
+    const inner = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(antiforgeryRefusal())
+      .mockResolvedValueOnce(jsonResponse({}, { status: 201 }));
+    const send = credentialedFetch(inner, credentials);
+
+    await send(
+      apiRequest('/api/v1/albums', {
+        method: 'POST',
+        headers: {
+          'Idempotency-Key': 'key-1',
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      }),
+    );
+
+    const headers = sentHeaders(inner.mock.calls[1]![1]);
+    expect(headers.get('Idempotency-Key')).toBe('key-1');
+    expect(headers.get('Content-Type')).toBe('application/json');
+    expect(headers.get('X-Vistara-CSRF')).toBe('rotated');
+  });
+
+  it('is never sent again once its body has been read', async () => {
+    const credentials = rotating('stale');
+    const inner = vi.fn<typeof globalThis.fetch>(async () =>
+      antiforgeryRefusal(),
+    );
+    const send = credentialedFetch(inner, credentials);
+    const request = apiRequest('/api/v1/albums', {
+      method: 'POST',
+      body: '{"name":"Summer"}',
+    });
+    await request.text();
+    expect(request.bodyUsed).toBe(true);
+
+    const response = await send(request);
+
+    expect(inner).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(403);
+  });
+
+  it('is never sent again when its body is a stream that cannot be duplicated', async () => {
+    const credentials = rotating('stale');
+    const inner = vi.fn<typeof globalThis.fetch>(async () =>
+      antiforgeryRefusal(),
+    );
+    const send = credentialedFetch(inner, credentials);
+
+    const response = await send('/api/v1/uploads', {
+      method: 'POST',
+      body: new ReadableStream(),
+      // @ts-expect-error duplex is required for a streamed body at runtime.
+      duplex: 'half',
+    });
+
+    expect(inner).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(403);
+  });
+
+  it('carries the abort signal of the caller into the second attempt', async () => {
+    const credentials = rotating('stale');
+    const controller = new AbortController();
+    const inner = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(antiforgeryRefusal())
+      .mockResolvedValueOnce(jsonResponse({}, { status: 201 }));
+    const send = credentialedFetch(inner, credentials);
+
+    await send('/api/v1/albums', {
+      method: 'POST',
+      body: '{}',
+      signal: controller.signal,
+    });
+
+    expect(inner.mock.calls[1]![1]?.signal).toBe(controller.signal);
+  });
+
+  it('is cancelled rather than replayed when the caller aborts', async () => {
+    const credentials = cookieCredentials('stale');
+    const controller = new AbortController();
+    credentials.useRefresher(async () => {
+      controller.abort();
+      credentials.adopt({ csrfToken: 'rotated', authenticationKind: 'cookie' });
+    });
+    const inner = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+      if (init?.signal?.aborted) {
+        throw new DOMException('Cancelled', 'AbortError');
+      }
+
+      return antiforgeryRefusal();
+    });
+    const send = credentialedFetch(inner, credentials);
+
+    await expect(
+      send(
+        apiRequest('/api/v1/albums', { method: 'POST', body: '{}' }),
+        { signal: controller.signal },
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(inner).toHaveBeenCalledTimes(2);
+  });
+
+  it('is attempted exactly once more, however often it is refused', async () => {
+    const credentials = cookieCredentials('token-0');
+    let issued = 0;
+    credentials.useRefresher(async () => {
+      issued += 1;
+      credentials.adopt({
+        csrfToken: `token-${issued}`,
+        authenticationKind: 'cookie',
+      });
+    });
+    const inner = vi.fn<typeof globalThis.fetch>(async () =>
+      antiforgeryRefusal(),
+    );
+    const send = credentialedFetch(inner, credentials);
+
+    const response = await send(
+      apiRequest('/api/v1/albums', { method: 'POST', body: '{}' }),
+    );
+
+    expect(inner).toHaveBeenCalledTimes(2);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({
+      code: 'cookie_auth.antiforgery_required',
+    });
+  });
+});

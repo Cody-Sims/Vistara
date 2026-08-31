@@ -51,13 +51,14 @@ export function credentialedFetch(
 
     const headers = mergedHeaders(request, init);
     const presented = credentials.applyTo(headers);
-    // Kept before the body is sent so a refused request can be made again.
-    const replay = request?.body ? request.clone() : undefined;
+    // Decided, and the body duplicated, before the first send consumes it:
+    // afterwards a request has been read and can no longer answer for itself.
+    const replay = prepareReplay(request, init);
     const response = await send(input, { ...init, headers });
     if (
       response.status !== 403 ||
       !credentials.spendsAntiforgeryToken ||
-      !isReplayable(request, init)
+      !replay.possible
     ) {
       return response;
     }
@@ -76,7 +77,9 @@ export function credentialedFetch(
       return response;
     }
 
-    return send(replay ?? input, { ...init, headers: retryHeaders });
+    // The duplicate carries the body, the method, and the abort signal of the
+    // request that was refused; one attempt, and no further replay.
+    return send(replay.request ?? input, { ...init, headers: retryHeaders });
   };
 }
 
@@ -125,25 +128,51 @@ function mergedHeaders(
   return headers;
 }
 
+interface Replay {
+  /** Whether the request may be sent a second time at all. */
+  readonly possible: boolean;
+  /** The duplicate to send, taken before the original was read. */
+  readonly request?: Request;
+}
+
+const noReplay: Replay = { possible: false };
+
 /**
- * Whether the request body can be read a second time. A stream cannot, and a
- * consumed request cannot, so those are never sent again.
+ * Decides whether a request can be sent again, and takes the duplicate that
+ * would be sent, before anything has read the body.
+ *
+ * A body the caller streams is read once and is gone, and a request that has
+ * already been read cannot answer again; neither is ever replayed. A request
+ * object is duplicated instead of reused, because sending the original a
+ * second time would send a body that the first attempt consumed.
  */
-function isReplayable(
+function prepareReplay(
   request: Request | undefined,
   init: RequestInit | undefined,
-): boolean {
-  const body = init?.body ?? request?.body;
-  if (body === undefined || body === null) {
-    return true;
+): Replay {
+  if (isStreamedBody(init?.body)) {
+    return noReplay;
   }
 
-  if (init?.body === undefined && request !== undefined) {
-    return !request.bodyUsed;
+  if (!request) {
+    return { possible: true };
   }
 
-  return !(
-    typeof ReadableStream !== 'undefined' && init?.body instanceof ReadableStream
+  if (request.bodyUsed) {
+    return noReplay;
+  }
+
+  try {
+    return { possible: true, request: request.clone() };
+  } catch {
+    // A body that cannot be duplicated is a body that is sent once.
+    return noReplay;
+  }
+}
+
+function isStreamedBody(body: BodyInit | null | undefined): boolean {
+  return (
+    typeof ReadableStream !== 'undefined' && body instanceof ReadableStream
   );
 }
 
