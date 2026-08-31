@@ -1,8 +1,11 @@
+using System.Collections.Concurrent;
 using Amazon.Runtime;
 using Azure.Core;
+using Azure.Identity;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Vistara.Application.Common.Imaging;
 using Vistara.Application.Common.Storage;
@@ -17,6 +20,19 @@ namespace Vistara.IntegrationTests.AdapterComposition;
 
 public sealed class MediaAdapterCompositionTests
 {
+    private const string UserAssignedClientId = "8ec1a4d5-42d1-4d84-9d2a-9a9a2f3f9a11";
+
+    private const string OtherUserAssignedClientId =
+        "1b0d6a1e-9f5e-4a7d-8a2c-42f0c9d3b7a4";
+
+    private const string SharedKeyAccountKey = "do-not-print-this-account-key";
+
+    private const string SharedKeyConnectionString =
+        "DefaultEndpointsProtocol=https;AccountName=vistaratest;AccountKey=" +
+        SharedKeyAccountKey;
+
+    private const string AzureServiceUri = "https://vistaratest.blob.core.windows.net";
+
     public static TheoryData<CompositionRole> Roles => new()
     {
         CompositionRole.Api,
@@ -81,7 +97,7 @@ public sealed class MediaAdapterCompositionTests
 
     [Theory]
     [MemberData(nameof(Roles))]
-    public async Task Azure_registration_prefers_default_credentials_and_uses_client_seam(
+    public async Task Azure_registration_prefers_user_assigned_managed_identity(
         CompositionRole role)
     {
         var runtime = new FakeRuntimeDependencies();
@@ -90,7 +106,8 @@ public sealed class MediaAdapterCompositionTests
             role,
             AzureSettings(),
             runtime,
-            azureFactory);
+            azureFactory,
+            Environments.Production);
 
         await host.StartAsync();
 
@@ -99,8 +116,314 @@ public sealed class MediaAdapterCompositionTests
         Assert.Equal("azure", store.Name);
         Assert.True(store.Capabilities.SupportsConditionalMultipartCompletion);
         Assert.Equal(1, runtime.AzureCredentialRequests);
+        Assert.Equal(0, runtime.AmbientAzureCredentialRequests);
+        Assert.Equal("ManagedIdentity", runtime.LastAzureCredentialMode);
+        Assert.Equal(UserAssignedClientId, runtime.LastManagedIdentityClientId);
         Assert.Equal(1, azureFactory.TokenCredentialCreations);
         Assert.Equal(0, azureFactory.ConnectionStringCreations);
+    }
+
+    [Theory]
+    [MemberData(nameof(Roles))]
+    public async Task Azure_default_credentials_remain_available_for_local_development(
+        CompositionRole role)
+    {
+        var runtime = new FakeRuntimeDependencies();
+        var azureFactory = new FakeAzureBlobClientFactory();
+        using IHost host = BuildHost(
+            role,
+            AzureDefaultCredentialSettings(),
+            runtime,
+            azureFactory,
+            Environments.Development);
+
+        await host.StartAsync();
+
+        Assert.IsType<AzureBlobStore>(host.Services.GetRequiredService<IBlobStore>());
+        Assert.Equal(1, runtime.AzureCredentialRequests);
+        Assert.Equal("DefaultCredential", runtime.LastAzureCredentialMode);
+        Assert.Null(runtime.LastManagedIdentityClientId);
+        Assert.Equal(1, azureFactory.TokenCredentialCreations);
+    }
+
+    [Theory]
+    [MemberData(nameof(Roles))]
+    public async Task Azure_default_credentials_are_rejected_in_deployed_environments(
+        CompositionRole role)
+    {
+        const string expected =
+            "Azure default credentials are limited to local development";
+        await AssertInvalidOptionsAsync(
+            role,
+            AzureDefaultCredentialSettings(),
+            Environments.Production,
+            expected);
+        await AssertInvalidOptionsAsync(
+            role,
+            AzureDefaultCredentialSettings(),
+            Environments.Staging,
+            expected);
+    }
+
+    [Theory]
+    [MemberData(nameof(Roles))]
+    public async Task Azure_default_credentials_require_a_reviewed_deployment_opt_in(
+        CompositionRole role)
+    {
+        Dictionary<string, string?> settings = AzureDefaultCredentialSettings();
+        settings["Media:Storage:Azure:AllowDefaultCredentialOutsideDevelopment"] = "true";
+        var runtime = new FakeRuntimeDependencies();
+        using IHost host = BuildHost(
+            role,
+            settings,
+            runtime,
+            new FakeAzureBlobClientFactory(),
+            Environments.Production);
+
+        await host.StartAsync();
+
+        Assert.Equal("DefaultCredential", runtime.LastAzureCredentialMode);
+    }
+
+    [Theory]
+    [MemberData(nameof(Roles))]
+    public void Azure_default_credentials_fail_closed_without_a_host_environment(
+        CompositionRole role)
+    {
+        Assert.Throws<OptionsValidationException>(
+            () => ResolveMediaOptions(role, AzureDefaultCredentialSettings()));
+
+        Assert.Null(
+            Record.Exception(() => ResolveMediaOptions(role, AzureSettings())));
+    }
+
+    [Theory]
+    [MemberData(nameof(Roles))]
+    public async Task Managed_identity_requires_a_well_formed_user_assigned_client_id(
+        CompositionRole role)
+    {
+        Dictionary<string, string?> missing = AzureSettings();
+        missing.Remove("Media:Storage:Azure:ManagedIdentityClientId");
+        await AssertInvalidOptionsAsync(
+            role,
+            missing,
+            expectedFailureFragment:
+            "Azure managed-identity mode requires an explicit user-assigned client ID.");
+
+        foreach (string malformed in new[]
+        {
+            "not-a-guid",
+            "{8ec1a4d5-42d1-4d84-9d2a-9a9a2f3f9a11}",
+            "8ec1a4d542d14d849d2a9a9a2f3f9a11",
+            " 8ec1a4d5-42d1-4d84-9d2a-9a9a2f3f9a11 ",
+            "00000000-0000-0000-0000-000000000000",
+            "   ",
+        })
+        {
+            Dictionary<string, string?> settings = AzureSettings();
+            settings["Media:Storage:Azure:ManagedIdentityClientId"] = malformed;
+            await AssertInvalidOptionsAsync(
+                role,
+                settings,
+                expectedFailureFragment: "client ID");
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Roles))]
+    public async Task Azure_credential_mode_and_client_id_combinations_are_validated(
+        CompositionRole role)
+    {
+        Dictionary<string, string?> defaultWithClientId = AzureDefaultCredentialSettings();
+        defaultWithClientId["Media:Storage:Azure:ManagedIdentityClientId"] =
+            UserAssignedClientId;
+        await AssertInvalidOptionsAsync(
+            role,
+            defaultWithClientId,
+            Environments.Development,
+            "requires the managed-identity credential mode");
+
+        Dictionary<string, string?> sharedKeyWithClientId = SharedKeySettings();
+        sharedKeyWithClientId["Media:Storage:Azure:ManagedIdentityClientId"] =
+            UserAssignedClientId;
+        await AssertInvalidOptionsAsync(
+            role,
+            sharedKeyWithClientId,
+            expectedFailureFragment: "requires the managed-identity credential mode");
+
+        Dictionary<string, string?> managedIdentityWithConnectionString = AzureSettings();
+        managedIdentityWithConnectionString["Media:Storage:Azure:ConnectionString"] =
+            SharedKeyConnectionString;
+        await AssertInvalidOptionsAsync(
+            role,
+            managedIdentityWithConnectionString,
+            expectedFailureFragment:
+            "Azure shared-key settings cannot be combined with managed-identity credentials.");
+
+        Dictionary<string, string?> managedIdentityWithSharedKeySas = AzureSettings();
+        managedIdentityWithSharedKeySas["Media:Storage:Azure:AllowSharedKeySas"] = "true";
+        await AssertInvalidOptionsAsync(
+            role,
+            managedIdentityWithSharedKeySas,
+            expectedFailureFragment:
+            "Azure shared-key settings cannot be combined with managed-identity credentials.");
+
+        Dictionary<string, string?> managedIdentityWithReviewFlag = AzureSettings();
+        managedIdentityWithReviewFlag[
+            "Media:Storage:Azure:AllowDefaultCredentialOutsideDevelopment"] = "true";
+        await AssertInvalidOptionsAsync(
+            role,
+            managedIdentityWithReviewFlag,
+            expectedFailureFragment:
+            "The reviewed default-credential opt-in applies only to the default credential mode.");
+
+        Dictionary<string, string?> sharedKeyWithReviewFlag = SharedKeySettings();
+        sharedKeyWithReviewFlag[
+            "Media:Storage:Azure:AllowDefaultCredentialOutsideDevelopment"] = "true";
+        await AssertInvalidOptionsAsync(
+            role,
+            sharedKeyWithReviewFlag,
+            expectedFailureFragment:
+            "The reviewed default-credential opt-in applies only to the default credential mode.");
+    }
+
+    [Theory]
+    [MemberData(nameof(Roles))]
+    public async Task Ambient_azure_credentials_require_first_party_endpoints(
+        CompositionRole role)
+    {
+        Dictionary<string, string?> managedIdentity = AzureSettings();
+        managedIdentity["Media:Storage:Azure:ServiceUri"] =
+            "https://vistaratest.blob.core.windows.net.attacker.example";
+        await AssertInvalidOptionsAsync(
+            role,
+            managedIdentity,
+            expectedFailureFragment: "first-party Azure Blob endpoint");
+
+        Dictionary<string, string?> otherAccount = AzureSettings();
+        otherAccount["Media:Storage:Azure:ServiceUri"] =
+            "https://someoneelse.blob.core.windows.net";
+        await AssertInvalidOptionsAsync(
+            role,
+            otherAccount,
+            expectedFailureFragment: "first-party Azure Blob endpoint");
+
+        Dictionary<string, string?> defaultCredential = AzureDefaultCredentialSettings();
+        defaultCredential["Media:Storage:Azure:ServiceUri"] =
+            "https://vistaratest.blob.core.windows.net.attacker.example";
+        await AssertInvalidOptionsAsync(
+            role,
+            defaultCredential,
+            Environments.Development,
+            "first-party Azure Blob endpoint");
+    }
+
+    [Theory]
+    [MemberData(nameof(Roles))]
+    public async Task Startup_logs_describe_credentials_without_disclosing_material(
+        CompositionRole role)
+    {
+        var logs = new RecordingLoggerProvider();
+        using IHost managedIdentityHost = BuildHost(
+            role,
+            AzureSettings(),
+            new FakeRuntimeDependencies(),
+            new FakeAzureBlobClientFactory(),
+            Environments.Production,
+            logs);
+
+        await managedIdentityHost.StartAsync();
+
+        string managedIdentityLog = logs.Text;
+        Assert.Contains("ManagedIdentity", managedIdentityLog, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            UserAssignedClientId,
+            managedIdentityLog,
+            StringComparison.OrdinalIgnoreCase);
+
+        var sharedKeyLogs = new RecordingLoggerProvider();
+        using IHost sharedKeyHost = BuildHost(
+            role,
+            SharedKeySettings(),
+            new FakeRuntimeDependencies(),
+            new FakeAzureBlobClientFactory(),
+            Environments.Production,
+            sharedKeyLogs);
+
+        await sharedKeyHost.StartAsync();
+
+        Assert.Contains("SharedKey", sharedKeyLogs.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            SharedKeyAccountKey,
+            sharedKeyLogs.Text,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            SharedKeyConnectionString,
+            sharedKeyLogs.Text,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [MemberData(nameof(Roles))]
+    public void Runtime_dependencies_create_one_shared_user_assigned_credential(
+        CompositionRole role)
+    {
+        object runtime = CreateRuntimeDependencies(role);
+
+        TokenCredential first = InvokeAzureCredential(
+            runtime,
+            ManagedIdentityOptions(role, UserAssignedClientId));
+        TokenCredential second = InvokeAzureCredential(
+            runtime,
+            ManagedIdentityOptions(role, UserAssignedClientId));
+
+        Assert.IsType<ManagedIdentityCredential>(first);
+        Assert.Same(first, second);
+
+        TokenCredential other = InvokeAzureCredential(
+            runtime,
+            ManagedIdentityOptions(role, OtherUserAssignedClientId));
+        Assert.IsType<ManagedIdentityCredential>(other);
+        Assert.NotSame(first, other);
+    }
+
+    [Theory]
+    [MemberData(nameof(Roles))]
+    public void Runtime_dependencies_never_fall_back_to_developer_credentials(
+        CompositionRole role)
+    {
+        object runtime = CreateRuntimeDependencies(role);
+
+        TokenCredential managedIdentity = InvokeAzureCredential(
+            runtime,
+            ManagedIdentityOptions(role, UserAssignedClientId));
+
+        Assert.IsNotType<DefaultAzureCredential>(managedIdentity);
+        Assert.IsNotType<AzureCliCredential>(managedIdentity);
+        Assert.IsNotType<ChainedTokenCredential>(managedIdentity);
+
+        TokenCredential development = InvokeAzureCredential(
+            runtime,
+            DefaultCredentialOptions(role));
+        Assert.IsType<DefaultAzureCredential>(development);
+        Assert.Same(
+            development,
+            InvokeAzureCredential(runtime, DefaultCredentialOptions(role)));
+    }
+
+    [Theory]
+    [MemberData(nameof(Roles))]
+    public void Runtime_dependencies_reject_malformed_or_unsupported_credential_modes(
+        CompositionRole role)
+    {
+        object runtime = CreateRuntimeDependencies(role);
+
+        Assert.Throws<InvalidOperationException>(
+            () => InvokeAzureCredential(runtime, ManagedIdentityOptions(role, "not-a-guid")));
+        Assert.Throws<InvalidOperationException>(
+            () => InvokeAzureCredential(runtime, ManagedIdentityOptions(role, null)));
+        Assert.Throws<InvalidOperationException>(
+            () => InvokeAzureCredential(runtime, SharedKeyOptions(role)));
     }
 
     [Theory]
@@ -178,6 +501,25 @@ public sealed class MediaAdapterCompositionTests
                     new FakeRuntimeDependencies()));
 
         Assert.DoesNotContain(secret, error.ToString(), StringComparison.Ordinal);
+
+        Dictionary<string, string?> azure = AzureSettings();
+        azure["Media:Storage:Azure:ConnectionString"] = SharedKeyConnectionString;
+
+        OptionsValidationException azureError =
+            await Assert.ThrowsAsync<OptionsValidationException>(
+                async () => await StartHostAsync(
+                    role,
+                    azure,
+                    new FakeRuntimeDependencies()));
+
+        Assert.DoesNotContain(
+            SharedKeyAccountKey,
+            azureError.ToString(),
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            UserAssignedClientId,
+            azureError.ToString(),
+            StringComparison.Ordinal);
     }
 
     [Theory]
@@ -201,10 +543,8 @@ public sealed class MediaAdapterCompositionTests
     public async Task Shared_key_azure_credentials_require_explicit_opt_in(
         CompositionRole role)
     {
-        Dictionary<string, string?> settings = AzureSettings();
-        settings["Media:Storage:Azure:CredentialMode"] = "SharedKey";
-        settings["Media:Storage:Azure:ConnectionString"] =
-            "DefaultEndpointsProtocol=https;AccountName=vistaratest;AccountKey=secret";
+        Dictionary<string, string?> settings = SharedKeySettings();
+        settings["Media:Storage:Azure:AllowSharedKeySas"] = "false";
 
         await AssertInvalidOptionsAsync(role, settings);
     }
@@ -214,11 +554,7 @@ public sealed class MediaAdapterCompositionTests
     public async Task Shared_key_azure_credentials_are_used_only_after_explicit_opt_in(
         CompositionRole role)
     {
-        Dictionary<string, string?> settings = AzureSettings();
-        settings["Media:Storage:Azure:CredentialMode"] = "SharedKey";
-        settings["Media:Storage:Azure:ConnectionString"] =
-            "DefaultEndpointsProtocol=https;AccountName=vistaratest;AccountKey=secret";
-        settings["Media:Storage:Azure:AllowSharedKeySas"] = "true";
+        Dictionary<string, string?> settings = SharedKeySettings();
         var runtime = new FakeRuntimeDependencies();
         var azureFactory = new FakeAzureBlobClientFactory();
         using IHost host = BuildHost(role, settings, runtime, azureFactory);
@@ -226,6 +562,7 @@ public sealed class MediaAdapterCompositionTests
         await host.StartAsync();
 
         Assert.Equal(0, runtime.AzureCredentialRequests);
+        Assert.Equal(0, runtime.AmbientAzureCredentialRequests);
         Assert.Equal(0, azureFactory.TokenCredentialCreations);
         Assert.Equal(1, azureFactory.ConnectionStringCreations);
     }
@@ -261,21 +598,38 @@ public sealed class MediaAdapterCompositionTests
 
     private static async Task AssertInvalidOptionsAsync(
         CompositionRole role,
-        IReadOnlyDictionary<string, string?> settings)
+        IReadOnlyDictionary<string, string?> settings,
+        string? environmentName = null,
+        string? expectedFailureFragment = null)
     {
-        await Assert.ThrowsAsync<OptionsValidationException>(
-            async () => await StartHostAsync(
-                role,
-                settings,
-                new FakeRuntimeDependencies()));
+        OptionsValidationException error =
+            await Assert.ThrowsAsync<OptionsValidationException>(
+                async () => await StartHostAsync(
+                    role,
+                    settings,
+                    new FakeRuntimeDependencies(),
+                    environmentName));
+        if (expectedFailureFragment is not null)
+        {
+            Assert.Contains(
+                expectedFailureFragment,
+                string.Join(" ", error.Failures),
+                StringComparison.Ordinal);
+        }
     }
 
     private static async Task StartHostAsync(
         CompositionRole role,
         IReadOnlyDictionary<string, string?> settings,
-        FakeRuntimeDependencies runtime)
+        FakeRuntimeDependencies runtime,
+        string? environmentName = null)
     {
-        using IHost host = BuildHost(role, settings, runtime);
+        using IHost host = BuildHost(
+            role,
+            settings,
+            runtime,
+            azureFactory: null,
+            environmentName);
         await host.StartAsync();
     }
 
@@ -283,14 +637,22 @@ public sealed class MediaAdapterCompositionTests
         CompositionRole role,
         IReadOnlyDictionary<string, string?> settings,
         FakeRuntimeDependencies runtime,
-        IAzureBlobClientFactory? azureFactory = null)
+        IAzureBlobClientFactory? azureFactory = null,
+        string? environmentName = null,
+        RecordingLoggerProvider? loggerProvider = null)
     {
         HostApplicationBuilder builder = Host.CreateApplicationBuilder(
             new HostApplicationBuilderSettings
             {
                 DisableDefaults = true,
+                EnvironmentName = environmentName,
             });
         builder.Configuration.AddInMemoryCollection(settings);
+        if (loggerProvider is not null)
+        {
+            builder.Logging.AddProvider(loggerProvider);
+        }
+
         if (azureFactory is not null)
         {
             builder.Services.AddSingleton(azureFactory);
@@ -361,9 +723,146 @@ public sealed class MediaAdapterCompositionTests
         settings["Media:Storage:Azure:ContainerName"] = "media";
         settings["Media:Storage:Azure:ServiceUri"] =
             "https://vistaratest.blob.core.windows.net";
-        settings["Media:Storage:Azure:CredentialMode"] = "DefaultCredential";
+        settings["Media:Storage:Azure:CredentialMode"] = "ManagedIdentity";
+        settings["Media:Storage:Azure:ManagedIdentityClientId"] = UserAssignedClientId;
         return settings;
     }
+
+    private static Dictionary<string, string?> AzureDefaultCredentialSettings()
+    {
+        Dictionary<string, string?> settings = AzureSettings();
+        settings["Media:Storage:Azure:CredentialMode"] = "DefaultCredential";
+        settings.Remove("Media:Storage:Azure:ManagedIdentityClientId");
+        return settings;
+    }
+
+    private static Dictionary<string, string?> SharedKeySettings()
+    {
+        Dictionary<string, string?> settings = AzureSettings();
+        settings["Media:Storage:Azure:CredentialMode"] = "SharedKey";
+        settings.Remove("Media:Storage:Azure:ManagedIdentityClientId");
+        settings["Media:Storage:Azure:ConnectionString"] = SharedKeyConnectionString;
+        settings["Media:Storage:Azure:AllowSharedKeySas"] = "true";
+        return settings;
+    }
+
+    private static void ResolveMediaOptions(
+        CompositionRole role,
+        IReadOnlyDictionary<string, string?> settings)
+    {
+        IConfiguration configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(settings)
+            .Build();
+        ServiceCollection services = [];
+        services.AddSingleton<ApiMedia.IMediaRuntimeDependencies>(
+            new FakeRuntimeDependencies());
+        services.AddSingleton<WorkerMedia.IMediaRuntimeDependencies>(
+            new FakeRuntimeDependencies());
+        services.AddSingleton<IAzureBlobClientFactory>(new FakeAzureBlobClientFactory());
+        switch (role)
+        {
+            case CompositionRole.Api:
+                ApiMedia.MediaServiceCollectionExtensions.AddVistaraMedia(
+                    services,
+                    configuration);
+                break;
+            case CompositionRole.Worker:
+                WorkerMedia.MediaServiceCollectionExtensions.AddVistaraMedia(
+                    services,
+                    configuration);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(role));
+        }
+
+        using ServiceProvider provider = services.BuildServiceProvider();
+        _ = provider.GetRequiredService<IBlobStore>();
+    }
+
+    private static object CreateRuntimeDependencies(CompositionRole role) =>
+        role switch
+        {
+            CompositionRole.Api => new ApiMedia.DefaultMediaRuntimeDependencies(),
+            CompositionRole.Worker => new WorkerMedia.DefaultMediaRuntimeDependencies(),
+            _ => throw new ArgumentOutOfRangeException(nameof(role)),
+        };
+
+    private static TokenCredential InvokeAzureCredential(object runtime, object options) =>
+        (runtime, options) switch
+        {
+            (ApiMedia.IMediaRuntimeDependencies api, ApiMedia.MediaAzureOptions apiOptions) =>
+                api.CreateAzureCredential(apiOptions),
+            (WorkerMedia.IMediaRuntimeDependencies worker,
+                WorkerMedia.MediaAzureOptions workerOptions) =>
+                worker.CreateAzureCredential(workerOptions),
+            _ => throw new ArgumentOutOfRangeException(nameof(runtime)),
+        };
+
+    private static object ManagedIdentityOptions(CompositionRole role, string? clientId) =>
+        role switch
+        {
+            CompositionRole.Api => new ApiMedia.MediaAzureOptions
+            {
+                AccountName = "vistaratest",
+                ContainerName = "media",
+                ServiceUri = AzureServiceUri,
+                CredentialMode = ApiMedia.MediaAzureCredentialMode.ManagedIdentity,
+                ManagedIdentityClientId = clientId,
+            },
+            CompositionRole.Worker => new WorkerMedia.MediaAzureOptions
+            {
+                AccountName = "vistaratest",
+                ContainerName = "media",
+                ServiceUri = AzureServiceUri,
+                CredentialMode = WorkerMedia.MediaAzureCredentialMode.ManagedIdentity,
+                ManagedIdentityClientId = clientId,
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(role)),
+        };
+
+    private static object DefaultCredentialOptions(CompositionRole role) =>
+        role switch
+        {
+            CompositionRole.Api => new ApiMedia.MediaAzureOptions
+            {
+                AccountName = "vistaratest",
+                ContainerName = "media",
+                ServiceUri = AzureServiceUri,
+                CredentialMode = ApiMedia.MediaAzureCredentialMode.DefaultCredential,
+            },
+            CompositionRole.Worker => new WorkerMedia.MediaAzureOptions
+            {
+                AccountName = "vistaratest",
+                ContainerName = "media",
+                ServiceUri = AzureServiceUri,
+                CredentialMode = WorkerMedia.MediaAzureCredentialMode.DefaultCredential,
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(role)),
+        };
+
+    private static object SharedKeyOptions(CompositionRole role) =>
+        role switch
+        {
+            CompositionRole.Api => new ApiMedia.MediaAzureOptions
+            {
+                AccountName = "vistaratest",
+                ContainerName = "media",
+                ServiceUri = AzureServiceUri,
+                CredentialMode = ApiMedia.MediaAzureCredentialMode.SharedKey,
+                ConnectionString = SharedKeyConnectionString,
+                AllowSharedKeySas = true,
+            },
+            CompositionRole.Worker => new WorkerMedia.MediaAzureOptions
+            {
+                AccountName = "vistaratest",
+                ContainerName = "media",
+                ServiceUri = AzureServiceUri,
+                CredentialMode = WorkerMedia.MediaAzureCredentialMode.SharedKey,
+                ConnectionString = SharedKeyConnectionString,
+                AllowSharedKeySas = true,
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(role)),
+        };
 
     private static string CreateScratchPath() =>
         Path.Combine(
@@ -410,6 +909,12 @@ public sealed class MediaAdapterCompositionTests
 
         public int AzureCredentialRequests { get; private set; }
 
+        public int AmbientAzureCredentialRequests { get; private set; }
+
+        public string? LastAzureCredentialMode { get; private set; }
+
+        public string? LastManagedIdentityClientId { get; private set; }
+
         public AWSCredentials CreateS3Credentials(
             ApiMedia.MediaS3Options options) =>
             new AnonymousAWSCredentials();
@@ -420,8 +925,24 @@ public sealed class MediaAdapterCompositionTests
 
         public TokenCredential CreateAzureCredential()
         {
-            AzureCredentialRequests++;
+            AmbientAzureCredentialRequests++;
             return new FakeTokenCredential();
+        }
+
+        public TokenCredential CreateAzureCredential(ApiMedia.MediaAzureOptions options)
+        {
+            ArgumentNullException.ThrowIfNull(options);
+            return Record(
+                options.CredentialMode?.ToString(),
+                options.ManagedIdentityClientId);
+        }
+
+        public TokenCredential CreateAzureCredential(WorkerMedia.MediaAzureOptions options)
+        {
+            ArgumentNullException.ThrowIfNull(options);
+            return Record(
+                options.CredentialMode?.ToString(),
+                options.ManagedIdentityClientId);
         }
 
         public IImageProcessor CreateImageProcessor()
@@ -432,6 +953,52 @@ public sealed class MediaAdapterCompositionTests
             }
 
             return new FakeImageProcessor();
+        }
+
+        private FakeTokenCredential Record(string? credentialMode, string? clientId)
+        {
+            AzureCredentialRequests++;
+            LastAzureCredentialMode = credentialMode;
+            LastManagedIdentityClientId = clientId;
+            return new FakeTokenCredential();
+        }
+    }
+
+    private sealed class RecordingLoggerProvider : ILoggerProvider
+    {
+        private readonly ConcurrentQueue<string> entries =
+            new();
+
+        public string Text => string.Join(Environment.NewLine, entries);
+
+        public ILogger CreateLogger(string categoryName) =>
+            new RecordingLogger(categoryName, entries);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class RecordingLogger(
+            string categoryName,
+            ConcurrentQueue<string> entries) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull =>
+                null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception? exception,
+                Func<TState, Exception?, string> formatter)
+            {
+                ArgumentNullException.ThrowIfNull(formatter);
+                entries.Enqueue(
+                    $"{categoryName} {logLevel} {formatter(state, exception)} {exception}");
+            }
         }
     }
 
