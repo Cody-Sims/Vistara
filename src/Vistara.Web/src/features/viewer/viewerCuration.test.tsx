@@ -201,6 +201,48 @@ describe('viewer curation', () => {
     ).toBeInTheDocument();
   });
 
+  it('does not carry a failed restore over to another asset', async () => {
+    const client = curationClient({
+      restoreAssets: vi.fn(async () => {
+        throw new Error('offline');
+      }),
+    });
+    const { router, user } = renderViewer(client, { next: 'asset-2' });
+
+    await screen.findByRole('heading', { level: 1, name: 'Mountain' });
+    await user.click(screen.getByRole('button', { name: 'Move to trash' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Move to trash' }),
+    );
+    await screen.findByRole('heading', { level: 1, name: 'Moved to trash' });
+    await user.click(screen.getByRole('button', { name: 'Undo move to trash' }));
+    expect(
+      await screen.findByRole('alert'),
+    ).toHaveTextContent('The restore could not be started.');
+
+    await user.keyboard('{ArrowRight}');
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe('/assets/asset-2'),
+    );
+    await screen.findByRole('heading', { level: 1, name: 'Mountain' });
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    // Trashing the asset now on screen must not inherit the other one's
+    // failure or leave its undo disabled.
+    await user.click(screen.getByRole('button', { name: 'Move to trash' }));
+    const second = await screen.findByRole('dialog');
+    await user.click(
+      within(second).getByRole('button', { name: 'Move to trash' }),
+    );
+    await screen.findByRole('heading', { level: 1, name: 'Moved to trash' });
+
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(
+      screen.getByRole('button', { name: 'Undo move to trash' }),
+    ).toBeEnabled();
+  });
+
   it('replaces the asset with a trashed confirmation that can be undone', async () => {
     const { client, router, user } = renderViewer();
 

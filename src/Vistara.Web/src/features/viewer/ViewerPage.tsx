@@ -63,14 +63,24 @@ export function ViewerPage({
     readonly assetId: string;
     readonly restorable: readonly VersionedAssetReference[];
   }>();
-  const [restoring, setRestoring] = useState(false);
-  const [restoreFailed, setRestoreFailed] = useState(false);
+  /**
+   * The restore attempt belongs to the asset it was made for, so opening
+   * another asset never inherits its failure or its pending state.
+   */
+  const [restoreAttempt, setRestoreAttempt] = useState<{
+    readonly assetId: string;
+    readonly state: 'running' | 'failed';
+  }>();
   const returnAddress = useMemo(
     () => getViewerReturnAddress(location.state),
     [location.state],
   );
   const trashed =
     trashedAsset && trashedAsset.assetId === assetId ? trashedAsset : undefined;
+  const attempt =
+    restoreAttempt && restoreAttempt.assetId === assetId
+      ? restoreAttempt.state
+      : undefined;
   const query = useQuery({
     queryKey: ['asset-viewer', assetId],
     queryFn: () => {
@@ -169,24 +179,23 @@ export function ViewerPage({
 
   async function undoTrash(
     client: CurationClient,
+    id: string,
     restorable: readonly VersionedAssetReference[],
   ) {
-    setRestoring(true);
-    setRestoreFailed(false);
+    setRestoreAttempt({ assetId: id, state: 'running' });
     try {
       await restoreTrashedAssets(
         client,
         restorable,
-        globalThis.crypto?.randomUUID?.() ?? `web-${Date.now()}`,
+        () => globalThis.crypto?.randomUUID?.() ?? `web-${Date.now()}`,
       );
       setTrashedAsset(undefined);
+      setRestoreAttempt(undefined);
       await queryClient.invalidateQueries({
         queryKey: ['asset-viewer', assetId],
       });
     } catch {
-      setRestoreFailed(true);
-    } finally {
-      setRestoring(false);
+      setRestoreAttempt({ assetId: id, state: 'failed' });
     }
   }
 
@@ -199,15 +208,21 @@ export function ViewerPage({
         <p role="status" aria-live="polite">
           {`${asset.title} is in Trash and can be restored until it is purged.`}
         </p>
-        {restoreFailed ? (
+        {attempt === 'failed' ? (
           <p role="alert">
             The restore could not be started. Open Trash to try again.
           </p>
         ) : null}
         {trashed.restorable.length > 0 ? (
           <button
-            disabled={restoring}
-            onClick={() => void undoTrash(curation.client, trashed.restorable)}
+            disabled={attempt === 'running'}
+            onClick={() =>
+              void undoTrash(
+                curation.client,
+                trashed.assetId,
+                trashed.restorable,
+              )
+            }
             type="button"
           >
             Undo move to trash
