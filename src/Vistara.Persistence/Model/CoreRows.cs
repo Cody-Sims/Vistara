@@ -89,6 +89,28 @@ public sealed class ExternalIdentityRow
     public DateTimeOffset LinkedAtUtc { get; set; }
 }
 
+/// <summary>
+/// One in-flight browser OIDC authorization request. The row exists between the
+/// redirect to the identity provider and the callback, so it is deliberately
+/// tenant-independent: no tenant scope exists before the external identity is
+/// resolved. <c>state</c>, <c>nonce</c>, and the browser handle are only ever
+/// held as SHA-256 digests, and <see cref="ConsumedAtUtc"/> is the
+/// conditional-update target that makes the row single use.
+/// </summary>
+public sealed class OidcLoginRequestRow
+{
+    public byte[] StateDigest { get; set; } = [];
+    public string ProviderId { get; set; } = string.Empty;
+    public byte[] NonceDigest { get; set; } = [];
+    public byte[] HandleDigest { get; set; } = [];
+    public string CodeVerifier { get; set; } = string.Empty;
+    public string RedirectUri { get; set; } = string.Empty;
+    public string ReturnTo { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAtUtc { get; set; }
+    public DateTimeOffset ExpiresAtUtc { get; set; }
+    public DateTimeOffset? ConsumedAtUtc { get; set; }
+}
+
 public sealed class TenantMembershipRow : ITenantOwnedRow
 {
     public TenantKey TenantId { get; set; }

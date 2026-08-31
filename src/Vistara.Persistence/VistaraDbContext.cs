@@ -41,6 +41,7 @@ public sealed class VistaraDbContext(
     public DbSet<PlatformBootstrapRow> PlatformBootstrap => Set<PlatformBootstrapRow>();
     public DbSet<UserPreferenceRow> UserPreferences => Set<UserPreferenceRow>();
     public DbSet<ExternalIdentityRow> ExternalIdentities => Set<ExternalIdentityRow>();
+    public DbSet<OidcLoginRequestRow> OidcLoginRequests => Set<OidcLoginRequestRow>();
     public DbSet<TenantMembershipRow> TenantMemberships => Set<TenantMembershipRow>();
     public DbSet<AuthSessionRow> AuthSessions => Set<AuthSessionRow>();
     public DbSet<ApiKeyRow> ApiKeys => Set<ApiKeyRow>();
@@ -239,6 +240,9 @@ public sealed class VistaraDbContext(
                 .HasForeignKey(row => row.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
+
+        OidcLoginRequestPersistenceContributor.Configure(
+            modelBuilder.Entity<OidcLoginRequestRow>());
 
         modelBuilder.Entity<TenantMembershipRow>(entity =>
         {
