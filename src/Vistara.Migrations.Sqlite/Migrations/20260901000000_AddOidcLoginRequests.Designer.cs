@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Vistara.Persistence;
 
@@ -10,9 +11,11 @@ using Vistara.Persistence;
 namespace Vistara.Migrations.Sqlite.Migrations
 {
     [DbContext(typeof(VistaraDbContext))]
-    partial class VistaraDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260901000000_AddOidcLoginRequests")]
+    partial class AddOidcLoginRequests
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
