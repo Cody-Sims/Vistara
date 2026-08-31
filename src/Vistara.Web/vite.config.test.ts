@@ -85,6 +85,13 @@ function expectRouteChunks(root: string, outDir: string) {
   );
   expect(carriesAssistant).toHaveLength(1);
   expect(carriesAssistant[0]).not.toBe(entry?.split('/').at(-1));
+
+  // The administration guard decides before the operator chunk is asked for,
+  // so its refusal ships with the entry and not with the screens it protects.
+  expect(entrySource).toContain('Administration unavailable');
+  expect(
+    readFileSync(resolve(chunkDirectory, carriesAssistant[0]!), 'utf8'),
+  ).not.toContain('Administration unavailable');
 }
 
 function expectShellOnlyServiceWorker(

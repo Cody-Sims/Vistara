@@ -5,11 +5,7 @@ import {
   AdminStoragePage,
   AdminUsersPage,
 } from '../../features/admin';
-import {
-  RequireAdministration,
-  RequireSession,
-  useSession,
-} from '../../features/session';
+import { useSession } from '../../features/session';
 import { SetupPage } from '../../features/session/SetupPage';
 import { SettingsPage } from '../../features/settings';
 import { platformClient } from '../apiClients';
@@ -17,18 +13,12 @@ import { platformClient } from '../apiClients';
 /**
  * Screens only a signed-in operator opens. They live in their own module so a
  * visitor who lands on sign-in, first-run setup, or a public share never
- * downloads the administration and cloud setup code.
+ * downloads the administration and cloud setup code. The session and
+ * administration guards stay in the route table, so an account that is denied
+ * never fetches this module at all.
  */
 
 export function AdminUsersScreen() {
-  return (
-    <RequireAdministration>
-      <AdminUsersTenant />
-    </RequireAdministration>
-  );
-}
-
-function AdminUsersTenant() {
   const { user } = useSession();
   return user?.tenantId ? (
     <AdminUsersPage client={platformClient} tenantId={user.tenantId} />
@@ -38,43 +28,23 @@ function AdminUsersTenant() {
 }
 
 export function AdminStorageScreen() {
-  return (
-    <RequireAdministration>
-      <AdminStoragePage client={platformClient} />
-    </RequireAdministration>
-  );
+  return <AdminStoragePage client={platformClient} />;
 }
 
 export function AdminJobsScreen() {
-  return (
-    <RequireAdministration>
-      <AdminJobsPage client={platformClient} />
-    </RequireAdministration>
-  );
+  return <AdminJobsPage client={platformClient} />;
 }
 
 export function AdminPoliciesScreen() {
-  return (
-    <RequireAdministration>
-      <AdminPoliciesPage client={platformClient} />
-    </RequireAdministration>
-  );
+  return <AdminPoliciesPage client={platformClient} />;
 }
 
 export function AdminAuditScreen() {
-  return (
-    <RequireAdministration>
-      <AdminAuditPage />
-    </RequireAdministration>
-  );
+  return <AdminAuditPage />;
 }
 
 export function SettingsScreen() {
-  return (
-    <RequireSession>
-      <SettingsPage client={platformClient} />
-    </RequireSession>
-  );
+  return <SettingsPage client={platformClient} />;
 }
 
 export function SetupScreen() {

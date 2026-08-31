@@ -1,6 +1,10 @@
-import type { ComponentType, ReactNode } from 'react';
+import { lazy, Suspense, type ComponentType, type ReactNode } from 'react';
 import { Navigate, type RouteObject } from 'react-router-dom';
-import { LoginPage, RequireSession } from '../../features/session';
+import {
+  LoginPage,
+  RequireAdministration,
+  RequireSession,
+} from '../../features/session';
 import { platformClient } from '../apiClients';
 import { ApplicationFrame } from '../ApplicationFrame';
 import {
@@ -23,16 +27,33 @@ import {
   ViewerRoute,
 } from './GalleryRoutePages';
 
+/**
+ * The operator screens are one chunk, fetched only when a route that is
+ * already past its guard renders. Denied and signed-out accounts never ask
+ * for it.
+ */
+const deferredScreen = (
+  pick: (module: typeof import('./deferredScreens')) => ComponentType,
+) =>
+  lazy(async () => ({ default: pick(await import('./deferredScreens')) }));
+
+const AdminUsersScreen = deferredScreen((module) => module.AdminUsersScreen);
+const AdminStorageScreen = deferredScreen(
+  (module) => module.AdminStorageScreen,
+);
+const AdminJobsScreen = deferredScreen((module) => module.AdminJobsScreen);
+const AdminPoliciesScreen = deferredScreen(
+  (module) => module.AdminPoliciesScreen,
+);
+const AdminAuditScreen = deferredScreen((module) => module.AdminAuditScreen);
+const SettingsScreen = deferredScreen((module) => module.SettingsScreen);
+
 export function galleryRoutes(
   staticPreview: boolean,
   additionalRoutes: RouteObject[] = [],
   liveFeatures = true,
 ): RouteObject[] {
   const preview = !liveFeatures || staticPreview;
-  /**
-   * Screens that only a signed-in operator reaches are loaded on demand, so
-   * sign-in, first-run setup, and a public share never pay for them.
-   */
   const deferred = (
     title: string,
     load: () => Promise<{ Component: ComponentType }>,
@@ -49,6 +70,25 @@ export function galleryRoutes(
       <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
     ) : (
       <RequireSession>{element}</RequireSession>
+    );
+  /**
+   * A deferred screen is only imported once its guard has admitted the
+   * account, so a member who opens an administration URL is told they cannot
+   * and downloads nothing.
+   */
+  const behindGuard = (
+    title: string,
+    Guard: typeof RequireSession,
+    Screen: ComponentType,
+  ) =>
+    preview ? (
+      <RoutePlaceholderPage title={title} staticPreview={staticPreview} />
+    ) : (
+      <Guard>
+        <Suspense fallback={<InitialLoadingPage />}>
+          <Screen />
+        </Suspense>
+      </Guard>
     );
 
   return [
@@ -120,9 +160,7 @@ export function galleryRoutes(
         },
         {
           path: 'settings',
-          ...deferred('Settings', async () => ({
-            Component: (await import('./deferredScreens')).SettingsScreen,
-          })),
+          element: behindGuard('Settings', RequireSession, SettingsScreen),
         },
         {
           path: 'admin',
@@ -130,33 +168,23 @@ export function galleryRoutes(
         },
         {
           path: 'admin/users',
-          ...deferred('People', async () => ({
-            Component: (await import('./deferredScreens')).AdminUsersScreen,
-          })),
+          element: behindGuard('People', RequireAdministration, AdminUsersScreen),
         },
         {
           path: 'admin/storage',
-          ...deferred('Storage', async () => ({
-            Component: (await import('./deferredScreens')).AdminStorageScreen,
-          })),
+          element: behindGuard('Storage', RequireAdministration, AdminStorageScreen),
         },
         {
           path: 'admin/jobs',
-          ...deferred('Jobs', async () => ({
-            Component: (await import('./deferredScreens')).AdminJobsScreen,
-          })),
+          element: behindGuard('Jobs', RequireAdministration, AdminJobsScreen),
         },
         {
           path: 'admin/policies',
-          ...deferred('Policies', async () => ({
-            Component: (await import('./deferredScreens')).AdminPoliciesScreen,
-          })),
+          element: behindGuard('Policies', RequireAdministration, AdminPoliciesScreen),
         },
         {
           path: 'admin/audit',
-          ...deferred('Audit log', async () => ({
-            Component: (await import('./deferredScreens')).AdminAuditScreen,
-          })),
+          element: behindGuard('Audit log', RequireAdministration, AdminAuditScreen),
         },
         ...additionalRoutes,
         {
