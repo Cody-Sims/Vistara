@@ -6,6 +6,13 @@
 **Repository:** Public GitHub repository
 **Implementation baseline:** .NET 10 LTS
 
+**Implementation status:** the version 0.1 scope in section 4 is implemented on
+`main`, and section 16 carries a per-wave status marker. Section 13 and the
+Wave 8 AI tasks describe a future architecture; no AI capability exists in the
+codebase. Nothing in `docs/future-ideas/` — AI metadata and editing, a Model
+Context Protocol server, or cloud imports — is implemented or scheduled. The
+shipped capabilities are summarized in `README.md` and `docs/release-notes.md`.
+
 ## 1. Executive product definition
 
 **Vistara** is a lightweight, open-source, self-hosted image control plane and gallery. It stores immutable originals in local or object storage, validates direct uploads, produces deterministic image derivatives, manages metadata and lifecycle policy, and delivers responsive galleries through cache-efficient URLs.
@@ -116,6 +123,11 @@ Primary scenarios:
 
 ### MVP / version 0.1
 
+**Status: implemented.** Every item below exists on `main`. Its exact shape,
+the endpoints, presets, and configuration keys, and the caveats that remain are
+recorded in `README.md`, `docs/release-notes.md`, and
+`docs/security/admin-and-cloud-onboarding.md`.
+
 - .NET 10 API and worker.
 - SQLite and PostgreSQL with separate migration assemblies.
 - Local, Azure Blob, and S3-compatible adapters.
@@ -144,6 +156,9 @@ Primary scenarios:
 - WCAG 2.2 AA target.
 
 ### Post-MVP
+
+**Status: not implemented.** Nothing in this list ships in 0.1, and inclusion
+here is not a schedule or a release promise.
 
 - AVIF and animation.
 - Remote URL ingestion with dedicated SSRF controls.
@@ -1022,6 +1037,14 @@ https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html
 
 ## 13. AI architecture and roadmap
 
+**Status: not implemented.** This section is the design that any future AI work
+must satisfy, not a description of shipped behavior. The `Ai` folders in
+`src/Vistara.Application` and `src/Vistara.Domain` are empty placeholders: there
+are no AI contracts, adapters, models, artifacts, embeddings, proposals, or
+review surfaces in the codebase. Read the invariants below as constraints on a
+future decision, and see `docs/future-ideas/metadata-and-ai-editing.md` for the
+uncommitted research direction.
+
 ### Invariant
 
 An AI provider may write typed suggestions or an `ActionProposal`. It receives no interface capable of deleting, moving, hiding, banning, reporting, or writing arbitrary storage objects.
@@ -1263,13 +1286,22 @@ Targets:
 
 Tasks may edit only their listed ownership paths. Shared root, composition, and generated files are reserved for integration tasks.
 
+**Status legend.** Each wave below carries a status line. *Complete* means the
+wave's outcomes exist on `main` and its verification commands are part of the
+repository's checks. *Not started* means no code for that wave exists. Waves 0A
+through 7 are complete; Wave 8 is not started.
+
 ### Wave 0A — repository bootstrap
+
+**Status: complete.** The Apache-2.0 solution, central package and analyzer settings, and project graph are in place.
 
 | ID | Size | Dependencies | Ownership | Outcome | Verification |
 |---|---|---|---|---|---|
 | `BOOT-01` | M | None | Root files, empty project files, `LICENSE` | Public Apache-2.0 solution, central package/version/analyzer settings, project graph | `dotnet restore Vistara.slnx && dotnet build Vistara.slnx -c Release --no-restore` |
 
 ### Wave 0B — first fleet dispatch
+
+**Status: complete.** Primitives, contracts, the web shell, workflow and container skeletons, and dependency-rule tests all exist.
 
 Run in parallel after `BOOT-01`.
 
@@ -1292,6 +1324,8 @@ npm --prefix src/Vistara.Web run build
 
 ### Wave 1 — domain and persistence
 
+**Status: complete.** Domain slices, EF Core persistence with tenant filters, and both provider migration assemblies ship with parity tests.
+
 Parallel domain slices:
 
 | ID | Size | Dependencies | Ownership | Verification |
@@ -1311,6 +1345,8 @@ Then:
 
 ### Wave 2 — storage and imaging
 
+**Status: complete.** The blob and image ports, the local, S3, and Azure adapters, the NetVips processor, and startup capability validation are implemented and covered by conformance tests.
+
 First establish stable ports/conformance tests, then parallelize adapters.
 
 | ID | Size | Dependencies | Ownership | Verification |
@@ -1323,6 +1359,8 @@ First establish stable ports/conformance tests, then parallelize adapters.
 | `MEDIA-06` | S | MEDIA-02..05 | API/Worker storage/imaging composition files only | Capability registration and startup validation | `dotnet test tests/Vistara.IntegrationTests --filter AdapterComposition` |
 
 ### Wave 3 — auth, quotas, jobs, and events
+
+**Status: complete.** Cookie sessions, API keys, configured-issuer JWT validation, tenant authorization, quotas, the durable job queue, the transactional outbox, and the event stream are implemented.
 
 Parallel ownership by subfolder; no task edits shared registration files.
 
@@ -1338,6 +1376,8 @@ Parallel ownership by subfolder; no task edits shared registration files.
 
 ### Wave 4 — upload and ingest vertical slice
 
+**Status: complete.** Upload intent, proxy and multipart uploads, commit and abort, worker ingest with hash and decode verification, exact-duplicate detection, and upload reconciliation are implemented.
+
 | ID | Size | Dependencies | Ownership | Verification |
 |---|---|---|---|---|
 | `INGEST-01` | M | MEDIA-01..04, PLAT-04 | `Api/Features/Uploads/**`, contracts | Intent, proxy upload, parts, commit, abort endpoints | `dotnet test tests/Vistara.Api.ContractTests --filter Uploads` |
@@ -1347,6 +1387,8 @@ Parallel ownership by subfolder; no task edits shared registration files.
 | `INGEST-05` | M | INGEST-01..04 | Upload integration/E2E tests only | Local, MinIO, Azurite complete flows | `dotnet test tests/Vistara.IntegrationTests --filter UploadEndToEnd` |
 
 ### Wave 5 — derivatives and delivery
+
+**Status: complete.** Canonical recipes, checkpointed worker generation, immutable public and private delivery, the preset API, and revocable delivery grants are implemented.
 
 | ID | Size | Dependencies | Ownership | Verification |
 |---|---|---|---|---|
@@ -1358,6 +1400,8 @@ Parallel ownership by subfolder; no task edits shared registration files.
 | `DERIV-06` | M | DERIV-02..05 | Media performance/security tests | Stampede, immutability, cache, metadata corpus | `dotnet test tests/Vistara.Imaging.Tests && dotnet test tests/Vistara.IntegrationTests --filter DerivativeConcurrency` |
 
 ### Wave 6 — gallery and lifecycle
+
+**Status: complete.** The asset, curation, sharing, and lifecycle APIs and the library, viewer, upload, curation, share, trash, settings, and administration screens are implemented, with browser workflows covered by the gallery smoke suite.
 
 Backend tasks may run in parallel:
 
@@ -1390,6 +1434,8 @@ npm --prefix tests/Vistara.E2E run test
 
 ### Wave 7 — release hardening
 
+**Status: complete.** Security middleware, health and telemetry, Compose topologies, migration and backup tooling, security and performance suites, provider live-test workflows, and the release documentation set are in place.
+
 | ID | Size | Ownership | Verification |
 |---|---|---|---|
 | `OPS-01` | M | API security middleware/configuration | `dotnet test tests/Vistara.IntegrationTests --filter SecurityHeaders` |
@@ -1402,6 +1448,8 @@ npm --prefix tests/Vistara.E2E run test
 | `OPS-08` | M | README, deployment, security, backup, API documentation | Validate documented starter install from a clean checkout |
 
 ### Wave 8 — post-MVP AI
+
+**Status: not started.** No task in this wave has been implemented, and none is scheduled. Nothing in the codebase should be read as partial AI support.
 
 | ID | Size | Dependencies | Ownership | Verification |
 |---|---|---|---|---|

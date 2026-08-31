@@ -1,7 +1,8 @@
 # Release, migration, and rollback runbook
 
 This runbook covers a stable release of the API, worker, and migration bundle
-images and the rollback path when a release misbehaves.
+images and the rollback path when a release misbehaves. User-visible changes for
+each release are recorded in `docs/release-notes.md`.
 
 ## Release artifacts
 
