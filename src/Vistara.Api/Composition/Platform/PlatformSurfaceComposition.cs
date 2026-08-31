@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Vistara.Api.Features.Account;
+using Vistara.Api.Features.Admin;
 using Vistara.Api.Features.ApiKeys;
 using Vistara.Api.Features.Capabilities;
 using Vistara.Api.Features.Jobs;
@@ -28,6 +29,7 @@ public static class PlatformSurfaceServiceCollectionExtensions
         services.AddVistaraApiKeyAdministration();
         services.AddVistaraTenantAdministration();
         services.AddVistaraAccountSurface();
+        services.AddVistaraAdministration();
         services.AddVistaraPlatformSurfacePolicies();
         return services;
     }
@@ -65,6 +67,7 @@ public static class PlatformSurfacePolicies
         ApiKeyEndpointMapping.PolicyName,
         TenantEndpointMapping.PolicyName,
         AccountEndpointMapping.PolicyName,
+        AdminEndpointMapping.PolicyName,
     ];
 }
 
@@ -80,6 +83,7 @@ public static class PlatformSurfaceEndpointRouteBuilderExtensions
         endpoints.MapVistaraApiKeys();
         endpoints.MapVistaraTenants();
         endpoints.MapVistaraAccount();
+        endpoints.MapVistaraAdministration();
         return endpoints;
     }
 }

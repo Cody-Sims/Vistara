@@ -12,6 +12,8 @@ public enum AccountOperation
     ManageMembers,
     ReadApiKeys,
     ManageApiKeys,
+    ManageQuotas,
+    ReadAudit,
 }
 
 public enum AccountAccessStatus
@@ -158,6 +160,8 @@ public sealed class ClaimsAccountAuthorizationPort : IAccountAuthorizationPort
             AccountOperation.ManageMembers => "members.manage",
             AccountOperation.ReadApiKeys or
             AccountOperation.ManageApiKeys => "api_keys.manage",
+            AccountOperation.ManageQuotas => "quotas.manage",
+            AccountOperation.ReadAudit => "members.manage",
             _ => throw new ArgumentOutOfRangeException(nameof(operation)),
         };
 
@@ -169,7 +173,9 @@ public sealed class ClaimsAccountAuthorizationPort : IAccountAuthorizationPort
             AccountOperation.ReadMembers or
             AccountOperation.ManageMembers or
             AccountOperation.ReadApiKeys or
-            AccountOperation.ManageApiKeys => TenantRole.TenantAdmin,
+            AccountOperation.ManageApiKeys or
+            AccountOperation.ReadAudit => TenantRole.TenantAdmin,
+            AccountOperation.ManageQuotas => TenantRole.TenantOwner,
             _ => throw new ArgumentOutOfRangeException(nameof(operation)),
         };
 

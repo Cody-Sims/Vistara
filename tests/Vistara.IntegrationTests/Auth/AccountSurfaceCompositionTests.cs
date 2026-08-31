@@ -7,8 +7,10 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Vistara.Api.Composition.Platform;
 using Vistara.Api.Features.Account;
+using Vistara.Api.Features.Admin;
 using Vistara.Api.Features.ApiKeys;
 using Vistara.Api.Features.Tenants;
+using Vistara.Application.Common.Storage;
 using Vistara.Auth.Cookies;
 using Vistara.Persistence;
 using Vistara.Persistence.Identity;
@@ -52,11 +54,17 @@ public sealed class AccountSurfaceCompositionTests
         {
             services.AddVistaraAccountSurface();
             services.AddVistaraTenantAdministration();
+            services.AddVistaraAdministration();
+            services.AddSingleton<IBlobStore>(
+                new AccountSurfaceHarness.ReachableBlobStore());
         });
 
         using IServiceScope scope = provider.CreateScope();
         Assert.NotNull(
             scope.ServiceProvider.GetRequiredService<ITenantDirectoryPort>());
+        Assert.NotNull(scope.ServiceProvider.GetRequiredService<IAdminPort>());
+        Assert.NotNull(
+            scope.ServiceProvider.GetRequiredService<IUserPreferencesPort>());
     }
 
     [Fact]

@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Vistara.Api.Features.Account;
+using Vistara.Api.Features.Admin;
+using Vistara.Application.Common.Storage;
 using Vistara.Api.Features.Tenants;
 using Vistara.Auth.Cookies;
 using Vistara.Domain.Common;
@@ -67,9 +69,11 @@ internal sealed class AccountSurfaceHarness : IAsyncDisposable
             provider => provider.GetRequiredService<AmbientTenantScope>());
         services.AddSingleton<ILocalPasswordHasher>(
             new Pbkdf2LocalPasswordHasher(100_000));
+        services.AddSingleton<IBlobStore>(new ReachableBlobStore());
         configure?.Invoke(services);
         services.AddVistaraAccountSurface();
         services.AddVistaraTenantAdministration();
+        services.AddVistaraAdministration();
         ServiceProvider provider = services.BuildServiceProvider(
             new ServiceProviderOptions { ValidateScopes = true });
         return new AccountSurfaceHarness(anchor, provider, connectionString);
@@ -138,6 +142,78 @@ internal sealed class AccountSurfaceHarness : IAsyncDisposable
     {
         await _provider.DisposeAsync();
         await _anchor.DisposeAsync();
+    }
+
+    /// <summary>
+    /// A reachable local store: the administrative health probe only needs a
+    /// name, capabilities, and a head that does not throw.
+    /// </summary>
+    internal sealed class ReachableBlobStore : IBlobStore
+    {
+        public string Name => "local";
+
+        public BlobStoreCapabilities Capabilities { get; } = new()
+        {
+            SupportsRangeReads = true,
+        };
+
+        public ValueTask<BlobHead?> HeadAsync(
+            BlobKey key,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<BlobHead?>(null);
+
+        public ValueTask<BlobReadHandle> OpenReadAsync(
+            BlobKey key,
+            BlobReadOptions options,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<BlobWriteResult> PutAsync(
+            BlobKey key,
+            IReplayableBlobContent content,
+            BlobWriteOptions options,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<BlobCopyResult> CopyAsync(
+            BlobKey source,
+            BlobKey destination,
+            BlobCopyOptions options,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<BlobDeleteResult> DeleteAsync(
+            BlobKey key,
+            BlobDeleteOptions options,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public IAsyncEnumerable<BlobHead> ListAsync(
+            BlobListOptions options,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<DirectUploadPlan> CreateDirectUploadAsync(
+            DirectUploadRequest request,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<MultipartSession> BeginMultipartAsync(
+            MultipartRequest request,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<MultipartPartPlan> CreatePartPlanAsync(
+            MultipartSession session,
+            int partNumber,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<MultipartCompletion> CompleteMultipartAsync(
+            MultipartSession session,
+            IReadOnlyList<UploadedPart> parts,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask AbortMultipartAsync(
+            MultipartSession session,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public ValueTask<SignedAccessPlan> CreateReadGrantAsync(
+            BlobKey key,
+            ReadGrantOptions options,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
     /// <summary>
