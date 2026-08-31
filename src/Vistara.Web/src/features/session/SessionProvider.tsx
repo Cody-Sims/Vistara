@@ -24,6 +24,8 @@ export interface SessionClient {
   getSession(): Promise<CurrentUser>;
   login(request: LoginRequest): Promise<LoginResponse>;
   logout(): Promise<void>;
+  /** Optional notification that a request needing a session was refused. */
+  onUnauthorized?(listener: () => void): () => void;
 }
 
 interface SessionProviderProps {
@@ -135,6 +137,26 @@ export function SessionProvider({
       request.current += 1;
     };
   }, [adoptIdentity, client, mode]);
+
+  // Any refused request ends the session once: the state moves to anonymous,
+  // the account's data is dropped, and the guards send private routes to sign
+  // in with the destination they were on.
+  useEffect(() => {
+    if (mode === 'preview' || !client.onUnauthorized) {
+      return;
+    }
+
+    return client.onUnauthorized(() => {
+      if (cachedIdentity.current === undefined) {
+        return;
+      }
+
+      request.current += 1;
+      cachedIdentity.current = undefined;
+      setState({ status: 'anonymous' });
+      void endAccount();
+    });
+  }, [client, endAccount, mode]);
 
   const signIn = useCallback(
     async (credentials: LoginRequest) => {

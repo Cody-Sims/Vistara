@@ -55,6 +55,7 @@ const anonymousRoutes = new Set(['/api/v1/auth/login', '/api/v1/setup']);
 export class PlatformApiClient {
   readonly #baseUrl: string;
   readonly #fetch: typeof fetch;
+  readonly #unauthorized = new Set<() => void>();
   #antiforgeryHeader = defaultAntiforgeryHeader;
   #antiforgeryToken = '';
 
@@ -65,6 +66,17 @@ export class PlatformApiClient {
 
   public get antiforgeryHeaderName(): string {
     return this.#antiforgeryHeader;
+  }
+
+  /**
+   * Notifies when a request that needed a session was refused. The session
+   * provider uses this to end the session once, however many calls fail.
+   */
+  public onUnauthorized(listener: () => void): () => void {
+    this.#unauthorized.add(listener);
+    return () => {
+      this.#unauthorized.delete(listener);
+    };
   }
 
   public async getSession(): Promise<CurrentUser> {
@@ -328,6 +340,13 @@ export class PlatformApiClient {
       body:
         options.body === undefined ? undefined : JSON.stringify(options.body),
     });
+
+    if (response.status === 401 && !anonymousRoutes.has(path)) {
+      this.#antiforgeryToken = '';
+      for (const listener of this.#unauthorized) {
+        listener();
+      }
+    }
 
     if (!response.ok) {
       const problem = await readProblem(response);

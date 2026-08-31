@@ -16,6 +16,7 @@ interface ApplicationProvidersProps {
   router: RouterProviderProps['router'];
   sessionClient?: SessionClient;
   sessionMode?: 'live' | 'preview';
+  onSessionEnd?: () => Promise<void> | void;
 }
 
 export function ApplicationProviders({
@@ -23,16 +24,18 @@ export function ApplicationProviders({
   router,
   sessionClient = platformClient,
   sessionMode = 'live',
+  onSessionEnd: onSessionEndOverride,
 }: ApplicationProvidersProps) {
   // Signing out must leave nothing of the previous account behind: the shared
   // query cache, gallery session storage, and resumable upload database all go.
   const onSessionEnd = useCallback(
     () =>
+      onSessionEndOverride?.() ??
       clearAccountScopedData({
         queryCache: queryClient,
         inMemory: [clearStorageDraft],
       }),
-    [queryClient],
+    [onSessionEndOverride, queryClient],
   );
 
   return (

@@ -282,6 +282,7 @@ describe('platform tenant administration client', () => {
         'listTenants',
         'login',
         'logout',
+        'onUnauthorized',
         'retryJob',
         'revokeApiKey',
         'updatePreferences',
