@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Vistara.Application.Gallery;
 using Vistara.Application.Gallery.Albums;
+using Vistara.Application.Gallery.Curation;
 using Vistara.Application.Gallery.Favorites;
 using Vistara.Application.Gallery.Tags;
 using Vistara.Persistence.Derivatives;
@@ -1009,7 +1010,11 @@ public sealed class RelationalGalleryCurationStore :
         CancellationToken cancellationToken)
     {
         EnsureActor(actor);
-        string hash = Fingerprint("bulk.queue", request);
+        ArgumentNullException.ThrowIfNull(request);
+        // The actor participates in the fingerprint because bulk effects such
+        // as favorites are per user, and the dedupe key derived from it must
+        // never fold two actors onto one queued job.
+        string hash = Fingerprint("bulk.queue", actor.UserId, request);
         await using IDbContextTransaction transaction =
             await BeginAsync(actor, cancellationToken);
         IdempotencyDecision replay = await CheckIdempotencyAsync(
@@ -1046,9 +1051,15 @@ public sealed class RelationalGalleryCurationStore :
         {
             Id = jobId,
             TenantId = actor.TenantId,
-            Type = "GalleryCurationBulk",
-            Payload = JsonSerializer.Serialize(request, JsonOptions),
-            PayloadVersion = 1,
+            Type = GalleryCurationJobContracts.BulkType.Value,
+            Payload = GalleryCurationJobContracts.SerializeBulk(
+                new GalleryCurationBulkJobPayload(
+                    actor.TenantId,
+                    actor.UserId,
+                    actor.CanManageAll,
+                    request.Action,
+                    request.Items)),
+            PayloadVersion = GalleryCurationJobContracts.PayloadVersion,
             DedupeKey = $"gallery-curation:{hash}",
             Priority = 0,
             MaxAttempts = 5,
