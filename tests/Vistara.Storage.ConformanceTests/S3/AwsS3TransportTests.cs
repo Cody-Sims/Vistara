@@ -14,6 +14,8 @@ public sealed class AwsS3TransportTests
     private static readonly DateTimeOffset Now =
         new(2026, 8, 29, 1, 0, 0, TimeSpan.Zero);
 
+    private const string MultipartKey = "staging/01/tenant/reconciled.jpg";
+
     [Fact]
     public void Sdk_configuration_uses_one_bounded_standard_retry_layer()
     {
@@ -189,6 +191,109 @@ public sealed class AwsS3TransportTests
                 request.Contains("health", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task An_empty_multipart_upload_listing_yields_no_entries_instead_of_faulting()
+    {
+        using var service = new StubS3Service(MultipartPage(truncated: false));
+        await using AwsS3Transport transport = AwsS3Transport.Create(
+            StubOptions(service.Endpoint).Validate(),
+            new BasicAWSCredentials("test-access-key", "test-secret-key"));
+
+        // Reconciliation lists the in-flight uploads for one key, which is an
+        // empty page whenever no upload is outstanding. AWSSDK v4 reports that
+        // page as a null collection, which must read as no uploads.
+        IReadOnlyList<S3MultipartUploadDescriptor> uploads =
+            await transport.ListMultipartUploadsAsync(
+                MultipartKey,
+                CancellationToken.None);
+
+        Assert.Empty(uploads);
+        Assert.Contains(
+            service.Requests,
+            request => request.Contains("uploads", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task An_empty_multipart_page_still_rejects_missing_pagination_tokens()
+    {
+        using var service = new StubS3Service(
+            MultipartPage(truncated: true, nextKeyMarker: null, nextUploadIdMarker: null));
+        await using AwsS3Transport transport = AwsS3Transport.Create(
+            StubOptions(service.Endpoint).Validate(),
+            new BasicAWSCredentials("test-access-key", "test-secret-key"));
+
+        // Reading a null page as empty must not let a truncated response
+        // without continuation tokens pass as a complete listing.
+        S3TransportException error =
+            await Assert.ThrowsAsync<S3TransportException>(async () =>
+                await transport.ListMultipartUploadsAsync(
+                    MultipartKey,
+                    CancellationToken.None));
+
+        Assert.Equal(S3TransportError.IntegrityMismatch, error.Error);
+        Assert.Single(service.Requests);
+    }
+
+    [Fact]
+    public async Task An_empty_multipart_page_continues_paging_to_later_uploads()
+    {
+        using var service = new StubS3Service(
+            MultipartPage(
+                truncated: true,
+                nextKeyMarker: MultipartKey,
+                nextUploadIdMarker: "upload-1"),
+            MultipartPage(truncated: false, uploadId: "upload-2"));
+        await using AwsS3Transport transport = AwsS3Transport.Create(
+            StubOptions(service.Endpoint).Validate(),
+            new BasicAWSCredentials("test-access-key", "test-secret-key"));
+
+        IReadOnlyList<S3MultipartUploadDescriptor> uploads =
+            await transport.ListMultipartUploadsAsync(
+                MultipartKey,
+                CancellationToken.None);
+
+        S3MultipartUploadDescriptor upload = Assert.Single(uploads);
+        Assert.Equal("upload-2", upload.UploadId);
+        Assert.Equal(2, service.Requests.Count);
+        Assert.Contains(
+            service.Requests,
+            request =>
+                request.Contains("upload-id-marker=upload-1", StringComparison.Ordinal));
+    }
+
+    private static string MultipartPage(
+        bool truncated,
+        string? nextKeyMarker = null,
+        string? nextUploadIdMarker = null,
+        string? uploadId = null)
+    {
+        string uploads = uploadId is null
+            ? string.Empty
+            : "  <Upload>\n" +
+              $"    <Key>{MultipartKey}</Key>\n" +
+              $"    <UploadId>{uploadId}</UploadId>\n" +
+              "    <Initiated>2026-08-30T12:00:00.000Z</Initiated>\n" +
+              "    <StorageClass>STANDARD</StorageClass>\n" +
+              "  </Upload>\n";
+        string keyMarker = nextKeyMarker is null
+            ? string.Empty
+            : $"  <NextKeyMarker>{nextKeyMarker}</NextKeyMarker>\n";
+        string uploadIdMarker = nextUploadIdMarker is null
+            ? string.Empty
+            : $"  <NextUploadIdMarker>{nextUploadIdMarker}</NextUploadIdMarker>\n";
+        return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+            "<ListMultipartUploadsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n" +
+            "  <Bucket>vistara-test</Bucket>\n" +
+            "  <KeyMarker></KeyMarker>\n" +
+            "  <UploadIdMarker></UploadIdMarker>\n" +
+            "  <MaxUploads>1000</MaxUploads>\n" +
+            $"  <IsTruncated>{(truncated ? "true" : "false")}</IsTruncated>\n" +
+            keyMarker +
+            uploadIdMarker +
+            uploads +
+            "</ListMultipartUploadsResult>";
+    }
+
     private static S3BlobStoreOptions StubOptions(Uri endpoint) =>
         new(S3ProviderKind.Minio, "vistara-test", "us-east-1")
         {
@@ -225,16 +330,22 @@ public sealed class AwsS3TransportTests
     }
 
     /// <summary>
-    /// Answers S3 requests on loopback with a fixed body so listing behaviour
-    /// is exercised through the real AWS SDK response pipeline.
+    /// Answers S3 requests on loopback with scripted bodies so listing
+    /// behaviour is exercised through the real AWS SDK response pipeline. The
+    /// final body answers every request after the script is exhausted.
     /// </summary>
     private sealed class StubS3Service : IDisposable
     {
         private readonly HttpListener _listener = new();
         private readonly ConcurrentQueue<string> _requests = new();
+        private readonly string[] _bodies;
+        private int _served;
 
-        public StubS3Service(string body)
+        public StubS3Service(params string[] bodies)
         {
+            _bodies = bodies.Length > 0
+                ? bodies
+                : throw new ArgumentOutOfRangeException(nameof(bodies));
             int port = FreePort();
             Endpoint = new Uri($"http://127.0.0.1:{port}");
             _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
@@ -254,7 +365,10 @@ public sealed class AwsS3TransportTests
                     }
 
                     _requests.Enqueue(context.Request.Url!.PathAndQuery);
-                    byte[] payload = Encoding.UTF8.GetBytes(body);
+                    int index = Math.Min(
+                        Interlocked.Increment(ref _served) - 1,
+                        _bodies.Length - 1);
+                    byte[] payload = Encoding.UTF8.GetBytes(_bodies[index]);
                     context.Response.StatusCode = 200;
                     context.Response.ContentType = "application/xml";
                     context.Response.ContentLength64 = payload.Length;

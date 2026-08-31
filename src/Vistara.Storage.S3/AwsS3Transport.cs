@@ -405,7 +405,9 @@ internal sealed class AwsS3Transport : IS3Transport
                             UploadIdMarker = uploadIdMarker,
                         },
                         cancellationToken);
-                foreach (MultipartUpload upload in response.MultipartUploads)
+                // AWSSDK v4 leaves response collections null rather than empty,
+                // so a page with no uploads must not be enumerated directly.
+                foreach (MultipartUpload upload in response.MultipartUploads ?? [])
                 {
                     if (!string.Equals(
                             upload.Key,
