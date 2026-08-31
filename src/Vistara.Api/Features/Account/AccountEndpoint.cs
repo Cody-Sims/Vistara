@@ -137,6 +137,7 @@ public static class AccountEndpoint
         Result<CurrentUserView> described = await sessions.DescribeAsync(
             actor.TenantId,
             actor.UserId,
+            actor.MayEnumerateOtherTenants,
             cancellationToken);
         if (!described.TryGetValue(out CurrentUserView? user))
         {

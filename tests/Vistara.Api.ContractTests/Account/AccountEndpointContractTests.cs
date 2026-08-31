@@ -225,6 +225,68 @@ public sealed class AccountEndpointContractTests
     }
 
     [Fact]
+    public async Task Cookie_sessions_may_enumerate_the_users_other_tenants()
+    {
+        var sessions = new FakeBrowserSessionPort();
+
+        TestResponse response = await SendAsync("me", sessions);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(sessions.IncludedOtherTenants);
+    }
+
+    [Theory]
+    [InlineData("ApiKey")]
+    [InlineData("Bearer")]
+    [InlineData(null)]
+    public async Task Tenant_bound_credentials_never_enumerate_other_tenants(
+        string? authenticationKind)
+    {
+        var sessions = new FakeBrowserSessionPort();
+        var claims = new List<Claim>
+        {
+            new("tenant_id", TenantId.ToString("D")),
+            new(ClaimTypes.NameIdentifier, UserId.ToString("D")),
+            new(ClaimTypes.Role, "TenantOwner"),
+        };
+        if (authenticationKind is not null)
+        {
+            claims.Add(new Claim("vistara_auth_kind", authenticationKind));
+        }
+
+        TestResponse response = await SendAsync(
+            "me",
+            sessions,
+            principal: new ClaimsPrincipal(new ClaimsIdentity(claims, "test")));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.False(sessions.IncludedOtherTenants);
+        Assert.Equal(TenantId, sessions.DescribedTenantId);
+    }
+
+    [Fact]
+    public async Task A_forged_browser_kind_claim_pair_is_treated_as_tenant_bound()
+    {
+        var sessions = new FakeBrowserSessionPort();
+
+        TestResponse response = await SendAsync(
+            "me",
+            sessions,
+            principal: new ClaimsPrincipal(new ClaimsIdentity(
+                [
+                    new Claim("tenant_id", TenantId.ToString("D")),
+                    new Claim(ClaimTypes.NameIdentifier, UserId.ToString("D")),
+                    new Claim(ClaimTypes.Role, "TenantOwner"),
+                    new Claim("vistara_auth_kind", "ApiKey"),
+                    new Claim("vistara_auth_kind", "Cookie"),
+                ],
+                "test")));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.False(sessions.IncludedOtherTenants);
+    }
+
+    [Fact]
     public async Task Current_user_never_trusts_a_tenant_header()
     {
         var sessions = new FakeBrowserSessionPort();
@@ -273,6 +335,7 @@ public sealed class AccountEndpointContractTests
                     new Claim("tenant_id", TenantId.ToString("D")),
                     new Claim(ClaimTypes.NameIdentifier, UserId.ToString("D")),
                     new Claim(ClaimTypes.Role, "TenantOwner"),
+                    new Claim("vistara_auth_kind", "Cookie"),
                 ],
                 "test")),
         };
@@ -321,6 +384,8 @@ public sealed class AccountEndpointContractTests
 
         public Guid? DescribedUserId { get; private set; }
 
+        public bool? IncludedOtherTenants { get; private set; }
+
         public string? FirstLogoutToken { get; private set; }
 
         public string? LastLogoutToken { get; private set; }
@@ -357,10 +422,12 @@ public sealed class AccountEndpointContractTests
         public ValueTask<Result<CurrentUserView>> DescribeAsync(
             Guid tenantId,
             Guid userId,
+            bool includeOtherTenants,
             CancellationToken cancellationToken)
         {
             DescribedTenantId = tenantId;
             DescribedUserId = userId;
+            IncludedOtherTenants = includeOtherTenants;
             return ValueTask.FromResult(Result.Success(View()));
         }
 

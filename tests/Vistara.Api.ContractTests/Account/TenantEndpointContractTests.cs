@@ -73,6 +73,42 @@ public sealed class TenantEndpointContractTests
     }
 
     [Fact]
+    public async Task Tenant_listing_is_unrestricted_for_a_browser_session()
+    {
+        var directory = new FakeTenantDirectoryPort();
+
+        await SendAsync("tenants", directory);
+
+        Assert.False(directory.WasRestricted);
+        Assert.Null(directory.RestrictedTenantId);
+    }
+
+    [Theory]
+    [InlineData("ApiKey")]
+    [InlineData("Bearer")]
+    public async Task Tenant_listing_is_pinned_to_the_current_tenant_for_tokens(
+        string authenticationKind)
+    {
+        var directory = new FakeTenantDirectoryPort();
+
+        TestResponse response = await SendAsync(
+            "tenants",
+            directory,
+            principal: new ClaimsPrincipal(new ClaimsIdentity(
+                [
+                    new Claim("tenant_id", TenantId.ToString("D")),
+                    new Claim(ClaimTypes.NameIdentifier, UserId.ToString("D")),
+                    new Claim(ClaimTypes.Role, "TenantOwner"),
+                    new Claim("vistara_auth_kind", authenticationKind),
+                ],
+                "test")));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(directory.WasRestricted);
+        Assert.Equal(TenantId, directory.RestrictedTenantId);
+    }
+
+    [Fact]
     public async Task Tenant_listing_requires_authentication()
     {
         var directory = new FakeTenantDirectoryPort();
@@ -261,6 +297,7 @@ public sealed class TenantEndpointContractTests
             new("tenant_id", TenantId.ToString("D")),
             new(ClaimTypes.NameIdentifier, UserId.ToString("D")),
             new(ClaimTypes.Role, role),
+            new("vistara_auth_kind", "Cookie"),
         };
         claims.AddRange(scopes.Select(scope => new Claim("scope", scope)));
         return new ClaimsPrincipal(new ClaimsIdentity(claims, "test"));
@@ -345,6 +382,10 @@ public sealed class TenantEndpointContractTests
     {
         public Guid? ListedUserId { get; private set; }
 
+        public Guid? RestrictedTenantId { get; private set; }
+
+        public bool WasRestricted { get; private set; }
+
         public Guid? ListedMembersTenantId { get; private set; }
 
         public TenantMemberInvitation? Invitation { get; private set; }
@@ -353,9 +394,12 @@ public sealed class TenantEndpointContractTests
 
         public ValueTask<IReadOnlyList<TenantMembershipView>> ListTenantsForUserAsync(
             Guid userId,
+            Guid? restrictToTenantId,
             CancellationToken cancellationToken)
         {
             ListedUserId = userId;
+            RestrictedTenantId = restrictToTenantId;
+            WasRestricted = restrictToTenantId is not null;
             return ValueTask.FromResult<IReadOnlyList<TenantMembershipView>>(
             [
                 new TenantMembershipView(

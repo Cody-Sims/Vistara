@@ -44,7 +44,10 @@ public static class TenantEndpoint
         }
 
         IReadOnlyList<TenantMembershipView> tenants =
-            await directory.ListTenantsForUserAsync(actor.UserId, cancellationToken);
+            await directory.ListTenantsForUserAsync(
+                actor.UserId,
+                actor.MayEnumerateOtherTenants ? null : actor.TenantId,
+                cancellationToken);
         await WriteJsonAsync(
             context,
             StatusCodes.Status200OK,

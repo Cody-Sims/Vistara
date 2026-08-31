@@ -34,8 +34,15 @@ public sealed record TenantMemberInvitation(
 /// </summary>
 public interface ITenantDirectoryPort
 {
+    /// <summary>
+    /// Lists the principal's tenants. When
+    /// <paramref name="restrictToTenantId"/> is supplied the projection is
+    /// limited to that tenant, so a tenant-bound credential cannot discover
+    /// where its owner is a member elsewhere.
+    /// </summary>
     ValueTask<IReadOnlyList<TenantMembershipView>> ListTenantsForUserAsync(
         Guid userId,
+        Guid? restrictToTenantId,
         CancellationToken cancellationToken);
 
     ValueTask<IReadOnlyList<TenantMemberView>> ListMembersAsync(

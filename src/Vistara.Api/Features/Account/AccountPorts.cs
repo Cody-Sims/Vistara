@@ -21,7 +21,29 @@ public enum AccountAccessStatus
     Forbidden,
 }
 
-public sealed record AccountActor(Guid TenantId, Guid UserId, TenantRole Role);
+public enum AccountAuthenticationKind
+{
+    /// <summary>An automation or federated credential bound to one tenant.</summary>
+    TenantBound,
+
+    /// <summary>An interactive browser session owned by a human principal.</summary>
+    Browser,
+}
+
+public sealed record AccountActor(
+    Guid TenantId,
+    Guid UserId,
+    TenantRole Role,
+    AccountAuthenticationKind AuthenticationKind)
+{
+    /// <summary>
+    /// Only an interactive browser session may enumerate the principal's other
+    /// tenants. A tenant-bound credential such as an API key must never reveal
+    /// where its owner is a member outside the tenant it was issued for.
+    /// </summary>
+    public bool MayEnumerateOtherTenants =>
+        AuthenticationKind == AccountAuthenticationKind.Browser;
+}
 
 public sealed record AccountAccess
 {
@@ -74,6 +96,10 @@ public sealed class ClaimsAccountAuthorizationPort : IAccountAuthorizationPort
 
     internal const string ScopeClaimType = "scope";
 
+    internal const string AuthenticationKindClaimType = "vistara_auth_kind";
+
+    internal const string BrowserAuthenticationKind = "Cookie";
+
     public ValueTask<AccountAccess> AuthorizeAsync(
         HttpContext context,
         AccountOperation operation,
@@ -117,7 +143,11 @@ public sealed class ClaimsAccountAuthorizationPort : IAccountAuthorizationPort
         }
 
         return ValueTask.FromResult(
-            AccountAccess.Authorized(new AccountActor(tenantId, userId, role)));
+            AccountAccess.Authorized(new AccountActor(
+                tenantId,
+                userId,
+                role,
+                ReadAuthenticationKind(principal))));
     }
 
     internal static string? RequiredScope(AccountOperation operation) =>
@@ -142,6 +172,23 @@ public sealed class ClaimsAccountAuthorizationPort : IAccountAuthorizationPort
             AccountOperation.ManageApiKeys => TenantRole.TenantAdmin,
             _ => throw new ArgumentOutOfRangeException(nameof(operation)),
         };
+
+    internal static AccountAuthenticationKind ReadAuthenticationKind(
+        ClaimsPrincipal principal)
+    {
+        string[] kinds = principal.FindAll(AuthenticationKindClaimType)
+            .Select(claim => claim.Value)
+            .Distinct(StringComparer.Ordinal)
+            .Take(2)
+            .ToArray();
+        return kinds.Length == 1 &&
+            string.Equals(
+                kinds[0],
+                BrowserAuthenticationKind,
+                StringComparison.Ordinal)
+            ? AccountAuthenticationKind.Browser
+            : AccountAuthenticationKind.TenantBound;
+    }
 
     private static bool HasMinimumRole(TenantRole actual, TenantRole minimum) =>
         Rank(actual) >= Rank(minimum);
