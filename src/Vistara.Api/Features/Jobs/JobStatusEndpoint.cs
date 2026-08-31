@@ -132,7 +132,7 @@ public static class JobStatusEndpoint
         return false;
     }
 
-    private static JobStatusResponse Map(JobSnapshot snapshot) =>
+    internal static JobStatusResponse Map(JobSnapshot snapshot) =>
         new(
             snapshot.Id.Value,
             snapshot.Type.Value,
@@ -147,5 +147,8 @@ public static class JobStatusEndpoint
                 : new JobFailureResponse(
                     snapshot.LastFailure.Code,
                     snapshot.LastFailure.Summary),
-            snapshot.Version.Value);
+            snapshot.Version.Value,
+            new JobActionsResponse(
+                JobActions.CanRetry(snapshot.State),
+                JobActions.CanCancel(snapshot.State)));
 }

@@ -16,7 +16,22 @@ public sealed record JobStatusResponse(
     [property: JsonPropertyName("availableAt")] DateTimeOffset AvailableAt,
     [property: JsonPropertyName("completedAt")] DateTimeOffset? CompletedAt,
     [property: JsonPropertyName("failure")] JobFailureResponse? Failure,
-    [property: JsonPropertyName("version")] long Version);
+    [property: JsonPropertyName("version")] long Version,
+    [property: JsonPropertyName("actions")] JobActionsResponse Actions);
+
+/// <summary>
+/// The operator actions this release can apply to a job. Cancellation has no
+/// representation in the durable job model, so it is always unavailable.
+/// </summary>
+public sealed record JobActionsResponse(
+    [property: JsonPropertyName("retry")] bool Retry,
+    [property: JsonPropertyName("cancel")] bool Cancel);
+
+public sealed record JobCollectionResponse(
+    [property: JsonPropertyName("items")] IReadOnlyList<JobStatusResponse> Items,
+    [property: JsonPropertyName("nextCursor")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? NextCursor);
 
 public sealed record JobFailureResponse(
     [property: JsonPropertyName("code")] string Code,

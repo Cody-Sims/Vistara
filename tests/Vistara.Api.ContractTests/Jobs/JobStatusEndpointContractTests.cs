@@ -26,7 +26,7 @@ public sealed class JobStatusEndpointContractTests
         Guid.Parse("01990a2a-bc00-7000-8000-000000000a01");
 
     [Fact]
-    public void Mapping_registers_one_authenticated_versioned_route()
+    public void Mapping_registers_the_authenticated_versioned_detail_route()
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.Services.AddVistaraJobStatus();
@@ -34,10 +34,11 @@ public sealed class JobStatusEndpointContractTests
 
         app.MapVistaraJobStatus();
 
-        RouteEndpoint endpoint = Assert.Single(
-            ((IEndpointRouteBuilder)app).DataSources
-                .SelectMany(source => source.Endpoints)
-                .OfType<RouteEndpoint>());
+        RouteEndpoint endpoint = ((IEndpointRouteBuilder)app).DataSources
+            .SelectMany(source => source.Endpoints)
+            .OfType<RouteEndpoint>()
+            .Single(candidate =>
+                candidate.RoutePattern.RawText == "/api/v1/jobs/{jobId:guid}");
         Assert.Equal("/api/v1/jobs/{jobId:guid}", endpoint.RoutePattern.RawText);
         Assert.Contains(
             "GET",
@@ -82,6 +83,7 @@ public sealed class JobStatusEndpointContractTests
             "assetId",
             response.Body,
             StringComparison.Ordinal);
+        Assert.False(root.GetProperty("actions").GetProperty("cancel").GetBoolean());
     }
 
     [Fact]
@@ -271,10 +273,11 @@ public sealed class JobStatusEndpointContractTests
         WebApplication app = builder.Build();
         app.MapVistaraJobStatus();
 
-        RouteEndpoint endpoint = Assert.Single(
-            ((IEndpointRouteBuilder)app).DataSources
-                .SelectMany(source => source.Endpoints)
-                .OfType<RouteEndpoint>());
+        RouteEndpoint endpoint = ((IEndpointRouteBuilder)app).DataSources
+            .SelectMany(source => source.Endpoints)
+            .OfType<RouteEndpoint>()
+            .Single(candidate =>
+                candidate.RoutePattern.RawText == "/api/v1/jobs/{jobId:guid}");
         await using AsyncServiceScope scope = app.Services.CreateAsyncScope();
         var context = new DefaultHttpContext
         {
