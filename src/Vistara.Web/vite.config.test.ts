@@ -33,9 +33,41 @@ describe('Vite build artifacts', () => {
 
     for (const target of [production, pages]) {
       expectInstallableAssets(target.root, target.build.outDir, target.base);
+      expectShellOnlyServiceWorker(
+        target.root,
+        target.build.outDir,
+        target.base,
+      );
     }
   }, 120_000);
 });
+
+function expectShellOnlyServiceWorker(
+  root: string,
+  outDir: string,
+  base: string,
+) {
+  const artifactRoot = resolve(root, outDir);
+  const worker = readFileSync(resolve(artifactRoot, 'sw.js'), 'utf8');
+  const precache = JSON.parse(
+    worker.slice(worker.indexOf('['), worker.indexOf(']') + 1),
+  ) as string[];
+
+  expect(worker).toMatch(/const CACHE = "vistara-shell-[0-9a-f]{12}"/);
+  expect(precache).toContain(`${base}index.html`);
+  expect(precache.length).toBeGreaterThan(3);
+
+  for (const entry of precache) {
+    expect(entry.startsWith(base)).toBe(true);
+    expect(entry).not.toContain('/api/');
+    expect(entry).not.toContain('/media/');
+    expect(entry).not.toContain('/delivery/');
+    expect(entry).not.toMatch(/\.map$/);
+    expect(existsSync(resolve(artifactRoot, entry.slice(base.length)))).toBe(
+      true,
+    );
+  }
+}
 
 function expectInstallableAssets(root: string, outDir: string, base: string) {
   const artifactRoot = resolve(root, outDir);

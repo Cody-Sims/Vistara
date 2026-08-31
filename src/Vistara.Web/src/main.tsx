@@ -4,10 +4,12 @@ import { createAppQueryClient } from './api/queryClient';
 import { ApplicationProviders } from './app/ApplicationProviders';
 import { applyDocumentPreferences, getPreferences } from './app/preferences';
 import { createAppRouter } from './app/router';
+import { registerServiceWorker } from './pwa/registerServiceWorker';
 import './styles/tokens.css';
 import './styles/base.css';
 
 applyDocumentPreferences(getPreferences());
+registerServiceWorker();
 
 const rootElement = document.getElementById('root');
 
