@@ -32,7 +32,7 @@ node --test eng/tests/*.test.mjs
 - `.shadow/`: evidence-linked architecture decisions.
 - `.github/workflows/`: CI, security, Pages preview, and release-image automation.
 - `docs/specification.md`: approved product specification and ordered implementation roadmap.
-- [Azure free credits](docs/operations/azure-free-credits.md): evaluation-only guide to running Vistara on current Microsoft Azure free-credit offers.
+- [Azure free credits](docs/operations/azure-free-credits.md): evaluation-only guide to running Vistara on current Microsoft Azure free-credit offers, with an [identity, RBAC, and secrets](docs/operations/azure-identity-and-secrets.md) companion.
 - [Future ideas](docs/future-ideas/README.md): uncommitted post-MVP research directions and constraints.
 
 Licensed under the [Apache License 2.0](LICENSE).

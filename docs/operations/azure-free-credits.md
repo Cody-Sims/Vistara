@@ -7,7 +7,10 @@ repository actually reads.
 
 It is a cost-and-setup runbook, not a production architecture. For the
 supported topologies see `deploy/README.md`; for the product and architecture
-authority see `docs/specification.md`.
+authority see `docs/specification.md`. Identity, RBAC, registry, and secret
+detail lives in the companion
+[Azure identity, RBAC, and secrets](azure-identity-and-secrets.md) guide so
+this runbook stays linear.
 
 ## How to read this document
 
@@ -17,12 +20,11 @@ Every non-obvious claim is labelled:
 |---|---|
 | **[Verified]** | Quoted or directly restated from the linked Microsoft page, or read out of this repository's own code and deployment files |
 | **[Inferred]** | A reasonable choice or derivation by this guide; individually documented parts, combined here. Confirm before relying on it |
-| **[Unverified]** | Deliberately not stated, because no primary Microsoft source could be confirmed. Check the linked page yourself |
+| **[Unverified]** | Deliberately not stated, because no primary source could be confirmed. Check the linked page yourself |
 
-Microsoft changes offers, quotas, and CLI surfaces frequently. Treat the
-inline dates as the freshness of the research, re-check the linked page before
-you spend anything, and prefer `az <group> --help` over this document when the
-two disagree.
+Microsoft changes offers, quotas, and CLI surfaces frequently. Re-check the
+linked page before you spend anything, and prefer `az <group> --help` over this
+document when the two disagree.
 
 **Research date for all Microsoft citations below: 2026-08-30.**
 
@@ -32,6 +34,23 @@ client-rendered pricing grid that could not be retrieved as primary text.
 **[Unverified]** — read the current numbers yourself at
 <https://azure.microsoft.com/en-us/pricing/free-services/> and in your own
 portal's *Free services for 12 months* table before sizing anything.
+
+## Contents
+
+- [1. What the free offers actually give you](#1-what-the-free-offers-actually-give-you)
+- [2. Budgets and alerts](#2-budgets-and-alerts-they-do-not-cap-spend)
+- [3. Choosing an architecture Vistara can run on](#3-choosing-an-architecture-vistara-can-run-on)
+- [4. Naming and shell variables](#4-naming-and-shell-variables)
+- [5. Provisioning with the Azure CLI](#5-provisioning-with-the-azure-cli)
+- [6. Mapping Azure outputs to Vistara configuration keys](#6-mapping-azure-outputs-to-vistara-configuration-keys)
+- [7. Copy-paste `.env` template](#7-copy-paste-env-template)
+- [8. Migrations, deployment, and validation](#8-migrations-deployment-and-validation)
+- [9. Stop, start, and actually bound the bill](#9-stop-start-and-actually-bound-the-bill)
+- [10. Backup](#10-backup)
+- [11. Teardown](#11-teardown)
+- [12. Cost traps checklist](#12-cost-traps-checklist)
+- [13. Configuration gaps that need code changes](#13-configuration-gaps-that-need-code-changes)
+- [14. Sources](#14-sources)
 
 ---
 
@@ -49,7 +68,7 @@ The caveats matter more than the headline:
 
 - **[Verified]** The subscription and its services **are disabled when the
   credit runs out or expires at the end of 30 days**. To keep going you must
-  upgrade to pay-as-you-go.
+  upgrade to pay-as-you-go, at which point real charges begin.
   — <https://learn.microsoft.com/en-us/azure/cost-management-billing/manage/upgrade-azure-subscription>
 - **[Verified]** The 12 months of free services are available "only to new
   customers who have not previously had an Azure account or received 12 months
@@ -64,16 +83,16 @@ The caveats matter more than the headline:
   created when you signed up for your Azure free account" — a second
   subscription in the same tenant gets nothing.
 - **[Verified]** Free-service usage reporting is "delayed for one to two days
-  after you use a resource."
+  after you use a resource", so you can overspend before you can see it.
   — <https://learn.microsoft.com/en-us/azure/cost-management-billing/manage/check-free-service-usage>
 - **[Verified]** "Free Azure trial subscriptions aren't eligible for limit or
   quota increases."
   — <https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/azure-subscription-service-limits>
 
-Check what you have consumed in the portal: **Subscriptions** → your
-free-account subscription → **Top free services by usage** → **View all free
-services**. The same blade's tooltip shows the 12-month expiry date.
-**[Verified]**, same article.
+Check consumption in the portal: **Subscriptions** → your free-account
+subscription → **Top free services by usage** → **View all free services**. The
+same blade's tooltip shows the 12-month expiry date. **[Verified]**, same
+article.
 
 ### 1.2 Visual Studio subscription (Azure Dev/Test individual credit)
 
@@ -89,8 +108,8 @@ Activate at <https://my.visualstudio.com/benefits> → Azure tile → **Activate
 **[Verified]** The article does **not** publish a dollar amount; it varies by
 subscription level, so this guide does not state one.
 
-This is the best fit for a recurring Vistara sandbox: the credit renews
-monthly instead of expiring after 30 days.
+**[Inferred]** This is the best fit for a recurring Vistara sandbox: the credit
+renews monthly instead of expiring after 30 days.
 
 ### 1.3 Microsoft for Startups
 
@@ -123,10 +142,12 @@ Set this up **first**, before creating any billable resource.
 
 **[Verified]** "Notifications are triggered when the budget thresholds are
 exceeded. Resources aren't affected, and your consumption isn't stopped."
-A budget is a tripwire, not a circuit breaker.
+A budget is a tripwire, not a circuit breaker — the only controls that
+actually reduce spend are in
+[§9](#9-stop-start-and-actually-bound-the-bill).
 — <https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/tutorial-acm-create-budgets>
 
-Also **[Verified]** from the same tutorial and
+Also **[Verified]**, from that tutorial and
 <https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/cost-mgt-alerts-monitor-usage-spending>:
 
 - Budgets can be scoped to a management group, subscription, **or resource
@@ -162,13 +183,9 @@ Customer Agreement accounts are directed to the Budgets REST API. Attach alert
 recipients in the portal (**Cost Management + Billing** → **Budgets**) unless
 you are comfortable hand-writing the notification object.
 
-**[Inferred]** Because budgets cannot stop spend, pair them with the real
-controls in [§9](#9-stop-start-and-actually-bound-the-bill): stop the database
-when idle, and let the container app scale to zero.
-
 ---
 
-## 3. Choosing the cheapest architecture that Vistara can actually run on
+## 3. Choosing an architecture Vistara can run on
 
 Vistara is not a single web process. **[Verified from this repository]**:
 
@@ -186,8 +203,6 @@ Vistara is not a single web process. **[Verified from this repository]**:
 - Release images are published to `ghcr.io/<namespace>/vistara-api` and
   `ghcr.io/<namespace>/vistara-worker`
   (`.github/workflows/release-images.yml`).
-
-That rules out the obvious "cheapest" option:
 
 ### 3.1 Why App Service Free (F1) does not fit
 
@@ -210,9 +225,9 @@ app.
 **[Inferred]** Even so, F1 is the wrong target for Vistara: a code-only deploy
 would not have libvips, so `NetVipsImageProcessor` cannot initialise; 60 CPU
 minutes per day is not enough for image derivative generation; and F1 gives
-you one process, while Vistara needs API + worker + a migration run. If you
-still want App Service, you need a **custom container** plan tier and one plan
-per process, which is no longer free.
+you one process, while Vistara needs API + worker + a migration run. A custom
+container needs a paid plan tier, and **[Verified]** "Except for the Free tier,
+an App Service plan carries a charge on the compute resources that it uses."
 
 **[Unverified]** The exact `linuxFxVersion` string for .NET 10 on App Service
 Linux — the configuration doc only shows `DOTNETCORE|8.0`. Do not hardcode it;
@@ -228,30 +243,54 @@ and "When a revision is scaled to zero replicas, no resource consumption
 charges are incurred."
 — <https://learn.microsoft.com/en-us/azure/container-apps/billing>
 
-**[Verified]** The smallest documented Consumption allocation is
-**0.25 vCPU / 0.5 GiB**.
+**[Verified]** The documented Consumption allocations start at
+**0.25 vCPU / 0.5 GiB** and step through 0.5 vCPU / 1.0 GiB, 0.75 vCPU /
+1.5 GiB, and upward; a Consumption-only environment is capped at 2 cores and
+4 GiB.
 — <https://learn.microsoft.com/en-us/azure/container-apps/containers>
 
-**[Inferred] Free-grant arithmetic.** One always-on 0.25 vCPU / 0.5 GiB
-replica consumes 0.25 vCPU-s and 0.5 GiB-s per second, so the free grant
-covers `180,000 / 0.25 = 720,000` seconds of vCPU and `360,000 / 0.5 = 720,000`
-seconds of memory — **about 200 hours per calendar month for one minimal
-replica**, both limits binding at the same point. A month is ~730 hours, so
-**two always-on minimal replicas (API + worker) will exceed the grant.** Run
-the API with `--min-replicas 0` and start the worker only when you need it.
+#### Free-grant arithmetic **[Inferred]**
 
-This grant is per subscription per calendar month and is **not** tied to the
-12-month free account, so it survives the 30-day and 12-month cliffs.
+Both grant limits bind at the same replica-hour count for every allocation on
+the documented CPU-to-memory ladder, because that ladder is a fixed
+1 vCPU : 2 GiB ratio:
+
+| Allocation | vCPU-s budget | GiB-s budget | Free replica-hours per month |
+|---|---|---|---|
+| 0.25 vCPU / 0.5 GiB | 180,000 / 0.25 = 720,000 s | 360,000 / 0.5 = 720,000 s | **≈ 200 h** |
+| 0.5 vCPU / 1.0 GiB | 180,000 / 0.5 = 360,000 s | 360,000 / 1.0 = 360,000 s | **≈ 100 h** |
+
+A calendar month is roughly 730 hours, so **no always-on replica fits inside
+the free grant**, and two always-on replicas burn through it two to three times
+faster.
+
+**This guide sizes both apps at 0.5 vCPU / 1.0 GiB, which is ≈ 100 free
+replica-hours per month, not 200.** **[Inferred]** That is the honest trade:
+`deploy/compose.postgres.yml` sets a **1 GB memory limit** on both the API and
+worker services, and both images run libvips-backed image transforms whose
+peak resident set scales with decoded pixel dimensions. Halving memory to
+0.5 GiB would double the free hours but leave almost no headroom above the
+runtime plus a single decoded image, so an upload of a large photograph is
+likely to be OOM-killed. If your workload is browsing-only — no uploads, no
+derivative generation — 0.25 vCPU / 0.5 GiB and ≈ 200 hours is a reasonable
+downgrade for the API; keep the worker at 0.5/1.0 GiB whenever it will
+actually process images.
+
+Budget your session time accordingly: at 0.5/1.0 GiB, roughly 100 hours of
+combined API and worker replica time per calendar month is free, and
+everything beyond that is billed. The grant is per subscription per calendar
+month and is **not** tied to the 12-month free account, so it survives both the
+30-day and 12-month cliffs.
 
 ### 3.3 Comparison
 
 | Option | Fits Vistara? | Cost shape | Main catch |
 |---|---|---|---|
 | App Service **F1** | **No** | Free | No libvips on code-only deploy; 60 CPU-min/day; one process; no custom domain or TLS **[Verified limits / Inferred fit]** |
-| App Service custom container (B1+) | Yes | Hourly per plan, per process | "Except for the Free tier, an App Service plan carries a charge on the compute resources that it uses" **[Verified]** |
-| **Container Apps Consumption** | **Yes — recommended** | Free grant, then per vCPU-s / GiB-s; zero when scaled to zero | ~200 minimal-replica hours/month free **[Inferred]**; worker cannot scale to zero on HTTP |
-| PostgreSQL Flexible Server, **Burstable B1ms**, no HA, LRS backup | Yes | Billed per full hour the server **exists** | Stop it when idle; several settings are immutable **[Verified]** |
-| Blob Storage `StandardV2`, `Standard_LRS` | Yes (native adapter) | Per GB + transactions + egress | Free monthly GB **[Unverified]** — check the grid |
+| App Service custom container (B1+) | Yes | Hourly per plan, per process | Every non-Free plan is charged **[Verified]** |
+| **Container Apps Consumption** | **Yes — recommended** | Free grant, then per vCPU-s / GiB-s; zero when scaled to zero | ≈ 100 free replica-hours/month at 0.5 vCPU / 1.0 GiB **[Inferred]**; worker cannot scale to zero without a scale rule |
+| PostgreSQL Flexible Server, **Burstable B1ms**, LRS backup | Yes | Billed per full hour the server **exists** | Stop it when idle; several settings are immutable **[Verified]** |
+| Blob Storage `StorageV2`, `Standard_LRS` | Yes (native adapter) | Per GB + transactions + egress | Free monthly GB **[Unverified]** — check the grid |
 | SQLite starter topology | Not on Azure | — | `deploy/README.md` requires a single host and a local volume; do not put it on Azure Files |
 
 ---
@@ -287,6 +326,7 @@ export STORAGE="stvistara$SUFFIX"          # <=24 chars, lowercase+digits only
 export CONTAINER="vistara-media"
 export PG="pg-vistara-$SUFFIX"
 export PGDB="vistara"
+export PGADMIN="vistaraadmin"              # server admin login, not the app
 export KV="kv-vistara-$SUFFIX"
 export ACAENV="cae-vistara-$SUFFIX"
 export APIAPP="ca-vistara-api"
@@ -300,9 +340,8 @@ export IMAGE_TAG="<release-tag>"
 
 ## 5. Provisioning with the Azure CLI
 
-Everything below is run from your workstation. Commands are shown with the
-parameters confirmed to exist in the current CLI reference; where a value is
-this guide's choice rather than a documented example, it is labelled.
+Everything below runs from your workstation. Where a value is this guide's
+choice rather than a documented example, it is labelled.
 
 ### 5.1 Sign in and select the subscription
 
@@ -345,14 +384,13 @@ az storage account create \
 
 **[Verified]** `--min-tls-version TLS1_2` and `--allow-blob-public-access false`
 are taken from the article's own CLI example; `Standard_LRS` is a documented
-redundancy value for `StorageV2` (**[Inferred]** substitution for the doc's
-`Standard_RAGRS`, chosen because LRS is the cheapest redundancy).
+redundancy value for `StorageV2`. **[Inferred]** substituting `Standard_LRS`
+for the doc's `Standard_RAGRS` example, because LRS is the cheapest redundancy.
 — <https://learn.microsoft.com/en-us/azure/storage/common/storage-account-create>
 
-Data-protection settings Microsoft recommends, and which are worth having even
-in a sandbox — **[Verified]** the article recommends blob soft delete and
-container soft delete with "a minimum retention period of seven days" and blob
-versioning "for optimal data protection":
+Data-protection settings Microsoft recommends — **[Verified]** the article
+recommends blob soft delete and container soft delete with "a minimum retention
+period of seven days" and blob versioning "for optimal data protection":
 
 ```bash
 az storage account blob-service-properties update \
@@ -377,33 +415,27 @@ Microsoft Entra security principal (recommended) ... If you omit the
 access key."
 — <https://learn.microsoft.com/en-us/azure/storage/blobs/authorize-data-operations-cli>
 
-**[Verified]** "When you create an Azure Storage account, you aren't
-automatically assigned permissions to access data via Microsoft Entra ID. You
-must explicitly assign yourself an Azure role." If the container create fails
-with an authorization error, assign yourself **Storage Blob Data Contributor**
-first.
-— <https://learn.microsoft.com/en-us/azure/storage/blobs/assign-azure-role-data-access>
+If this fails with an authorization error, assign yourself **Storage Blob Data
+Contributor** first; see
+[azure-identity-and-secrets.md §2](azure-identity-and-secrets.md#2-managed-identity-and-blob-rbac).
 
-#### Optional hardening, with a real consequence
-
-```bash
-az storage account update --name "$STORAGE" --resource-group "$RG" \
-  --allow-shared-key-access false
-```
-
-**[Verified]** With shared-key access disabled, "service SAS and account SAS"
-are denied; only **user delegation SAS** and Entra-authorized requests
-succeed.
-— <https://learn.microsoft.com/en-us/azure/storage/common/shared-key-authorization-prevent>
-
-**[Verified from `src/Vistara.Api/Composition/Media/MediaComposition.cs` and
-`src/Vistara.Storage.Azure/`]** This is compatible with Vistara's
-`CredentialMode: DefaultCredential` path, which sets `SasMode` to
-`UserDelegation`. It is **not** compatible with `CredentialMode: SharedKey`,
-which requires a connection string and an explicit `AllowSharedKeySas: true`
-opt-in. Use `DefaultCredential`; see [§5.5](#55-managed-identity-and-least-privilege-rbac).
+Optional hardening — `az storage account update --name "$STORAGE"
+--resource-group "$RG" --allow-shared-key-access false` — is compatible with
+Vistara's managed-identity path but **not** with its shared-key fallback, and
+it also breaks `az storage cors add`. The trade-offs are in
+[azure-identity-and-secrets.md §3](azure-identity-and-secrets.md#3-least-privilege-fallback-when-you-cannot-create-role-assignments).
 
 ### 5.4 PostgreSQL Flexible Server
+
+> **Read this before creating the server.** **[Verified from the code]**
+> Vistara has **no support for Entra (passwordless) PostgreSQL
+> authentication**: every persistence path calls
+> `options.UseNpgsql(connectionString)` with no `NpgsqlDataSource` password
+> provider, so there is nothing to refresh an expiring access token. Create the
+> server with password authentication left **enabled** (the default). Do **not**
+> pass `--password-auth Disabled`, and do not follow Entra-only guidance — the
+> application will not be able to connect. See
+> [§13](#13-configuration-gaps-that-need-code-changes) for the full detail.
 
 ```bash
 az postgres flexible-server create \
@@ -414,46 +446,54 @@ az postgres flexible-server create \
   --sku-name Standard_B1ms \
   --storage-size 32 \
   --version 18 \
-  --high-availability Disabled \
+  --zonal-resiliency Disabled \
   --backup-retention 7 \
   --geo-redundant-backup Disabled \
   --public-access None \
-  --admin-user "<admin-login>" \
+  --admin-user "$PGADMIN" \
   --admin-password "<generated-strong-password>" \
   --yes
 ```
 
-**[Verified]** Every parameter above appears in the `az postgres
-flexible-server create` synopsis; `Standard_B1ms` appears literally in a doc
-example; `Burstable` is a documented `--tier` value; PostgreSQL **18** is in
-the supported version list; and "Workload type 'Development' uses Burstable
-SKUs".
+**[Verified]** Every parameter above appears in the current
+`az postgres flexible-server create` synopsis, which lists `--tier`,
+`--sku-name`, `--storage-size`, `--version`, `--zonal-resiliency
+{Disabled, Enabled}`, `--backup-retention`, `--geo-redundant-backup
+{Disabled, Enabled}`, `--public-access`, `--admin-user`, `--admin-password`,
+and `--yes`. The synopsis has **no `--high-availability` parameter**;
+high availability is expressed through `--zonal-resiliency` (with `--zone`,
+`--standby-zone`, and `--allow-same-zone`), and `Disabled` is the
+single-server, lowest-cost choice. PostgreSQL **18** is a supported version.
 — <https://learn.microsoft.com/en-us/cli/azure/postgres/flexible-server>,
 <https://learn.microsoft.com/en-us/azure/postgresql/configure-maintain/quickstart-create-server>
 
-**[Inferred]** The exact pairing of `--tier Burstable` with
-`--sku-name Standard_B1ms` is assembled from two separately documented values;
-no single official example shows them together. Run
-`az postgres flexible-server list-skus --location "$LOC" -o table` to confirm
-availability in your region before relying on it.
+**[Verified]** `Standard_B1ms` appears literally in a doc example, `Burstable`
+is a documented `--tier` value, and "Workload type 'Development' uses Burstable
+SKUs". **[Inferred]** the exact pairing of the two: the doc's `Standard_B1ms`
+example pairs it with `--tier GeneralPurpose`. Confirm regional availability
+first:
+
+```bash
+az postgres flexible-server list-skus --location "$LOC" -o table
+```
 
 **[Verified]** Decisions you cannot change after creation: **storage type**,
 **backup redundancy / geo-redundancy**, **networking mode (public vs.
 private)**, and the **data encryption key**. Storage size can only be
-increased, never shrunk. Backup retention (7–35 days) can be changed. HA
-Disabled carries a 99.9% SLA and is the right cost choice here.
+increased, never shrunk. Backup retention (7–35 days) can be changed.
 
 **[Verified]** Version 18 matches `postgres:18.0-bookworm` in
 `deploy/compose.postgres.yml`, so migrations and behaviour match the
 repository's reference topology.
 
-Create the database and open the firewall:
+**[Verified]** `--public-access None` keeps the public endpoint but adds no
+firewall rules — the accepted values are "'Disabled', 'Enabled', 'All',
+'None', `<startIpAddress>`, or `<startIpAddress>-<endIpAddress>`". Add rules
+next.
+
+#### Firewall
 
 ```bash
-az postgres flexible-server db create \
-  --resource-group "$RG" --server-name "$PG" --database-name "$PGDB"
-
-# Your workstation, for migrations and role setup.
 MYIP="$(curl -s https://api.ipify.org)"
 az postgres flexible-server firewall-rule create \
   --resource-group "$RG" --server-name "$PG" \
@@ -461,9 +501,8 @@ az postgres flexible-server firewall-rule create \
   --start-ip-address "$MYIP" --end-ip-address "$MYIP"
 ```
 
-**[Verified]** `--end-ip-address` "Use value '0.0.0.0' to represent all
-Azure-internal IP addresses", which is how the "allow Azure services" rule is
-expressed:
+**[Verified]** For the "allow Azure services" rule, "`--end-ip-address` ... Use
+value '0.0.0.0' to represent all Azure-internal IP addresses."
 — <https://learn.microsoft.com/en-us/cli/azure/postgres/flexible-server/firewall-rule>
 
 ```bash
@@ -480,15 +519,43 @@ IPs might change over time"
 (<https://learn.microsoft.com/en-us/azure/container-apps/networking>). It is a
 real weakening: any Azure resource in any tenant can reach the listener, and
 only your passwords stand between it and the database. Use long random
-passwords, delete the rule when you are done testing, and prefer a VNet
--integrated environment with private access if you keep the instance around.
+passwords, delete the rule when you are done, and prefer a VNet-integrated
+environment with private access if you keep the instance around.
 
 #### Create Vistara's least-privilege database roles
 
 **[Verified from `deploy/postgres/init-runtime-roles.sh`]** the Compose
 topology creates a schema-owning migrator plus DDL-free API and worker logins.
-Azure cannot run that init script, so apply the equivalent by hand. Connect as
-the admin login you created above and run:
+Azure cannot run that init script, and Flexible Server is **not** a vanilla
+PostgreSQL install, so the ordering below matters.
+
+**[Verified]** what is different on Azure:
+
+- "In cloud-based PaaS environments, access to an Azure Database for PostgreSQL
+  superuser account is restricted to control plane operations only by cloud
+  operators. Therefore, the `azure_pg_admin` account exists as a
+  pseudo-superuser account. **Your administrator role is a member of the
+  `azure_pg_admin` role.**" The admin is explicitly **not** a superuser.
+- "In PostgreSQL 15 and later, the ownership of the public schema changed to
+  the new `pg_database_owner` role ... **However, in Azure Database for
+  PostgreSQL, this change doesn't apply. The public schema is owned by the
+  `azure_pg_admin` role across all supported PostgreSQL versions.**" So schema
+  -level `REVOKE`/`GRANT` must run as the **admin login**, not as the migrator,
+  even though the migrator owns the database.
+- "Newly created databases in Azure Database for PostgreSQL include a default
+  set of privileges in the database's public schema that grant all database
+  users and roles the ability to create objects ... consider revoking these
+  default public privileges." The `REVOKE CREATE ON SCHEMA public` below is
+  therefore load-bearing on Azure, not merely defensive.
+- "Don't use the administrator role for the application."
+
+— <https://learn.microsoft.com/en-us/azure/postgresql/security/security-access-control>
+
+**Step 1 — as the admin login, connected to `postgres`.** Connect with
+`psql "host=$PG.postgres.database.azure.com user=$PGADMIN dbname=postgres
+sslmode=require"`. Do not use `az postgres flexible-server db create`; it would
+create the database owned by the admin. Substitute your `$PGADMIN` value for
+`<admin-login>` and Key Vault passwords for the placeholders.
 
 ```sql
 CREATE ROLE vistara_migrator
@@ -504,12 +571,27 @@ CREATE ROLE vistara_worker_runtime
   NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
   IN ROLE vistara_worker;
 
+-- Required before the next two statements: PostgreSQL states "To create a
+-- database owned by another role, you must be able to SET ROLE to that role",
+-- and ALTER DEFAULT PRIVILEGES can only change "the defaults of roles that
+-- you are a member of".
+GRANT vistara_migrator TO "<admin-login>";
+
+CREATE DATABASE vistara OWNER vistara_migrator;
 REVOKE ALL ON DATABASE vistara FROM PUBLIC;
 GRANT CONNECT ON DATABASE vistara
   TO vistara_migrator, vistara_api_runtime, vistara_worker;
 ```
 
-Then, connected to the `vistara` database:
+**[Verified]** the two membership requirements are PostgreSQL's own: "To create
+a database owned by another role, you must be able to `SET ROLE` to that role"
+(<https://www.postgresql.org/docs/18/sql-createdatabase.html>) and "you can
+change your own default privileges and the defaults of roles that you are a
+member of" (<https://www.postgresql.org/docs/18/sql-alterdefaultprivileges.html>).
+
+**Step 2 — still as the admin login, now connected to `vistara`.** The admin
+is a member of `azure_pg_admin`, which owns `public`, so these succeed here and
+would fail as `vistara_migrator`.
 
 ```sql
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
@@ -523,171 +605,24 @@ ALTER DEFAULT PRIVILEGES FOR ROLE vistara_migrator IN SCHEMA public
   TO vistara_api_runtime, vistara_worker;
 ```
 
-**[Inferred]** The Compose script creates the database with
-`OWNER vistara_migrator`. On Flexible Server the database is created by
-`az postgres flexible-server db create` and owned by the admin login, so also
-run `ALTER DATABASE vistara OWNER TO vistara_migrator;` (or create the
-database with `CREATE DATABASE vistara OWNER vistara_migrator;` instead of the
-CLI command) before applying migrations, so that `ALTER DEFAULT PRIVILEGES FOR
-ROLE vistara_migrator` covers the tables the migrator actually creates.
+**[Inferred]** Keep the `GRANT vistara_migrator TO "<admin-login>"` membership
+in place. Revoking it would block any future `ALTER DEFAULT PRIVILEGES FOR ROLE
+vistara_migrator`, which you need whenever the runtime role set changes. The
+membership does not give the application anything: the app connects as
+`vistara_api_runtime` / `vistara_worker_runtime`, never as the admin.
 
-### 5.5 Managed identity and least-privilege RBAC
+**[Verified]** Also note the PostgreSQL 16 change Azure calls out: "users with
+the `CREATEROLE` attribute no longer have the ability to hand out membership in
+any role to anyone. Instead ... they can only hand out memberships in roles for
+which they possess `ADMIN OPTION`." Because the admin login **creates** all four
+roles above, it holds admin option on them and the `GRANT` succeeds. Creating
+the roles some other way may not behave the same.
 
-**Ordering note [Inferred]:** a system-assigned identity does not exist until
-the container app does. Read this section now, but run its commands **after**
-[§8.2](#82-deploy-the-api) and [§8.3](#83-deploy-the-worker) create the apps.
-Sections 5.6 and 5.7 are ordered the same way.
+**[Verified]** Trying to work around ownership by granting into the managed
+role fails by design: `GRANT <db_user> TO azure_pg_admin;` returns
+`ERROR: permission denied to alter restricted role "azure_pg_admin"`.
 
-**[Verified from `src/Vistara.Api/Composition/Media/MediaComposition.cs`]**
-`CreateAzureCredential()` returns `new DefaultAzureCredential()`, so a
-system-assigned managed identity on the container app is picked up with no
-secret at all. **[Verified]** "The Azure platform manages the identity, so you
-don't need to provision or rotate any secrets."
-— <https://learn.microsoft.com/en-us/azure/app-service/overview-managed-identity>
-
-Assign the identity, then grant it two roles:
-
-```bash
-az containerapp identity assign \
-  --name "$APIAPP" --resource-group "$RG" --system-assigned
-
-API_PRINCIPAL="$(az containerapp identity show \
-  --name "$APIAPP" --resource-group "$RG" --query principalId -o tsv)"
-
-STORAGE_ID="$(az storage account show \
-  --name "$STORAGE" --resource-group "$RG" --query id -o tsv)"
-
-# Data plane, scoped to the single container (least privilege).
-az role assignment create \
-  --assignee-object-id "$API_PRINCIPAL" --assignee-principal-type ServicePrincipal \
-  --role "Storage Blob Data Contributor" \
-  --scope "$STORAGE_ID/blobServices/default/containers/$CONTAINER"
-
-# Required so the app can mint user delegation SAS.
-az role assignment create \
-  --assignee-object-id "$API_PRINCIPAL" --assignee-principal-type ServicePrincipal \
-  --role "Storage Blob Delegator" \
-  --scope "$STORAGE_ID"
-```
-
-**[Verified]** Container-level scope is Microsoft's documented least-privilege
-pattern: "By limiting roles and scopes, you limit the resources that are at
-risk if the security principal is ever compromised."
-— <https://learn.microsoft.com/en-us/azure/storage/blobs/assign-azure-role-data-access>
-
-**[Verified]** The second assignment is not optional for Vistara.
-`src/Vistara.Storage.Azure/AzureSdkBlobClient.cs` calls
-`GetUserDelegationKeyAsync`, and Microsoft states: "Azure RBAC action:
-`Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey/action`;
-Least privileged built-in role: **Storage Blob Delegator**" and "If the
-security principal is assigned a role that permits data access but is scoped to
-the level of a container, you can additionally assign the Storage Blob
-Delegator role to that security principal at the level of the storage account,
-resource group, or subscription."
-— <https://learn.microsoft.com/en-us/rest/api/storageservices/get-user-delegation-key>
-
-Repeat the identity assignment and both role assignments for `$WORKERAPP`.
-
-**[Verified]** Creating role assignments requires
-`Microsoft.Authorization/roleAssignments/write` (RBAC Administrator or User
-Access Administrator).
-
-#### Least-privilege fallback when you cannot create role assignments
-
-If your account cannot write role assignments — common on a tenant you do not
-own — Vistara supports a shared-key fallback
-(**[Verified from `MediaComposition.cs`]**): set
-`Media__Storage__Azure__CredentialMode=SharedKey`, supply
-`Media__Storage__Azure__ConnectionString`, and set
-`Media__Storage__Azure__AllowSharedKeySas=true`. The validator rejects the
-combination unless **both** the connection string and the explicit opt-in are
-present, and rejects mixing either with `DefaultCredential`.
-
-**[Inferred]** Treat this as a downgrade of last resort: it reintroduces a
-long-lived account key, it is incompatible with
-`--allow-shared-key-access false`, and it replaces user-delegation SAS with
-shared-key SAS. Rotate the key when you are done
-(`az storage account keys renew --account-name "$STORAGE" --resource-group
-"$RG" --key primary`).
-
-**[Verified]** Managed identities "don't support cross-directory scenarios":
-moving the subscription to another tenant breaks them, and identity
-configuration is per deployment slot.
-
-### 5.6 Key Vault and secret hygiene
-
-Vistara still needs real secrets even with managed identity for blobs: the
-PostgreSQL passwords and the API key pepper.
-**[Verified from `deploy/generate-env.sh`]** the pepper is
-`openssl rand -base64 32` and the database passwords are 36 random URL-safe
-bytes. Generate them the same way; **do not** reuse the values in
-`deploy/env.example`, which are intentionally empty.
-
-```bash
-az keyvault create --name "$KV" --resource-group "$RG" --location "$LOC" \
-  --enable-rbac-authorization true
-
-az keyvault secret set --vault-name "$KV" --name vistara-api-pepper \
-  --value "$(openssl rand -base64 32 | tr -d '\n')"
-az keyvault secret set --vault-name "$KV" --name vistara-api-db-password \
-  --value "$(openssl rand -base64 36 | tr -d '\n' | tr '+/' '-_')"
-az keyvault secret set --vault-name "$KV" --name vistara-worker-db-password \
-  --value "$(openssl rand -base64 36 | tr -d '\n' | tr '+/' '-_')"
-az keyvault secret set --vault-name "$KV" --name vistara-migrator-db-password \
-  --value "$(openssl rand -base64 36 | tr -d '\n' | tr '+/' '-_')"
-```
-
-Container Apps can reference a vault secret directly. **[Verified]** the
-syntax is
-`keyvaultref:<KEY_VAULT_SECRET_URI>,identityref:<MANAGED_IDENTITY_ID>`, and
-the identity needs the **Key Vault Secrets User** role.
-— <https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets>
-
-**[Inferred]** `--enable-rbac-authorization true` above is required for the
-**Key Vault Secrets User** role to mean anything; a vault left in
-access-policy mode needs `az keyvault set-policy --secret-permissions get`
-instead. Grant the role, then wire the reference:
-
-```bash
-KV_ID="$(az keyvault show --name "$KV" --resource-group "$RG" --query id -o tsv)"
-az role assignment create \
-  --assignee-object-id "$API_PRINCIPAL" --assignee-principal-type ServicePrincipal \
-  --role "Key Vault Secrets User" --scope "$KV_ID"
-```
-
-```bash
-az containerapp secret set \
-  --name "$APIAPP" --resource-group "$RG" \
-  --secrets "api-db-password=keyvaultref:https://$KV.vault.azure.net/secrets/vistara-api-db-password,identityref:system"
-```
-
-**[Inferred]** `identityref:system` for a system-assigned identity — the doc's
-worked example uses a user-assigned identity resource ID. If it is rejected,
-create a user-assigned identity, grant it **Key Vault Secrets User**, attach
-it with `az containerapp identity assign --user-assigned`, and pass its
-resource ID.
-
-Hygiene rules for this repository:
-
-- **[Verified]** App settings "are securely encrypted at rest, but if you need
-  capabilities for managing secrets, they should go into a key vault."
-  — <https://learn.microsoft.com/en-us/azure/app-service/app-service-key-vault-references>
-- **[Verified]** App Service Key Vault references without a pinned version
-  refresh "within 24 hours"; the cache is refetched every 24 hours and any
-  configuration change forces an immediate refetch and app restart.
-- **[Verified from `SecurityComposition.cs`]** `Security__RequiredSecretKeys__N`
-  makes the API **fail to start** if a named configuration key is missing. Use
-  it as a deployment tripwire, for example
-  `Security__RequiredSecretKeys__0=Platform__Authentication__ApiKeys__Peppers__v1`.
-- Never put a secret in a resource name, a tag, a container image, or this
-  repository. `deploy/README.md`: "Do not copy example passwords into a
-  deployment."
-- **[Verified from `AzureBlobStoreOptions.ToString()`]** the adapter redacts
-  the connection string in diagnostics, but the `ConnectionStrings__Vistara`
-  value is a plain environment variable — reference it as a Container Apps
-  secret, not an inline `--env-vars` value.
-
-### 5.7 Container Apps environment
+### 5.5 Container Apps environment
 
 ```bash
 az provider register -n Microsoft.App --wait
@@ -697,20 +632,40 @@ az containerapp env create \
   --name "$ACAENV" --resource-group "$RG" --location "$LOC"
 ```
 
-— <https://learn.microsoft.com/en-us/cli/azure/containerapp/env>
+— <https://learn.microsoft.com/en-us/cli/azure/containerapp/env>,
+<https://learn.microsoft.com/en-us/cli/azure/provider>
 
-**[Inferred]** Omitting `--logs-workspace-id` lets Azure create a Log
-Analytics workspace. Log Analytics ingestion is billed separately and is a
-common surprise on a "free" subscription; pass `--logs-destination none` if
-you do not want it, and re-check your budget after the first day.
+**[Inferred]** Omitting `--logs-workspace-id` lets Azure create a Log Analytics
+workspace. Log Analytics ingestion is billed separately from the Container Apps
+free grant and is a common surprise on a "free" subscription; pass
+`--logs-destination none` if you do not want it, and re-check your budget after
+the first day.
+
+### 5.6 Identity, secrets, and registry credentials
+
+These steps live in the companion guide:
+
+- [Managed identity and blob RBAC](azure-identity-and-secrets.md#2-managed-identity-and-blob-rbac)
+  — including the **two** role assignments Vistara needs, one of which is only
+  discovered at runtime if you miss it.
+- [Key Vault and secret hygiene](azure-identity-and-secrets.md#4-key-vault-and-secret-hygiene)
+  — create the vault, grant yourself **Key Vault Secrets Officer** so
+  `secret set` works, write the pepper and database passwords, then grant the
+  apps **Key Vault Secrets User**.
+- [Private GHCR registry credentials](azure-identity-and-secrets.md#5-private-ghcr-registry-credentials)
+  — public packages need no credentials at all; private ones should be
+  referenced by secret name, never pasted on a command line.
+
+Create the Key Vault and its secrets now; do the role assignments after
+[§8](#8-migrations-deployment-and-validation) creates the apps.
 
 ---
 
 ## 6. Mapping Azure outputs to Vistara configuration keys
 
 All keys below were read from this repository's source. ASP.NET Core maps the
-`__` separator to configuration section nesting, which is why the Compose
-files use exactly these names.
+`__` separator to configuration section nesting, which is why the Compose files
+use exactly these names.
 
 | Vistara configuration key | Value from Azure | Source of truth |
 |---|---|---|
@@ -732,7 +687,7 @@ files use exactly these names.
 | `Security__Hosts__AllowedHosts__0` | your container app FQDN | `SecurityComposition.cs` |
 | `Security__Transport__RedirectHttpToHttps` | `false` (Container Apps ingress terminates TLS) | `SecurityComposition.cs`; mirrors `deploy/compose.postgres.yml` |
 | `Security__Proxy__ForwardLimit` | `1` | `SecurityComposition.cs` (valid range 1–10) |
-| `Security__Proxy__KnownProxies__N` / `KnownNetworks__N` | leave unset on Consumption; see the gap in [§13](#13-configuration-gaps-that-need-code-changes) | `SecurityComposition.ValidateProxy` |
+| `Security__Proxy__KnownProxies__N` / `KnownNetworks__N` | leave unset on Consumption; see [§13](#13-configuration-gaps-that-need-code-changes) | `SecurityComposition.ValidateProxy` |
 | `Security__RequiredSecretKeys__N` | startup tripwire for required secrets | `SecurityComposition.cs` |
 | `Platform__Authentication__ApiKeys__CurrentPepperVersion` | `v1` | `PlatformOptions.cs` |
 | `Platform__Authentication__ApiKeys__Peppers__v1` | Key Vault secret | `PlatformOptions.cs` |
@@ -836,7 +791,7 @@ az containerapp job create \
   --trigger-type Manual \
   --replica-timeout 900 --replica-retry-limit 0 \
   --cpu 0.5 --memory 1.0Gi \
-  --image "ghcr.io/$GHCR_NS/vistara-migrations:$IMAGE_TAG" \
+  --image "<registry>/vistara-migrations:$IMAGE_TAG" \
   --secrets "migrator-connection=<secret>" \
   --env-vars "MIGRATION_PROVIDER=PostgreSql" \
              "ConnectionStrings__Vistara=secretref:migrator-connection"
@@ -850,14 +805,14 @@ az containerapp job execution list --name "$MIGJOB" --resource-group "$RG" -o ta
 
 **[Inferred]** The migration image is built locally by
 `deploy/containers/migration.Dockerfile`; unlike the API and worker images it
-is **not** published by `.github/workflows/release-images.yml`. You must build
-and push it to a registry the environment can pull from before this job will
-run. **[Verified from `migration-entrypoint.sh`]** the entrypoint requires
-`ConnectionStrings__Vistara` (or `Persistence__ConnectionString`) and a
-`MIGRATION_PROVIDER` of `Sqlite` or `PostgreSql`, exiting `64` otherwise.
+is **not** published by `.github/workflows/release-images.yml`, so you must
+build and push it to a registry the environment can pull from first. See
+[§13](#13-configuration-gaps-that-need-code-changes).
 
-Use the **migrator** role in the job's connection string and the runtime roles
-everywhere else.
+**[Verified from `migration-entrypoint.sh`]** the entrypoint requires
+`ConnectionStrings__Vistara` (or `Persistence__ConnectionString`) and a
+`MIGRATION_PROVIDER` of `Sqlite` or `PostgreSql`, exiting `64` otherwise. Use
+the **`vistara_migrator`** role here and the runtime roles everywhere else.
 
 ### 8.2 Deploy the API
 
@@ -883,8 +838,16 @@ az containerapp create \
              "Platform__Authentication__ApiKeys__Peppers__v1=secretref:api-pepper"
 ```
 
-Then set the allowed host to the FQDN Azure assigned, and only then grant the
-identity its storage roles ([§5.5](#55-managed-identity-and-least-privilege-rbac)):
+**[Verified]** `--ingress` accepts only `external` or `internal`, and
+`--transport` accepts `auto`, `http`, `http2`, or `tcp`.
+— <https://learn.microsoft.com/en-us/cli/azure/containerapp>
+
+**[Verified]** `--min-replicas 0` with the default HTTP scale rule means "You
+aren't billed usage charges if your container app scales to zero." The
+documented default scale rule is HTTP with min 0 / max 10.
+— <https://learn.microsoft.com/en-us/azure/container-apps/scale-app>
+
+Set the allowed host to the FQDN Azure assigned:
 
 ```bash
 FQDN="$(az containerapp show --name "$APIAPP" --resource-group "$RG" \
@@ -898,21 +861,18 @@ must contain at least one exact DNS name or IP address, entries must be
 unique, and configured values replace rather than append to the defaults.
 Requests with any other `Host` header are rejected by host filtering.
 
-**[Verified]** `--min-replicas 0` with the default HTTP scale rule means "You
-aren't billed usage charges if your container app scales to zero."
-— <https://learn.microsoft.com/en-us/azure/container-apps/scale-app>
-
 ### 8.3 Deploy the worker
 
-Same image family, no ingress, and the worker-specific settings from
-[§6](#6-mapping-azure-outputs-to-vistara-configuration-keys):
+Omit `--ingress` entirely: **[Verified]** it accepts only `external` or
+`internal`, and a container app created without it has ingress disabled
+(`az containerapp ingress disable` turns it off later).
 
 ```bash
 az containerapp create \
   --name "$WORKERAPP" --resource-group "$RG" --environment "$ACAENV" \
   --image "ghcr.io/$GHCR_NS/vistara-worker:$IMAGE_TAG" \
   --cpu 0.5 --memory 1.0Gi \
-  --min-replicas 0 --max-replicas 1 \
+  --min-replicas 1 --max-replicas 1 \
   --system-assigned \
   --secrets "worker-db-connection=<secret>" \
   --env-vars "Persistence__Provider=PostgreSql" \
@@ -929,21 +889,28 @@ az containerapp create \
              "Worker__ImagingLimits__ScratchDirectory=/var/lib/vistara/scratch"
 ```
 
-**[Verified]** `--ingress` only accepts `external` or `internal`, so omit it
-entirely: a container app created without `--ingress` has ingress disabled
-(`az containerapp ingress disable` turns it off later).
-— <https://learn.microsoft.com/en-us/cli/azure/containerapp>
+> **[Verified]** The worker must not be left at `--min-replicas 0`. Microsoft
+> is explicit: "Make sure you create a scale rule or set minReplicas to 1 or
+> more if you don't enable ingress. **If ingress is disabled and you don't
+> define a minReplicas or a custom scale rule, your container app scales to
+> zero and has no way of starting back up.**"
+> — <https://learn.microsoft.com/en-us/azure/container-apps/scale-app>
 
-**[Inferred]** With no ingress and no scale rule, a worker at
-`--min-replicas 0` will never start. Set `--min-replicas 1` while you are
-actively testing and scale it back to `0` afterwards; see the free-grant
-arithmetic in [§3.2](#32-azure-container-apps-the-recommended-target).
+**[Inferred]** So the worker is `--min-replicas 1` while you are testing, and
+you scale it to `0` deliberately when you stop ([§9](#9-stop-start-and-actually-bound-the-bill)),
+accepting that it will not restart on its own. At 0.5 vCPU / 1.0 GiB a
+continuously running worker consumes the entire ≈ 100-hour free grant in about
+four days.
+
+Now grant both identities their roles —
+[azure-identity-and-secrets.md §2](azure-identity-and-secrets.md#2-managed-identity-and-blob-rbac)
+and [§4.3](azure-identity-and-secrets.md#43-grant-the-apps-read-access-and-reference-the-secrets)
+— and restart the apps so the new permissions take effect.
 
 ### 8.4 Validate
 
 ```bash
-# Liveness (204 No Content) and readiness.
-curl -i "https://$FQDN/health/live"
+curl -i "https://$FQDN/health/live"     # expect 204 No Content
 curl -i "https://$FQDN/health/ready"
 
 az containerapp logs show --name "$APIAPP" --resource-group "$RG" --tail 100
@@ -968,6 +935,11 @@ Startup failures are informative because the options validators run with
 | "Required secret configuration '<key>' is missing" | A `Security__RequiredSecretKeys__N` key has no value |
 | "Gallery sharing requires the configured Vistara persistence provider" | `Persistence__Provider` or `ConnectionStrings__Vistara` is unset |
 
+Authorization errors that appear only when a share link or direct upload is
+requested — rather than at startup — usually mean the missing
+`Storage Blob Delegator` assignment described in
+[azure-identity-and-secrets.md §2.2](azure-identity-and-secrets.md#22-grant-two-roles-not-one).
+
 **[Inferred]** If uploads work from the API but fail from the browser, check
 storage CORS. **[Verified]** `az storage cors add` has **no `--auth-mode`
 parameter**, so it needs an account key, connection string, or SAS — which
@@ -984,7 +956,9 @@ your server exists regardless of whether the server was active for the full
 hour ... If you create a server and delete it after five minutes, you are
 charged for one full hour." But: "While your server is stopped, you will only
 be billed for the storage you have provisioned and any backup storage ...
-While your server is stopped, you will not be billed for compute."
+While your server is stopped, you will not be billed for compute." Backup
+storage is free up to 100% of provisioned storage; beyond that it is billed per
+GiB-month, and "Standard networking charges apply for network egress."
 — <https://azure.microsoft.com/en-us/pricing/details/postgresql/flexible-server/>
 
 ```bash
@@ -995,14 +969,15 @@ az postgres flexible-server stop  --resource-group "$RG" --name "$PG"
 
 # Start of the next one.
 az postgres flexible-server start --resource-group "$RG" --name "$PG"
+az containerapp update --name "$WORKERAPP" --resource-group "$RG" --min-replicas 1
 ```
 
 — <https://learn.microsoft.com/en-us/cli/azure/postgres/flexible-server>
 
-**[Inferred]** Make this a habit, not an intention. Stopping the database and
-scaling both apps to zero is the only thing in this guide that reliably
-reduces spend; the budget from [§2](#2-budgets-and-alerts-they-do-not-cap-spend)
-only tells you afterwards.
+**[Inferred]** Make this a habit, not an intention. Create the database server
+once and stop it; do not delete and recreate it, because you are charged a full
+hour every time it exists. Restoring the worker to `--min-replicas 1` is part
+of starting up again — it will not wake by itself.
 
 ---
 
@@ -1018,105 +993,91 @@ complement, not a replacement:
 - **[Verified]** Backup retention is 7–35 days and is changeable after
   creation; backup **redundancy** is not.
   — <https://learn.microsoft.com/en-us/azure/postgresql/configure-maintain/quickstart-create-server>
-- **[Verified]** Backup storage is free up to 100% of provisioned storage;
-  beyond that it is billed per GiB-month.
 - **[Verified]** Blob soft delete, container soft delete, and versioning
   ([§5.3](#53-storage-account-and-media-container)) are Microsoft's
   recommended blob-side protection; they are not a substitute for an
   off-Azure copy of the media container.
 
-**[Inferred]** Free-account credits make it tempting to skip the restore
-drill. Do not: if the subscription is disabled at the 30-day cliff you lose
-access to both the database and the blobs at the same moment.
+**[Inferred]** Free-account credits make it tempting to skip the restore drill.
+Do not: if the subscription is disabled at the 30-day cliff you lose access to
+the database and the blobs at the same moment.
 
 ---
 
 ## 11. Teardown
 
-```bash
-# Remove role assignments scoped outside the resource group first.
-az role assignment delete \
-  --assignee-object-id "$API_PRINCIPAL" \
-  --role "Storage Blob Delegator" --scope "$STORAGE_ID"
+First remove the identity role assignments, using the guarded, re-derived
+script in
+[azure-identity-and-secrets.md §6](azure-identity-and-secrets.md#6-removing-identity-and-role-assignments).
+It must run **while the container apps still exist**, because it resolves their
+principal IDs.
 
+Then delete the group:
+
+```bash
 az group delete --name "$RG" --yes --no-wait
 ```
 
-**[Inferred]** The `az group delete` flags are standard CLI usage rather than
+**[Inferred]** These `az group delete` flags are standard CLI usage rather than
 a quoted example; see <https://learn.microsoft.com/en-us/cli/azure/group>.
-Deleting the group removes the resources inside it, but role assignments
-scoped **outside** it (subscription or another resource group) survive and
-must be deleted separately.
+Deleting the group removes the resources inside it, but any role assignment
+scoped **outside** it survives and must be deleted separately.
+
+Also delete the workstation and `allow-azure-services` firewall rules if you
+are keeping the server, and revoke the GHCR token if you created one.
 
 **[Verified]** For a total wind-down, "If you don't intend to use any Azure
 service, you can cancel your subscription."
 — <https://learn.microsoft.com/en-us/azure/cost-management-billing/manage/cancel-azure-subscription>
 
-Also delete the workstation firewall rule and any `allow-azure-services` rule
-before you stop watching the subscription.
-
 ---
 
-## 12. Cost and correctness traps
+## 12. Cost traps checklist
 
-1. **Budgets never stop spend.** **[Verified]** "Resources aren't affected, and
-   your consumption isn't stopped."
-2. **Cost Management lags.** **[Verified]** New subscriptions may need 48 hours
-   before budgets work; cost data lands in 8–24 hours; free-service usage lags
-   1–2 days. You can overspend a day before you see it.
-3. **The 30-day cliff.** **[Verified]** Credit expires after 30 days and the
-   subscription is disabled unless you move to pay-as-you-go — at which point
-   real charges begin.
-4. **The 12-month free services are once per customer, ever**, and are called
-   out as unavailable for pay-as-you-go in China and India. **[Verified]**
-5. **Free quantities do not roll over.** **[Verified]**
-6. **PostgreSQL is billed per full hour of existence**, even for a server that
-   lived five minutes. **[Verified]** Create it once; stop it, do not
-   recreate it.
-7. **Immutable PostgreSQL choices**: storage type, backup redundancy,
-   networking mode, encryption key. Storage can only grow. **[Verified]**
-8. **`0.0.0.0` firewall rules allow every Azure tenant**, not just yours.
-   **[Verified]** phrasing: "all Azure-internal IP addresses."
-9. **Disabling shared key access breaks service and account SAS** and
-   `az storage cors add`. **[Verified]**
-10. **Missing `Storage Blob Delegator`** produces authorization failures only
-    at SAS-minting time, not at startup, because Vistara calls
-    `GetUserDelegationKeyAsync` lazily. **[Verified from
-    `AzureSdkBlobClient.cs`]**
-11. **Log Analytics ingestion is billed separately** from the Container Apps
-    free grant. **[Inferred]**
-12. **Egress is billable** for PostgreSQL and generally. **[Verified]**
-13. **Two always-on minimal Container Apps replicas exceed the free monthly
-    grant.** **[Inferred]** — see [§3.2](#32-azure-container-apps-the-recommended-target).
-14. **Managed identities break across tenant or subscription moves.**
-    **[Verified]**
-15. **`az consumption budget` is in preview** and its simple `create` verb
-    cannot attach alert recipients. **[Verified]**
-16. **Visual Studio Dev/Test credits are explicitly not for production** and
-    disappear when the Visual Studio subscription lapses. **[Verified]**
-17. **Free-trial subscriptions cannot get quota increases.** **[Verified]**
+A short recall list. Each item is stated in full, with its citation, in the
+section linked beside it.
+
+| Trap | Detail |
+|---|---|
+| Budgets never stop spend | [§2](#2-budgets-and-alerts-they-do-not-cap-spend) |
+| 48-hour budget delay; 8–24 h cost data; 1–2 day free-usage lag | [§1.1](#11-the-azure-free-account), [§2](#2-budgets-and-alerts-they-do-not-cap-spend) |
+| The 30-day credit cliff and the 12-month, once-per-customer limit | [§1.1](#11-the-azure-free-account) |
+| Free monthly quantities do not roll over | [§1.1](#11-the-azure-free-account) |
+| No always-on replica fits the Container Apps free grant | [§3.2](#32-azure-container-apps-the-recommended-target) |
+| Log Analytics ingestion is billed outside that grant | [§5.5](#55-container-apps-environment) |
+| PostgreSQL is billed per full hour of **existence** | [§9](#9-stop-start-and-actually-bound-the-bill) |
+| Storage type, backup redundancy, networking mode, and encryption key are immutable | [§5.4](#54-postgresql-flexible-server) |
+| `0.0.0.0` firewall rules admit every Azure tenant | [§5.4](#54-postgresql-flexible-server) |
+| Disabling shared key access breaks service/account SAS and `az storage cors add` | [§5.3](#53-storage-account-and-media-container), [§8.4](#84-validate) |
+| Missing `Storage Blob Delegator` fails at SAS time, not startup | [azure-identity-and-secrets.md §2.2](azure-identity-and-secrets.md#22-grant-two-roles-not-one) |
+| A no-ingress worker at `minReplicas 0` can never restart | [§8.3](#83-deploy-the-worker) |
+| Egress is billable | [§9](#9-stop-start-and-actually-bound-the-bill) |
+| Managed identities break across tenant or subscription moves | [azure-identity-and-secrets.md §2.2](azure-identity-and-secrets.md#22-grant-two-roles-not-one) |
+| `az consumption budget` is preview and cannot attach recipients | [§2](#2-budgets-and-alerts-they-do-not-cap-spend) |
+| Dev/Test credits are not for production; free trials get no quota increases | [§1.2](#12-visual-studio-subscription-azure-devtest-individual-credit), [§1.1](#11-the-azure-free-account) |
 
 ---
 
 ## 13. Configuration gaps that need code changes
 
-These are limitations of the current codebase, not of Azure. They are recorded
-here so the guide does not document a capability that does not exist.
+Limitations of the current codebase, not of Azure. Recorded here so the guide
+does not document a capability that does not exist.
 
 1. **No Entra (passwordless) authentication to PostgreSQL.**
-   **[Verified]** every persistence path calls `options.UseNpgsql(connectionString)`
-   directly (`PersistenceServiceCollectionExtensions.cs`,
-   `GalleryComposition.cs`, `WorkerPlatformComposition.cs`,
+   **[Verified]** every persistence path calls
+   `options.UseNpgsql(connectionString)` directly
+   (`PersistenceServiceCollectionExtensions.cs`, `GalleryComposition.cs`,
+   `WorkerPlatformComposition.cs`,
    `JobPersistenceServiceCollectionExtensions.cs`,
    `TenantDbContextFactory.cs`, `VistaraDbContextFactory.cs`) with no
    `NpgsqlDataSource` password provider. Microsoft's guidance is that ".NET ...
    can get an access token for the managed identity ... Then you can use the
    access token as the password"
    (<https://learn.microsoft.com/en-us/azure/service-connector/how-to-integrate-postgres>),
-   and tokens expire, so a periodic password provider is required. **Until
-   that exists, Vistara on Azure must use PostgreSQL password
-   authentication**, which means `--password-auth Enabled` and real secrets in
-   Key Vault. Do not create the server with `--password-auth Disabled`.
+   and those tokens expire, so a periodic password provider is required.
+   **Until that exists, Vistara on Azure must use PostgreSQL password
+   authentication** and real secrets in Key Vault — see the warning in
+   [§5.4](#54-postgresql-flexible-server).
 2. **No configuration key for `AzureBlobStoreOptions.AllowedEndpointOrigins`.**
    **[Verified]** the adapter supports an endpoint allowlist, but
    `MediaAzureOptions` in `MediaComposition.cs` does not expose it. Only the
@@ -1124,14 +1085,14 @@ here so the guide does not document a capability that does not exist.
    configuration. That is fine for this guide and blocks Azurite-over-network
    or custom-endpoint scenarios.
 3. **No safe way to trust Container Apps' ingress forwarded headers.**
-   **[Verified]** `Security__Proxy__KnownProxies` requires literal IP
-   addresses and `KnownNetworks` requires CIDR blocks, but **[Verified]**
-   Container Apps states "Outbound IPs might change over time" and does not
-   publish a stable ingress source range for Consumption-only environments.
-   With neither set, `UseForwardedHeaders` does not trust `X-Forwarded-For`,
-   so client-IP rate-limit partitioning sees the ingress rather than the
-   caller. A VNet-integrated environment with a known infrastructure subnet
-   CIDR is the current workaround.
+   **[Verified]** `Security__Proxy__KnownProxies` requires literal IP addresses
+   and `KnownNetworks` requires CIDR blocks, but **[Verified]** Container Apps
+   states "Outbound IPs might change over time" and does not publish a stable
+   ingress source range for Consumption-only environments. With neither set,
+   `UseForwardedHeaders` does not trust `X-Forwarded-For`, so client-IP
+   rate-limit partitioning sees the ingress rather than the caller. A
+   VNet-integrated environment with a known infrastructure subnet CIDR is the
+   current workaround.
 4. **The migration image is not published.**
    **[Verified]** `.github/workflows/release-images.yml` pushes only
    `vistara-api` and `vistara-worker` to GHCR, while `deploy/README.md`
@@ -1167,24 +1128,20 @@ Compute:
 - <https://learn.microsoft.com/en-us/azure/app-service/overview-hosting-plans>
 - <https://learn.microsoft.com/en-us/azure/app-service/quickstart-dotnetcore>
 - <https://learn.microsoft.com/en-us/azure/app-service/configure-language-dotnetcore>
-- <https://learn.microsoft.com/en-us/azure/app-service/overview-managed-identity>
-- <https://learn.microsoft.com/en-us/azure/app-service/app-service-key-vault-references>
 - <https://learn.microsoft.com/en-us/azure/container-apps/billing>
 - <https://learn.microsoft.com/en-us/azure/container-apps/containers>
 - <https://learn.microsoft.com/en-us/azure/container-apps/scale-app>
 - <https://learn.microsoft.com/en-us/azure/container-apps/networking>
-- <https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets>
 
 Data and storage:
 
 - <https://learn.microsoft.com/en-us/azure/postgresql/configure-maintain/quickstart-create-server>
-- <https://learn.microsoft.com/en-us/azure/postgresql/security/security-entra-configure>
+- <https://learn.microsoft.com/en-us/azure/postgresql/security/security-access-control>
 - <https://azure.microsoft.com/en-us/pricing/details/postgresql/flexible-server/>
+- <https://www.postgresql.org/docs/18/sql-createdatabase.html>
+- <https://www.postgresql.org/docs/18/sql-alterdefaultprivileges.html>
 - <https://learn.microsoft.com/en-us/azure/storage/common/storage-account-create>
-- <https://learn.microsoft.com/en-us/azure/storage/common/shared-key-authorization-prevent>
 - <https://learn.microsoft.com/en-us/azure/storage/blobs/authorize-data-operations-cli>
-- <https://learn.microsoft.com/en-us/azure/storage/blobs/assign-azure-role-data-access>
-- <https://learn.microsoft.com/en-us/rest/api/storageservices/get-user-delegation-key>
 - <https://learn.microsoft.com/en-us/azure/service-connector/how-to-integrate-postgres>
 
 CLI reference:
@@ -1192,6 +1149,7 @@ CLI reference:
 - <https://learn.microsoft.com/en-us/cli/azure/reference-index>
 - <https://learn.microsoft.com/en-us/cli/azure/account>
 - <https://learn.microsoft.com/en-us/cli/azure/group>
+- <https://learn.microsoft.com/en-us/cli/azure/provider>
 - <https://learn.microsoft.com/en-us/cli/azure/consumption/budget>
 - <https://learn.microsoft.com/en-us/cli/azure/postgres/flexible-server>
 - <https://learn.microsoft.com/en-us/cli/azure/postgres/flexible-server/firewall-rule>
@@ -1202,6 +1160,9 @@ CLI reference:
 - <https://learn.microsoft.com/en-us/cli/azure/containerapp/job>
 - <https://learn.microsoft.com/en-us/cli/azure/containerapp/job/execution>
 - <https://learn.microsoft.com/en-us/entra/identity-platform/v2-protocols-oidc>
+
+Identity, RBAC, and secret sources are listed in
+[azure-identity-and-secrets.md](azure-identity-and-secrets.md).
 
 Repository sources of truth: `docs/specification.md`, `deploy/README.md`,
 `deploy/compose.postgres.yml`, `deploy/env.example`, `deploy/generate-env.sh`,
