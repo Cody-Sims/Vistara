@@ -14,10 +14,38 @@ public sealed class CryptographicCookieTokenSource : ICookieTokenSource
 /// </summary>
 public static class CookieAntiforgeryTokenFactory
 {
+    private const string DerivationLabel = "vistara.antiforgery.v1";
+
     public static string Create(ICookieTokenSource source)
     {
         ArgumentNullException.ThrowIfNull(source);
         return CookieTokenFormat.Create(source);
+    }
+
+    /// <summary>
+    /// Derives the antiforgery token for a browser session from the session
+    /// token itself. The result is stable, so every tab of one session holds
+    /// the same usable token and reading the session never invalidates one
+    /// that is already in flight. Only a caller that can read the session
+    /// cookie can compute it, which is exactly the property cross-site request
+    /// forgery lacks, and the derived value never equals the session token.
+    /// </summary>
+    public static string Derive(string sessionToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionToken);
+        byte[] material = System.Text.Encoding.UTF8.GetBytes(
+            string.Concat(DerivationLabel, "\u001f", sessionToken));
+        try
+        {
+            return Convert.ToBase64String(SHA256.HashData(material))
+                .TrimEnd('=')
+                .Replace('+', '-')
+                .Replace('/', '_');
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(material);
+        }
     }
 }
 

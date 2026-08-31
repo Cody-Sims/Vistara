@@ -116,6 +116,10 @@ internal sealed class PlatformBrowserSessionAdapter(
             membership,
             existingSessionToken: null,
             cancellationToken);
+        string sessionToken = ReadCookieValue(issued.Cookie.ToSetCookieHeader());
+        string antiforgeryToken =
+            await AlignAntiforgeryAsync(selected.TenantId, sessionToken, cancellationToken)
+            ?? issued.AntiforgeryToken;
         return Result.Success(new BrowserSessionResult(
             Describe(
                 user.Id.Value,
@@ -125,7 +129,7 @@ internal sealed class PlatformBrowserSessionAdapter(
                 membership.Role.ToString(),
                 candidates),
             issued.Cookie.ToSetCookieHeader(),
-            issued.AntiforgeryToken));
+            antiforgeryToken));
     }
 
     public async ValueTask<string> LogoutAsync(
@@ -148,27 +152,62 @@ internal sealed class PlatformBrowserSessionAdapter(
         string digest = CookieTokenCryptography.ComputeDigest(sessionToken);
         Guid? owner =
             await sessionFactory.FindSessionTenantAsync(digest, cancellationToken);
-        if (owner is not { } tenantId)
-        {
-            return null;
-        }
+        return owner is { } tenantId
+            ? await AlignAntiforgeryAsync(tenantId, sessionToken, cancellationToken)
+            : null;
+    }
 
+    /// <summary>
+    /// Returns the session's stable antiforgery token. The token is derived
+    /// from the session token, so concurrent readers compute the same value; a
+    /// write only happens when the stored digest does not already match, and a
+    /// lost race simply re-reads the now matching record. No reader can
+    /// invalidate a token another tab is using.
+    /// </summary>
+    private async ValueTask<string?> AlignAntiforgeryAsync(
+        Guid tenantId,
+        string sessionToken,
+        CancellationToken cancellationToken)
+    {
+        string derived = CookieAntiforgeryTokenFactory.Derive(sessionToken);
+        string derivedDigest = CookieTokenCryptography.ComputeDigest(derived);
+        string sessionDigest = CookieTokenCryptography.ComputeDigest(sessionToken);
         RelationalAuthenticationStore store = sessionFactory.CreateStore(tenantId);
-        PersistedCookieSession? session =
-            await store.FindCookieSessionAsync(digest, cancellationToken);
-        if (session is null || session.RevokedAtUtc.HasValue)
+        for (int attempt = 0; attempt < 3; attempt++)
         {
-            return null;
+            PersistedCookieSession? session =
+                await store.FindCookieSessionAsync(sessionDigest, cancellationToken);
+            if (session is null || session.RevokedAtUtc.HasValue)
+            {
+                return null;
+            }
+
+            if (string.Equals(
+                    session.AntiforgeryTokenDigest,
+                    derivedDigest,
+                    StringComparison.Ordinal))
+            {
+                return derived;
+            }
+
+            if (await store.RotateCookieAntiforgeryAsync(
+                    sessionDigest,
+                    session.Version,
+                    derivedDigest,
+                    clock.UtcNow,
+                    cancellationToken))
+            {
+                return derived;
+            }
         }
 
-        string token = sessionFactory.CreateAntiforgeryToken();
-        bool rotated = await store.RotateCookieAntiforgeryAsync(
-            digest,
-            session.Version,
-            CookieTokenCryptography.ComputeDigest(token),
-            clock.UtcNow,
-            cancellationToken);
-        return rotated ? token : null;
+        return null;
+    }
+
+    private static string ReadCookieValue(string setCookieHeader)
+    {
+        string first = setCookieHeader.Split(';')[0];
+        return first[(first.IndexOf('=', StringComparison.Ordinal) + 1)..];
     }
 
     public async ValueTask<Result<CurrentUserView>> DescribeAsync(

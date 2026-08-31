@@ -133,6 +133,20 @@ internal sealed class AccountSurfaceHarness : IAsyncDisposable
             System.Globalization.CultureInfo.InvariantCulture);
     }
 
+    /// <summary>Reads the stored antiforgery digest for a browser session.</summary>
+    internal async Task<string?> ReadAntiforgeryDigestAsync(string sessionToken)
+    {
+        string digest = CookieTokenCryptography.ComputeDigest(sessionToken);
+        await using var connection = new SqliteConnection(ConnectionString);
+        await connection.OpenAsync(default);
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT antiforgery_token_digest FROM cookie_sessions " +
+            "WHERE session_token_digest = $digest AND revoked_at_utc IS NULL";
+        command.Parameters.AddWithValue("$digest", digest);
+        return await command.ExecuteScalarAsync(default) as string;
+    }
+
     internal IdentityCatalogDbContext CreateCatalog() =>
         new(new DbContextOptionsBuilder<IdentityCatalogDbContext>()
             .UseSqlite(ConnectionString)
