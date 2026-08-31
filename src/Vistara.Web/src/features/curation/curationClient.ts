@@ -40,6 +40,11 @@ export type CurationClient = Pick<
  * Request  `{ items: [{ id, version }], action: { kind: 'trash', reason } }`
  * Answer   `[{ assetId, status, version?, errorCode? }]`
  * Statuses `trashed | versionConflict | notFound | invalidState`
+ *
+ * The API folds `alreadyTrashed` into `trashed` and `forbidden` into
+ * `notFound` before it answers, and omits `version` whenever it sends an
+ * `errorCode`. `alreadyTrashed` is still mapped here so a deployment that
+ * publishes it is read as an image that is already where it was asked to be.
  */
 export interface AssetMutationResult {
   readonly assetId: string;
@@ -93,6 +98,8 @@ export function outcomeForTrashStatus(status: string): CurationOutcome {
   switch (status) {
     case 'trashed':
       return 'updated';
+    case 'alreadyTrashed':
+      return 'unchanged';
     case 'versionConflict':
       return 'conflict';
     case 'notFound':
@@ -108,7 +115,9 @@ export function restorableReferences(
 ): readonly VersionedAssetReference[] {
   return results
     .filter(
-      (result) => result.status === 'trashed' && result.version !== undefined,
+      (result) =>
+        (result.status === 'trashed' || result.status === 'alreadyTrashed') &&
+        result.version !== undefined,
     )
     .map((result) => ({ id: result.assetId, version: result.version! }));
 }

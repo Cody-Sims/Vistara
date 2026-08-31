@@ -367,6 +367,88 @@ describe('curation actions', () => {
     expect(addAlbumItems.mock.calls[1]?.[2]).toMatchObject({ ifMatch: '"v8"' });
   });
 
+  it('reloads the asset versions too when an album change is refused', async () => {
+    const addAlbumItems = vi
+      .fn()
+      .mockRejectedValueOnce(apiError(412))
+      .mockResolvedValue({
+        data: { album: { ...album, version: 9 }, items: { items: [] } },
+      });
+    const client = makeClient({
+      addAlbumItems,
+      getAlbum: vi.fn(async () => ({
+        data: { album: { ...album, version: 8 }, items: { items: [] } },
+      })),
+      getAsset: vi.fn(async (id: string) =>
+        detail(asset({ id, version: 11 })),
+      ),
+    });
+    const { user } = renderActions({ client });
+
+    await user.click(screen.getByRole('button', { name: 'Albums' }));
+    const panel = await screen.findByRole('group', { name: 'Albums' });
+    await user.click(within(panel).getByRole('button', { name: 'Add to Summer' }));
+
+    await waitFor(() => expect(addAlbumItems).toHaveBeenCalledTimes(2));
+    expect(client.getAsset).toHaveBeenCalledWith('asset-1');
+    expect((addAlbumItems.mock.calls[1] as unknown[])[1]).toEqual({
+      items: [{ id: 'asset-1', version: 11 }],
+    });
+  });
+
+  it('never asks the API for more items than one batch may carry', async () => {
+    const many = Array.from({ length: 250 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}` }),
+    );
+    const client = makeClient({
+      bulkMutateAssets: vi.fn(async (request: { items: readonly unknown[] }) => ({
+        data: request.items.map((item) => ({
+          assetId: (item as { id: string }).id,
+          status: 'trashed',
+          version: 4,
+        })),
+      })),
+    });
+    const { user } = renderActions({ assets: many, client });
+
+    await user.click(screen.getByRole('button', { name: 'Move to trash' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Move to trash' }));
+
+    await waitFor(() =>
+      expect(client.bulkMutateAssets).toHaveBeenCalledTimes(2),
+    );
+    for (const call of client.bulkMutateAssets.mock.calls as unknown[][]) {
+      const request = call[0] as { items: readonly unknown[] };
+      expect(request.items.length).toBeLessThanOrEqual(200);
+    }
+    await waitFor(() =>
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent('Moved to trash: 250 images.'),
+    );
+  });
+
+  it('splits an album change into batches the API accepts', async () => {
+    const many = Array.from({ length: 250 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}` }),
+    );
+    const { client, user } = renderActions({ assets: many });
+
+    await user.click(screen.getByRole('button', { name: 'Albums' }));
+    const panel = await screen.findByRole('group', { name: 'Albums' });
+    await user.click(within(panel).getByRole('button', { name: 'Add to Summer' }));
+
+    await waitFor(() => expect(client.addAlbumItems).toHaveBeenCalledTimes(2));
+    for (const call of client.addAlbumItems.mock.calls as unknown[][]) {
+      const request = call[1] as { items: readonly unknown[] };
+      expect(request.items.length).toBeLessThanOrEqual(200);
+    }
+    // The second batch carries the version the first one produced.
+    const second = client.addAlbumItems.mock.calls[1] as unknown[];
+    expect(second[2]).toMatchObject({ ifMatch: '"v3"' });
+  });
+
   it('asks before moving images to the trash and can undo it', async () => {
     const onTrashed = vi.fn();
     const { client, user } = renderActions({ onTrashed });
@@ -409,6 +491,56 @@ describe('curation actions', () => {
     expect(screen.getByRole('status', { name: 'Curation result' })).toHaveTextContent(
       'Restore queued for 1 image.',
     );
+  });
+
+  it('takes focus to the undo and keeps the same live region', async () => {
+    const { user } = renderActions();
+
+    const before = screen.getByRole('status', { name: 'Curation result' });
+    await user.click(screen.getByRole('button', { name: 'Move to trash' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Move to trash' }));
+
+    const undo = await screen.findByRole('button', {
+      name: 'Undo move to trash',
+    });
+    await waitFor(() => expect(undo).toHaveFocus());
+    // The same element carried the message, so it is announced as an update.
+    expect(screen.getByRole('status', { name: 'Curation result' })).toBe(before);
+    expect(before).toHaveTextContent('Moved to trash: 1 image.');
+  });
+
+  it('traps the keyboard inside the confirmation', async () => {
+    const { user } = renderActions();
+
+    await user.click(screen.getByRole('button', { name: 'Move to trash' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.tab();
+    expect(dialog).toContainElement(document.activeElement);
+    await user.tab();
+    expect(dialog).toContainElement(document.activeElement);
+    await user.tab();
+    expect(dialog).toContainElement(document.activeElement);
+  });
+
+  it('marks Escape handled so a page behind it does not act on the key', async () => {
+    const seen: boolean[] = [];
+    const listener = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        seen.push(event.defaultPrevented);
+      }
+    };
+    window.addEventListener('keydown', listener);
+    try {
+      const { user } = renderActions();
+      await user.click(screen.getByRole('button', { name: 'Tags' }));
+      await screen.findByRole('group', { name: 'Tags' });
+      await user.keyboard('{Escape}');
+
+      expect(seen).toEqual([true]);
+    } finally {
+      window.removeEventListener('keydown', listener);
+    }
   });
 
   it('keeps the images when the confirmation is dismissed', async () => {

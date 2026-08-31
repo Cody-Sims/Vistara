@@ -73,6 +73,7 @@ describe('trash and restore boundary', () => {
 
   it('maps every status the lifecycle route publishes', () => {
     expect(outcomeForTrashStatus('trashed')).toBe('updated');
+    expect(outcomeForTrashStatus('alreadyTrashed')).toBe('unchanged');
     expect(outcomeForTrashStatus('versionConflict')).toBe('conflict');
     expect(outcomeForTrashStatus('notFound')).toBe('notFound');
     expect(outcomeForTrashStatus('invalidState')).toBe('failed');
@@ -85,8 +86,12 @@ describe('trash and restore boundary', () => {
         { assetId: 'a', status: 'trashed', version: 4 },
         { assetId: 'b', status: 'versionConflict', errorCode: 'x' },
         { assetId: 'c', status: 'trashed' },
+        { assetId: 'd', status: 'alreadyTrashed', version: 7 },
       ]),
-    ).toEqual([{ id: 'a', version: 4 }]);
+    ).toEqual([
+      { id: 'a', version: 4 },
+      { id: 'd', version: 7 },
+    ]);
   });
 
   it('restores with the versions the trash answered with', async () => {

@@ -15,9 +15,11 @@ import type {
   Tag,
   VersionedAssetReference,
 } from '../../api/generated/models';
+import { useDialogFocusTrap } from '../../accessibility/focus';
 import { isStaleVersion, versionTag } from '../../api/versionTag';
 import { StatusMessage } from '../../components';
 import { useSession } from '../session';
+import type { AssetMutationResult } from './curationClient';
 import {
   restorableReferences,
   restoreTrashedAssets,
@@ -71,6 +73,18 @@ interface ListState<T> {
 }
 
 const idle: ListState<never> = { kind: 'loading', items: [] };
+
+/** The API accepts at most 200 references in one batch. */
+const maximumBatch = 200;
+
+function batches<T>(items: readonly T[]): readonly (readonly T[])[] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += maximumBatch) {
+    chunks.push(items.slice(index, index + maximumBatch));
+  }
+
+  return chunks.length > 0 ? chunks : [[]];
+}
 
 function defaultKey(): string {
   return globalThis.crypto?.randomUUID?.() ?? `web-${Date.now()}`;
@@ -188,13 +202,27 @@ export function CurationActions({
   const [tags, setTags] = useState<ListState<Tag>>(idle);
   const [albums, setAlbums] = useState<ListState<AlbumSummary>>(idle);
 
+  /** Bumped when a finished action should take focus to its report. */
+  const [focusReport, setFocusReport] = useState(0);
   const tagsTrigger = useRef<HTMLButtonElement>(null);
   const albumsTrigger = useRef<HTMLButtonElement>(null);
   const trashTrigger = useRef<HTMLButtonElement>(null);
   const confirmButton = useRef<HTMLButtonElement>(null);
+  const confirmDialog = useRef<HTMLDivElement>(null);
+  const undoButton = useRef<HTMLButtonElement>(null);
+  const summaryRef = useRef<HTMLParagraphElement>(null);
 
   const scope = targets.map((target) => target.id).join('|');
-  const shown = outcome?.key === scope ? outcome : undefined;
+  /**
+   * The outcome stays while any image it describes is still in hand. A partial
+   * trash leaves the images it could not move selected, and their result, and
+   * the undo for the ones that did move, belong with them.
+   */
+  const inScope = new Set(targets.map((target) => target.id));
+  const shown =
+    outcome && outcome.key.split('|').some((id) => inScope.has(id))
+      ? outcome
+      : undefined;
   const summary = shown?.summary;
   const details = shown?.details ?? [];
   const undoable = shown?.undoable ?? [];
@@ -257,7 +285,7 @@ export function CurationActions({
   }, [panel]);
 
   useEffect(() => {
-    if (panel === undefined && !confirming) {
+    if (panel === undefined) {
       return;
     }
 
@@ -266,25 +294,33 @@ export function CurationActions({
         return;
       }
 
+      // Marked handled before it reaches a page that also listens for Escape.
       event.preventDefault();
-      if (confirming) {
-        setConfirming(false);
-        trashTrigger.current?.focus();
-        return;
-      }
-
       closePanel();
     };
 
-    window.addEventListener('keydown', handle);
-    return () => window.removeEventListener('keydown', handle);
-  }, [closePanel, confirming, panel]);
+    document.addEventListener('keydown', handle, true);
+    return () => document.removeEventListener('keydown', handle, true);
+  }, [closePanel, panel]);
+
+  // The trap restores focus to whatever opened the confirmation, so dismissing
+  // it only has to close it.
+  const dismissConfirm = useCallback(() => setConfirming(false), []);
+
+  useDialogFocusTrap({
+    dialogRef: confirmDialog,
+    initialFocusRef: confirmButton,
+    onDismiss: dismissConfirm,
+    open: confirming,
+  });
 
   useEffect(() => {
-    if (confirming) {
-      confirmButton.current?.focus();
+    if (focusReport === 0) {
+      return;
     }
-  }, [confirming]);
+
+    (undoButton.current ?? summaryRef.current)?.focus();
+  }, [focusReport]);
 
   async function runOverTargets(
     action: string,
@@ -384,25 +420,6 @@ export function CurationActions({
    */
   async function changeAlbum(value: AlbumSummary, add: boolean) {
     setBusy(true);
-    const items = toVersionedReferences(targets);
-    const call = (album: AlbumSummary) =>
-      add
-        ? client.addAlbumItems(
-            album.id,
-            { items },
-            {
-              idempotencyKey: createIdempotencyKey(),
-              ifMatch: versionTag(album.version),
-            },
-          )
-        : client.removeAlbumItems(
-            album.id,
-            { items },
-            {
-              idempotencyKey: createIdempotencyKey(),
-              ifMatch: versionTag(album.version),
-            },
-          );
     const action = add ? `Added to ${value.name}` : `Removed from ${value.name}`;
     const every = (outcome: CurationItemResult['outcome']) =>
       targets.map((target) => ({
@@ -410,30 +427,52 @@ export function CurationActions({
         title: target.title,
         outcome,
       }));
+    const call = (
+      album: AlbumSummary,
+      items: readonly VersionedAssetReference[],
+    ) =>
+      (add ? client.addAlbumItems : client.removeAlbumItems).call(
+        client,
+        album.id,
+        { items },
+        {
+          idempotencyKey: createIdempotencyKey(),
+          ifMatch: versionTag(album.version),
+        },
+      );
 
     let album = value;
-    let updated;
-    try {
-      updated = (await call(album)).data.album;
-    } catch (error) {
-      if (!isStaleVersion(error)) {
-        const status = statusOf(error);
-        report(action, every(status === 404 ? 'notFound' : 'failed'));
-        setBusy(false);
-        return;
+    let updated = value;
+    for (const batch of batches(toVersionedReferences(targets))) {
+      try {
+        updated = (await call(album, batch)).data.album;
+      } catch (error) {
+        if (!isStaleVersion(error)) {
+          const status = statusOf(error);
+          report(action, every(status === 404 ? 'notFound' : 'failed'));
+          setBusy(false);
+          return;
+        }
+
+        /**
+         * `412` answers a stale `If-Match` on the album and a stale version on
+         * any asset in the batch, so both are read again before the single
+         * retry: reusing the versions in hand would fail the same way.
+         */
+        try {
+          album = (await client.getAlbum(album.id)).data.album;
+          updated = (await call(album, await refreshed(batch))).data.album;
+        } catch {
+          report(action, every('conflict'));
+          setBusy(false);
+          return;
+        }
       }
 
-      try {
-        album = (await client.getAlbum(album.id)).data.album;
-        updated = (await call(album)).data.album;
-      } catch {
-        report(action, every('conflict'));
-        setBusy(false);
-        return;
-      }
+      album = updated;
     }
 
-    const covered = add ? await ensureCover(album, updated) : updated;
+    const covered = add ? await ensureCover(value, updated) : updated;
     setAlbums((current) => ({
       kind: current.kind,
       items: current.items.map((item) =>
@@ -443,6 +482,24 @@ export function CurationActions({
     report(action, every('updated'));
     setBusy(false);
     onCurated?.([]);
+  }
+
+  /** Reads the version each asset is on now, dropping any that disappeared. */
+  async function refreshed(items: readonly VersionedAssetReference[]) {
+    const current = await Promise.all(
+      items.map(async (item) => {
+        try {
+          const asset = (await client.getAsset(item.id)).data.asset;
+          return { id: asset.id, version: asset.version };
+        } catch {
+          return undefined;
+        }
+      }),
+    );
+
+    return current.filter(
+      (item): item is VersionedAssetReference => item !== undefined,
+    );
   }
 
   /**
@@ -504,58 +561,67 @@ export function CurationActions({
   async function confirmTrash() {
     setBusy(true);
     setConfirming(false);
-    const answer = await trashAssets(
-      client,
-      toVersionedReferences(trashable),
-      reason,
-      createIdempotencyKey(),
-    ).catch(() => undefined);
-    setReason('');
+    const items = toVersionedReferences(trashable);
+    const titles = new Map(trashable.map((target) => [target.id, target.title]));
+    const answers: AssetMutationResult[] = [];
+    let queued = 0;
 
-    if (!answer) {
-      report(
-        'Moved to trash',
-        trashable.map((target) => ({
-          id: target.id,
-          title: target.title,
-          outcome: 'failed' as const,
-        })),
-      );
-      setBusy(false);
-      trashTrigger.current?.focus();
-      return;
+    for (const batch of batches(items)) {
+      try {
+        const answer = await trashAssets(
+          client,
+          batch,
+          reason,
+          createIdempotencyKey(),
+        );
+        if (answer.kind === 'queued') {
+          queued += answer.job.submittedCount;
+        } else {
+          answers.push(...answer.results);
+        }
+      } catch {
+        for (const item of batch) {
+          answers.push({ assetId: item.id, status: 'failed' });
+        }
+      }
     }
 
-    if (answer.kind === 'queued') {
+    setReason('');
+    if (queued > 0 && answers.length === 0) {
       setOutcome({
         key: scope,
         summary: {
-          message: `Move to trash queued for ${answer.job.submittedCount} images.`,
+          message: `Move to trash queued for ${
+            queued === 1 ? '1 image' : `${queued} images`
+          }.`,
           tone: 'success',
         },
         details: [],
         undoable: [],
       });
       setBusy(false);
-      onTrashed?.(trashable.map((target) => target.id), []);
+      onTrashed?.(
+        trashable.map((target) => target.id),
+        [],
+      );
       return;
     }
 
-    const titles = new Map(trashable.map((target) => [target.id, target.title]));
-    const results = answer.results.map((result) => ({
+    const results = answers.map((result) => ({
       id: result.assetId,
       title: titles.get(result.assetId) ?? result.assetId,
       outcome: outcomeForTrashStatus(result.status),
     }));
-    const restorable = restorableReferences(answer.results);
+    const restorable = restorableReferences(answers);
     report('Moved to trash', results, restorable);
     setBusy(false);
-    onTrashed?.(
-      results
-        .filter((result) => result.outcome === 'updated')
-        .map((result) => result.id),
-      restorable,
-    );
+    const gone = results
+      .filter((result) => result.outcome === 'updated')
+      .map((result) => result.id);
+    onTrashed?.(gone, restorable);
+    if (gone.length > 0) {
+      setFocusReport((current) => current + 1);
+    }
   }
 
   async function undoTrash() {
@@ -601,7 +667,9 @@ export function CurationActions({
         aria-live="polite"
         className={styles.summary}
         data-tone={summary?.tone}
+        ref={summaryRef}
         role="status"
+        tabIndex={-1}
       >
         {summary?.message ?? ''}
       </p>
@@ -610,6 +678,7 @@ export function CurationActions({
           className={styles.action}
           disabled={busy}
           onClick={() => void undoTrash()}
+          ref={undoButton}
           type="button"
         >
           Undo move to trash
@@ -635,29 +704,13 @@ export function CurationActions({
   }
 
   /**
-   * Once every asset has left the library there is nothing left to act on,
-   * but what happened to them, and the undo, still belong on screen.
+   * Once every asset has left the library there is nothing left to act on, so
+   * the controls go, but what happened to them, and the undo, stay. The report
+   * keeps its place in the tree either way, so the live region is updated
+   * rather than replaced with its message already in it.
    */
-  if (actionable.length === 0) {
-    return (
-      <section
-        aria-busy={busy}
-        aria-label="Curation actions"
-        className={styles.bar}
-        role="group"
-      >
-        {reportNode}
-      </section>
-    );
-  }
-
-  return (
-    <section
-      aria-busy={busy}
-      aria-label="Curation actions"
-      className={styles.bar}
-      role="group"
-    >
+  const controls = actionable.length === 0 ? null : (
+    <>
       <p className={styles.count}>
         {targets.length === 1
           ? '1 image selected'
@@ -870,6 +923,7 @@ export function CurationActions({
           aria-labelledby={headingId}
           aria-modal="true"
           className={styles.confirm}
+          ref={confirmDialog}
           role="dialog"
         >
           <h3 id={headingId}>
@@ -900,10 +954,7 @@ export function CurationActions({
             </button>
             <button
               className={styles.action}
-              onClick={() => {
-                setConfirming(false);
-                trashTrigger.current?.focus();
-              }}
+              onClick={dismissConfirm}
               type="button"
             >
               Keep images
@@ -912,6 +963,17 @@ export function CurationActions({
         </div>
       ) : null}
 
+    </>
+  );
+
+  return (
+    <section
+      aria-busy={busy}
+      aria-label="Curation actions"
+      className={styles.bar}
+      role="group"
+    >
+      {controls}
       {reportNode}
     </section>
   );
