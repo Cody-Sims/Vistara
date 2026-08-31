@@ -193,7 +193,7 @@ public sealed class OidcIdTokenValidator
         // character.
         if (!FixedTimeEquals(nonce, context.ExpectedNonce) ||
             !IsFreshIssueTime(validated) ||
-            !HasMatchingAccessTokenHash(claims, context.AccessToken))
+            !HasMatchingAccessTokenHash(claims, validated.Alg, context.AccessToken))
         {
             return Result.Failure<OidcIdentity>(OidcErrors.InvalidIdToken);
         }
@@ -286,8 +286,19 @@ public sealed class OidcIdTokenValidator
     /// <summary>
     /// Binds the identity token to the access token that arrived with it, so a
     /// token pair cannot be assembled from two different responses.
+    ///
+    /// OpenID Connect Core 3.1.3.6 derives the hash from the signing algorithm,
+    /// not from a fixed digest: an RS384 or ES384 token uses SHA-384 and an
+    /// RS512 or ES512 token uses SHA-512. Hard-coding SHA-256 would silently
+    /// reject every valid token signed with a larger algorithm, and an
+    /// implementation that fell back to "accept" on a hash it could not
+    /// compute would drop the binding altogether. An algorithm with no defined
+    /// hash therefore fails closed.
     /// </summary>
-    private static bool HasMatchingAccessTokenHash(Claim[] claims, string? accessToken)
+    private static bool HasMatchingAccessTokenHash(
+        Claim[] claims,
+        string? algorithm,
+        string? accessToken)
     {
         if (accessToken is null ||
             !TryGetSingleStringClaim(claims, JwtRegisteredClaimNames.AtHash, out string atHash))
@@ -295,16 +306,54 @@ public sealed class OidcIdTokenValidator
             return true;
         }
 
+        if (!TryGetHashAlgorithm(algorithm, out HashAlgorithmName hashAlgorithm))
+        {
+            return false;
+        }
+
         byte[] material = Encoding.ASCII.GetBytes(accessToken);
         try
         {
-            byte[] digest = SHA256.HashData(material);
-            string expected = Base64UrlEncoder.Encode(digest.AsSpan(0, digest.Length / 2).ToArray());
+            byte[] digest = CryptographicOperations.HashData(hashAlgorithm, material);
+            string expected = Base64UrlEncoder.Encode(
+                digest.AsSpan(0, digest.Length / 2).ToArray());
             return FixedTimeEquals(atHash, expected);
         }
         finally
         {
             CryptographicOperations.ZeroMemory(material);
+        }
+    }
+
+    /// <summary>
+    /// Maps a JWS signing algorithm to the digest its token hashes use. Only
+    /// the asymmetric families this library allows are mapped; anything else,
+    /// including a symmetric or absent algorithm, has no answer here.
+    /// </summary>
+    private static bool TryGetHashAlgorithm(string? algorithm, out HashAlgorithmName hash)
+    {
+        hash = default;
+        if (algorithm is not { Length: 5 } ||
+            !(algorithm.StartsWith("RS", StringComparison.Ordinal) ||
+                algorithm.StartsWith("PS", StringComparison.Ordinal) ||
+                algorithm.StartsWith("ES", StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        switch (algorithm.AsSpan(2))
+        {
+            case "256":
+                hash = HashAlgorithmName.SHA256;
+                return true;
+            case "384":
+                hash = HashAlgorithmName.SHA384;
+                return true;
+            case "512":
+                hash = HashAlgorithmName.SHA512;
+                return true;
+            default:
+                return false;
         }
     }
 
