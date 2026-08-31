@@ -144,11 +144,20 @@ test.describe('cookie session curation', () => {
     const albumCard = page.locator('a', { hasText: albumName }).first();
     await expect(albumCard).toBeVisible();
     await expect(albumCard.locator('img')).toBeVisible();
-    await expect
-      .poll(async () =>
-        albumCard.locator('img').getAttribute('src'),
-      )
-      .toContain('/');
+
+    // A cover is only proof if the browser can actually fetch its bytes from
+    // the same cookie session, so the delivered rendition is read back.
+    const coverSource = await albumCard.locator('img').getAttribute('src');
+    expect(coverSource).toBeTruthy();
+    const cover = await page.evaluate(async (source: string) => {
+      const response = await fetch(source, { credentials: 'same-origin' });
+      return {
+        status: response.status,
+        bytes: (await response.arrayBuffer()).byteLength,
+      };
+    }, coverSource!);
+    expect(cover.status).toBe(200);
+    expect(cover.bytes).toBeGreaterThan(0);
 
     await findInLibrary();
     await page.getByLabel(`Select ${title}`).click();
