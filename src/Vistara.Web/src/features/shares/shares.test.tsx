@@ -211,14 +211,14 @@ describe('public shares', () => {
             height: 800,
             renditions: [
               {
-                kind: 'thumbnail',
+                kind: 'thumb',
                 path: '/media/share-480.webp',
                 width: 480,
                 height: 320,
                 contentType: 'image/webp',
               },
               {
-                kind: 'display',
+                kind: 'viewer',
                 path: '/media/share-1200.webp',
                 width: 1200,
                 height: 800,
@@ -352,14 +352,14 @@ describe('public shares', () => {
             height: 800,
             renditions: [
               {
-                kind: 'thumbnail',
+                kind: 'thumb',
                 path: '/media/share-480.webp',
                 width: 480,
                 height: 320,
                 contentType: 'image/webp',
               },
               {
-                kind: 'display',
+                kind: 'viewer',
                 path: '/media/share-1200.webp',
                 width: 1200,
                 height: 800,

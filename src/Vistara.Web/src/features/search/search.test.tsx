@@ -26,14 +26,14 @@ function asset(id: string, title: string): AssetSummary {
     tags: [],
     renditions: [
       {
-        kind: 'thumbnail',
+        kind: 'thumb',
         path: `/media/thumb/${id}.webp`,
         width: 400,
         height: 300,
         contentType: 'image/webp',
       },
       {
-        kind: 'display',
+        kind: 'viewer',
         path: `/media/display/${id}.webp`,
         width: 1200,
         height: 900,

@@ -67,7 +67,7 @@ export interface AssetListQuery {
 }
 
 export interface AssetRendition {
-  readonly kind: "thumbnail" | "preview" | "display";
+  readonly kind: "thumb" | "grid" | "viewer" | "download-web" | "original";
   /** Same-origin application path; never a provider URL or storage key. */
   readonly path: string;
   readonly width: number;

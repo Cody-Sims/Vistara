@@ -618,7 +618,7 @@ public static class AssetEndpoint
                         break;
                     case "visibility":
                         hasVisibility = true;
-                        visibility = property.Value.GetString();
+                        visibility = ReadVisibility(property.Value.GetString());
                         break;
                     case "capturedAt":
                         hasCapturedAt = true;
@@ -661,6 +661,16 @@ public static class AssetEndpoint
             return null;
         }
     }
+
+    /// <summary>
+    /// The contract publishes and accepts the documented lower-camel visibility
+    /// tokens, while the store keeps the domain enum name, so an update is
+    /// translated once here instead of leaking either casing across the seam.
+    /// </summary>
+    private static string ReadVisibility(string? token) =>
+        AssetContractVocabulary.TryReadVisibility(token, out string storedValue)
+            ? storedValue
+            : throw new JsonException("An unsupported visibility was supplied.");
 
     private static bool TryReadIfMatch(
         StringValues values,

@@ -305,7 +305,7 @@ export function FavoritesView({ client }: FavoritesViewProps) {
           <ul className={styles.grid}>
             {assets.map((asset) => {
               const thumbnail = asset.renditions.find(
-                (rendition) => rendition.kind === 'thumbnail',
+                (rendition) => rendition.kind === 'thumb',
               );
               return (
                 <li key={asset.id} className={styles.card}>

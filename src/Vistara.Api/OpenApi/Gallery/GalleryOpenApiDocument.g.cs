@@ -6368,15 +6368,23 @@ public static class GalleryOpenApiDocument
             "oneOf": [
               {
                 "type": "string",
-                "const": "thumbnail"
+                "const": "thumb"
               },
               {
                 "type": "string",
-                "const": "preview"
+                "const": "grid"
               },
               {
                 "type": "string",
-                "const": "display"
+                "const": "viewer"
+              },
+              {
+                "type": "string",
+                "const": "download-web"
+              },
+              {
+                "type": "string",
+                "const": "original"
               }
             ]
           },

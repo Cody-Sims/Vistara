@@ -37,14 +37,14 @@ function asset(index: number, status: AssetSummary['status'] = 'ready') {
       status === 'ready'
         ? [
             {
-              kind: 'thumbnail',
+              kind: 'thumb',
               path: `/media/${index}-512.jpg`,
               width: 512,
               height: 384,
               contentType: 'image/jpeg',
             },
             {
-              kind: 'preview',
+              kind: 'grid',
               path: `/media/${index}-1024.webp`,
               width: 1024,
               height: 768,
