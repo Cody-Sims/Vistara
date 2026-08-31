@@ -42,7 +42,7 @@ An ASP.NET Core Minimal API under `/api/v1` covering:
 | Uploads | `POST /api/v1/uploads`, `PUT /api/v1/uploads/{id}/content`, `POST /api/v1/uploads/{id}/parts`, `POST /api/v1/uploads/{id}/commit`, `DELETE /api/v1/uploads/{id}` |
 | Derivatives | `GET /api/v1/derivative-presets`, `GET/POST /api/v1/assets/{id}/derivatives` |
 | Delivery | `GET` and `HEAD` on `/media/{pipeline}/{sourceHash}/{recipeHash}.{ext}`, `/delivery/{pipeline}/{sourceHash}/{recipeHash}.{ext}`, `/delivery/assets/{assetId}/{renditionId}`, and `/api/v1/assets/{id}/original` |
-| Sharing | `/api/v1/shares`, `GET /api/v1/public/shares/{token}`, `POST /api/v1/public/shares/{token}/challenge` |
+| Sharing | `/api/v1/shares`, `GET /api/v1/public/shares/{token}`, `POST /api/v1/public/shares/{token}/challenge`, `GET` and `HEAD` on `/api/v1/public/shares/{token}/assets/{assetId}/renditions/{renditionId}` |
 | Lifecycle | `GET /api/v1/trash`, `POST /api/v1/trash/restore`, `POST /api/v1/trash/purge`, `POST /api/v1/trash/purge/{batchId}/confirm` |
 | Jobs | `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/retry`, `POST /api/v1/jobs/{id}/cancel` |
 | Tenancy and keys | `/api/v1/tenants`, `/api/v1/tenants/{id}/members`, `/api/v1/api-keys` |

@@ -557,6 +557,7 @@ They never accept arbitrary operation chains.
 - `GET/POST /api/v1/shares`
 - `GET/PATCH/DELETE /api/v1/shares/{id}`
 - `GET /api/v1/public/shares/{token}`
+- `GET|HEAD /api/v1/public/shares/{token}/assets/{assetId}/renditions/{renditionId}`
 - `POST /api/v1/public/shares/{token}/challenge`
 - `GET /api/v1/trash`
 - `POST /api/v1/trash/restore`
