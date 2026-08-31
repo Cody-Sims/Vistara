@@ -532,7 +532,61 @@ describe('storage administration client', () => {
     expect(init?.method).toBe('POST');
     expect(String(init?.body)).toContain('super-secret-value');
     expect(result.valid).toBe(true);
-    expect(JSON.stringify(client)).not.toContain('super-secret-value');
+
+    // The credential travelled once. Every later request is observed for it:
+    // no body, no header, and no query string may carry it again.
+    fetch.mockImplementation(async () => jsonResponse({ items: [] }));
+    await client.getStorageSummary();
+    await client.getStorageValidationSupport();
+    await client.listApiKeys();
+    await client.validateStorage({
+      provider: 'filesystem',
+      filesystem: { rootPath: '/srv/vistara/media' },
+    });
+
+    const laterCalls = fetch.mock.calls.slice(2);
+    expect(laterCalls.length).toBeGreaterThan(3);
+    for (const [target, request] of laterCalls) {
+      expect(String(target)).not.toContain('super-secret-value');
+      expect(String(request?.body ?? '')).not.toContain('super-secret-value');
+      for (const [, value] of new Headers(request?.headers)) {
+        expect(value).not.toContain('super-secret-value');
+      }
+    }
+  });
+
+  it('replays nothing from a rejected validation', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(jsonResponse(currentUser))
+      .mockResolvedValueOnce(problemResponse(422, 'storage_validation.invalid_request'))
+      .mockImplementation(async () =>
+        jsonResponse({ supported: true, providers: ['s3'] }),
+      );
+    const client = new PlatformApiClient({ fetch });
+
+    await client
+      .validateStorage({
+        provider: 'azureBlob',
+        azureBlob: {
+          accountName: 'vistaramedia',
+          container: 'originals',
+          credentialKind: 'accountKey',
+          accountKey: 'rejected-account-key',
+        },
+      })
+      .catch(() => undefined);
+    await client.getStorageValidationSupport();
+
+    const afterFailure = fetch.mock.calls.slice(2);
+    expect(afterFailure).not.toHaveLength(0);
+    for (const [target, request] of afterFailure) {
+      expect(String(target)).not.toContain('rejected-account-key');
+      expect(String(request?.body ?? '')).not.toContain('rejected-account-key');
+      for (const [, value] of new Headers(request?.headers)) {
+        expect(value).not.toContain('rejected-account-key');
+      }
+    }
   });
 });
 

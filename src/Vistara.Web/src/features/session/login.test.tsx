@@ -276,6 +276,11 @@ describe('credential handling', () => {
       ...new Headers(call[1]?.headers).entries(),
     ]);
     expect(headers.map(([, value]) => value).join('|')).not.toContain(password);
+    expect(fetch.mock.calls.map((call) => String(call[0])).join('|')).not.toContain(
+      password,
+    );
+    expect(JSON.stringify(localStorage)).not.toContain(password);
+    expect(JSON.stringify(sessionStorage)).not.toContain(password);
   });
 
   it('removes the password from the form as soon as it is submitted', async () => {

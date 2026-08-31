@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type {
   ApiKeyCollection,
@@ -163,22 +163,32 @@ function ReadingPreferences({ client }: { readonly client: SettingsClient }) {
     data: UserPreferences;
     etag?: string;
   }>(load);
-  const [applied, setApplied] = useState<UserPreferences>();
+  // Which stored document has been applied to the device, tracked in a ref so
+  // publishing to the preference store never schedules a React update here.
+  const applied = useRef<UserPreferences>(undefined);
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState('');
   const [confirmation, setConfirmation] = useState('');
 
   // The account's stored preferences win when they arrive or are reloaded, and
-  // are applied to the document so every view honours them immediately. A save
-  // does not re-run this, so a just-made choice is never reverted.
-  if (state.kind === 'ready' && applied !== state.value.data) {
-    setApplied(state.value.data);
+  // are applied to the document so every view honours them immediately. This
+  // publishes to a store other components subscribe to, so it happens after
+  // the render rather than during it. A save does not re-run it, so a
+  // just-made choice is never reverted.
+  const stored = state.kind === 'ready' ? state.value.data : undefined;
+
+  useEffect(() => {
+    if (!stored || applied.current === stored) {
+      return;
+    }
+
+    applied.current = stored;
     setPreferences({
-      density: state.value.data.density,
-      reducedMotion: state.value.data.reducedMotion,
-      screenReaderPagedMode: state.value.data.screenReaderPagedMode,
+      density: stored.density,
+      reducedMotion: stored.reducedMotion,
+      screenReaderPagedMode: stored.screenReaderPagedMode,
     });
-  }
+  }, [stored]);
 
   async function save(patch: UpdateUserPreferencesRequest) {
     setPreferences({
@@ -292,7 +302,7 @@ function ReadingPreferences({ client }: { readonly client: SettingsClient }) {
             type="button"
             onClick={() => {
               setFailure('');
-              setApplied(undefined);
+              applied.current = undefined;
               reload();
             }}
           >

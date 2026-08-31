@@ -208,15 +208,22 @@ export function AdminStoragePage({ client }: AdminStoragePageProps) {
       ? providers.filter((provider) => testable.includes(provider.kind))
       : providers;
 
-  if (
-    testable.length > 0 &&
-    !offered.some((provider) => provider.kind === draft.provider)
-  ) {
-    updateStorageDraft({ provider: offered[0]!.kind });
-    setProblems([]);
-    setTest({ kind: 'idle' });
-    setTemplate(undefined);
-  }
+  // Selecting a provider publishes to the draft store, so the reconciliation
+  // runs after the render that learned which providers are testable.
+  const firstOffered = offered[0]?.kind;
+  const providerOffered = offered.some(
+    (provider) => provider.kind === draft.provider,
+  );
+
+  useEffect(() => {
+    if (testable.length === 0 || providerOffered || !firstOffered) {
+      return;
+    }
+
+    // Only the draft store is touched: this runs before the operator has
+    // entered anything, so there is no local state to reset.
+    updateStorageDraft({ provider: firstOffered });
+  }, [firstOffered, providerOffered, testable.length]);
 
   // A template describes one exact configuration; an edit withdraws it.
   if (template && templateDraft && templateDraft !== draft) {

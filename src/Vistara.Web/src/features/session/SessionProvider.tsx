@@ -65,6 +65,34 @@ export function SessionProvider({
   }));
   const request = useRef(0);
   const [signOutIncomplete, setSignOutIncomplete] = useState(false);
+  // The identity the caches on this device belong to.
+  const cachedIdentity = useRef<string | undefined>(undefined);
+
+  const endAccount = useCallback(
+    () => Promise.resolve(onSessionEnd?.() ?? clearAccountScopedData()),
+    [onSessionEnd],
+  );
+
+  /**
+   * Account-scoped caches belong to exactly one signed-in identity. Whenever
+   * the resolved identity changes — a different user signs in, or the session
+   * is gone — everything the previous account left behind is dropped before
+   * the new state is published.
+   */
+  const adoptIdentity = useCallback(
+    async (identity: string | undefined) => {
+      if (cachedIdentity.current === identity) {
+        return;
+      }
+
+      const hadAccount = cachedIdentity.current !== undefined;
+      cachedIdentity.current = identity;
+      if (hadAccount) {
+        await endAccount();
+      }
+    },
+    [endAccount],
+  );
 
   const applyResolved = useCallback(
     async (options: { announcePending?: boolean } = {}) => {
@@ -78,11 +106,14 @@ export function SessionProvider({
       }
 
       const next = await resolveSession(client);
-      if (request.current === id) {
-        setState(next);
+      if (request.current !== id) {
+        return;
       }
+
+      await adoptIdentity(next.user?.userId);
+      setState(next);
     },
-    [client, mode],
+    [adoptIdentity, client, mode],
   );
 
   useEffect(() => {
@@ -91,26 +122,30 @@ export function SessionProvider({
     }
 
     const id = ++request.current;
-    void resolveSession(client).then((next) => {
-      if (request.current === id) {
-        setState(next);
+    void resolveSession(client).then(async (next) => {
+      if (request.current !== id) {
+        return;
       }
+
+      await adoptIdentity(next.user?.userId);
+      setState(next);
     });
 
     return () => {
       request.current += 1;
     };
-  }, [client, mode]);
+  }, [adoptIdentity, client, mode]);
 
   const signIn = useCallback(
     async (credentials: LoginRequest) => {
       const session = await client.login(credentials);
       setSignOutIncomplete(false);
       request.current += 1;
+      await adoptIdentity(session.user.userId);
       setState({ status: 'authenticated', user: session.user });
       return session.user;
     },
-    [client],
+    [adoptIdentity, client],
   );
 
   const signOut = useCallback(async () => {
@@ -125,9 +160,10 @@ export function SessionProvider({
     }
 
     setSignOutIncomplete(!confirmed);
+    cachedIdentity.current = undefined;
     setState({ status: 'anonymous' });
-    await (onSessionEnd?.() ?? clearAccountScopedData());
-  }, [client, onSessionEnd]);
+    await endAccount();
+  }, [client, endAccount]);
 
   const value = useMemo<SessionContextValue>(() => {
     const membership = activeMembership(state.user);
