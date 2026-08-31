@@ -194,13 +194,21 @@ public interface IMediaRuntimeDependencies
     TokenCredential CreateAzureCredential();
 
     /// <summary>
-    /// Creates the credential for the validated Azure credential mode. The
-    /// selection is explicit, so a managed-identity deployment never falls back
-    /// to a developer credential chain.
+    /// Creates the credential for the validated Azure credential mode. An
+    /// implementation that does not override this method only supplies the
+    /// development credential, so every other mode fails instead of silently
+    /// downgrading a managed-identity deployment to a developer credential
+    /// chain.
     /// </summary>
     TokenCredential CreateAzureCredential(MediaAzureOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
+        if (options.CredentialMode != MediaAzureCredentialMode.DefaultCredential)
+        {
+            throw new NotSupportedException(
+                $"Azure credential mode '{options.CredentialMode}' requires a media runtime dependency that selects the credential from the configured mode.");
+        }
+
         return CreateAzureCredential();
     }
 
@@ -604,16 +612,15 @@ internal sealed class MediaOptionsValidator(IHostEnvironment? environment = null
     }
 
     /// <summary>
-    /// Decides whether the environment is deployed rather than local. A
-    /// deployed API or worker must bind an explicit identity, so an ambient
-    /// developer credential chain is only reachable through a reviewed opt-in.
-    /// A composition that publishes no host environment cannot prove it is
-    /// local, so it is treated as deployed.
+    /// Decides whether the environment must review an ambient developer
+    /// credential before it is used. Only an explicit development environment
+    /// is exempt: an unnamed, absent, or custom environment such as
+    /// <c>Test</c>, <c>QA</c>, or <c>Preview</c> cannot prove it is local, so
+    /// it fails closed and reaches a developer credential chain only through
+    /// the reviewed opt-in.
     /// </summary>
     private bool RequiresReviewedDefaultCredential() =>
-        environment is null ||
-        environment.IsProduction() ||
-        environment.IsStaging();
+        environment is null || !environment.IsDevelopment();
 
     private static bool SelectedProviderIsConfigured(MediaStorageOptions options) =>
         options.Provider switch

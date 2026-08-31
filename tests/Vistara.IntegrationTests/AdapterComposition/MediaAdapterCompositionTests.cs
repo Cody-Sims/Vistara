@@ -148,25 +148,6 @@ public sealed class MediaAdapterCompositionTests
 
     [Theory]
     [MemberData(nameof(Roles))]
-    public async Task Azure_default_credentials_are_rejected_in_deployed_environments(
-        CompositionRole role)
-    {
-        const string expected =
-            "Azure default credentials are limited to local development";
-        await AssertInvalidOptionsAsync(
-            role,
-            AzureDefaultCredentialSettings(),
-            Environments.Production,
-            expected);
-        await AssertInvalidOptionsAsync(
-            role,
-            AzureDefaultCredentialSettings(),
-            Environments.Staging,
-            expected);
-    }
-
-    [Theory]
-    [MemberData(nameof(Roles))]
     public async Task Azure_default_credentials_require_a_reviewed_deployment_opt_in(
         CompositionRole role)
     {
@@ -183,6 +164,133 @@ public sealed class MediaAdapterCompositionTests
         await host.StartAsync();
 
         Assert.Equal("DefaultCredential", runtime.LastAzureCredentialMode);
+    }
+
+    private static readonly string?[] ReviewedEnvironmentNames =
+    [
+        Environments.Production,
+        Environments.Staging,
+        "Test",
+        "QA",
+        "Preview",
+        "Local",
+        "",
+        null,
+    ];
+
+    public static TheoryData<CompositionRole, string?> DeployedEnvironments
+    {
+        get
+        {
+            TheoryData<CompositionRole, string?> data = [];
+            foreach (CompositionRole role in new[]
+            {
+                CompositionRole.Api,
+                CompositionRole.Worker,
+            })
+            {
+                foreach (string? environmentName in ReviewedEnvironmentNames)
+                {
+                    data.Add(role, environmentName);
+                }
+            }
+
+            return data;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(DeployedEnvironments))]
+    public async Task Azure_default_credentials_are_rejected_outside_development(
+        CompositionRole role,
+        string? environmentName)
+    {
+        await AssertInvalidOptionsAsync(
+            role,
+            AzureDefaultCredentialSettings(),
+            environmentName,
+            "Azure default credentials are limited to local development");
+    }
+
+    [Theory]
+    [MemberData(nameof(Roles))]
+    public async Task Azure_default_credentials_stay_available_in_development_only(
+        CompositionRole role)
+    {
+        foreach (string environmentName in new[] { "Development", "development" })
+        {
+            var runtime = new FakeRuntimeDependencies();
+            using IHost host = BuildHost(
+                role,
+                AzureDefaultCredentialSettings(),
+                runtime,
+                new FakeAzureBlobClientFactory(),
+                environmentName);
+
+            await host.StartAsync();
+
+            Assert.Equal("DefaultCredential", runtime.LastAzureCredentialMode);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(DeployedEnvironments))]
+    public async Task Managed_identity_needs_no_review_in_any_environment(
+        CompositionRole role,
+        string? environmentName)
+    {
+        var runtime = new FakeRuntimeDependencies();
+        using IHost host = BuildHost(
+            role,
+            AzureSettings(),
+            runtime,
+            new FakeAzureBlobClientFactory(),
+            environmentName);
+
+        await host.StartAsync();
+
+        Assert.Equal("ManagedIdentity", runtime.LastAzureCredentialMode);
+    }
+
+    [Theory]
+    [MemberData(nameof(Roles))]
+    public async Task Runtime_dependencies_without_mode_awareness_cannot_serve_managed_identity(
+        CompositionRole role)
+    {
+        var runtime = new AmbientOnlyRuntimeDependencies();
+        using IHost host = BuildHost(
+            role,
+            AzureSettings(),
+            runtime,
+            new FakeAzureBlobClientFactory(),
+            Environments.Production);
+
+        NotSupportedException error =
+            await Assert.ThrowsAsync<NotSupportedException>(
+                async () => await host.StartAsync());
+
+        Assert.Contains("ManagedIdentity", error.Message, StringComparison.Ordinal);
+        Assert.Equal(0, runtime.AmbientCredentialRequests);
+        Assert.Null(runtime.LastCredential);
+    }
+
+    [Theory]
+    [MemberData(nameof(Roles))]
+    public async Task Runtime_dependencies_without_mode_awareness_still_serve_development(
+        CompositionRole role)
+    {
+        var runtime = new AmbientOnlyRuntimeDependencies();
+        using IHost host = BuildHost(
+            role,
+            AzureDefaultCredentialSettings(),
+            runtime,
+            new FakeAzureBlobClientFactory(),
+            Environments.Development);
+
+        await host.StartAsync();
+
+        Assert.Equal(1, runtime.AmbientCredentialRequests);
+        Assert.IsType<DefaultAzureCredential>(runtime.LastCredential);
     }
 
     [Theory]
@@ -636,7 +744,7 @@ public sealed class MediaAdapterCompositionTests
     private static IHost BuildHost(
         CompositionRole role,
         IReadOnlyDictionary<string, string?> settings,
-        FakeRuntimeDependencies runtime,
+        object runtime,
         IAzureBlobClientFactory? azureFactory = null,
         string? environmentName = null,
         RecordingLoggerProvider? loggerProvider = null)
@@ -661,13 +769,15 @@ public sealed class MediaAdapterCompositionTests
         switch (role)
         {
             case CompositionRole.Api:
-                builder.Services.AddSingleton<ApiMedia.IMediaRuntimeDependencies>(runtime);
+                builder.Services.AddSingleton(
+                    (ApiMedia.IMediaRuntimeDependencies)runtime);
                 ApiMedia.MediaServiceCollectionExtensions.AddVistaraMedia(
                     builder.Services,
                     builder.Configuration);
                 break;
             case CompositionRole.Worker:
-                builder.Services.AddSingleton<WorkerMedia.IMediaRuntimeDependencies>(runtime);
+                builder.Services.AddSingleton(
+                    (WorkerMedia.IMediaRuntimeDependencies)runtime);
                 WorkerMedia.MediaServiceCollectionExtensions.AddVistaraMedia(
                     builder.Services,
                     builder.Configuration);
@@ -962,6 +1072,35 @@ public sealed class MediaAdapterCompositionTests
             LastManagedIdentityClientId = clientId;
             return new FakeTokenCredential();
         }
+    }
+
+    /// <summary>
+    /// A runtime dependency that only implements the ambient development seam.
+    /// It stands in for a custom composition that has not adopted the
+    /// mode-aware factory.
+    /// </summary>
+    private sealed class AmbientOnlyRuntimeDependencies :
+        ApiMedia.IMediaRuntimeDependencies,
+        WorkerMedia.IMediaRuntimeDependencies
+    {
+        public int AmbientCredentialRequests { get; private set; }
+
+        public TokenCredential? LastCredential { get; private set; }
+
+        public AWSCredentials CreateS3Credentials(ApiMedia.MediaS3Options options) =>
+            new AnonymousAWSCredentials();
+
+        public AWSCredentials CreateS3Credentials(WorkerMedia.MediaS3Options options) =>
+            new AnonymousAWSCredentials();
+
+        public TokenCredential CreateAzureCredential()
+        {
+            AmbientCredentialRequests++;
+            LastCredential = new DefaultAzureCredential();
+            return LastCredential;
+        }
+
+        public IImageProcessor CreateImageProcessor() => new FakeImageProcessor();
     }
 
     private sealed class RecordingLoggerProvider : ILoggerProvider
