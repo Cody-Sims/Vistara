@@ -53,6 +53,30 @@ public sealed class AdminAdministrationTests
     }
 
     [Fact]
+    public async Task Storage_usage_is_aggregated_in_the_database()
+    {
+        await using AccountSurfaceHarness harness =
+            await AccountSurfaceHarness.CreateAsync();
+        ProvisionedOwnerView owner = await harness.ProvisionAsync();
+        await SeedManyBlobsAsync(harness, owner.TenantId, owner.UserId, 400);
+
+        await using VistaraDbContext context = harness.CreateContext(owner.TenantId);
+        var store = new RelationalAdminStore(context);
+        string sql = context.Blobs
+            .Where(row => context.AssetRevisions.Any(
+                revision => revision.BlobId == row.Id))
+            .ToQueryString();
+        PersistedStorageUsage usage =
+            await store.ReadStorageUsageAsync(owner.TenantId, default);
+
+        Assert.Equal(400, usage.OriginalObjects);
+        Assert.Equal(400 * 10, usage.OriginalBytes);
+        Assert.Equal(400, usage.DerivativeObjects);
+        Assert.Equal(400 * 3, usage.DerivativeBytes);
+        Assert.Contains("EXISTS", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Policies_default_when_the_tenant_stored_none()
     {
         await using AccountSurfaceHarness harness =
@@ -250,8 +274,8 @@ public sealed class AdminAdministrationTests
         Guid derivativeBlobId = Guid.CreateVersion7();
         Guid assetId = Guid.CreateVersion7();
         await using VistaraDbContext context = harness.CreateContext(tenantId);
-        context.Blobs.Add(Blob(tenantId, originalBlobId, 1_000));
-        context.Blobs.Add(Blob(tenantId, derivativeBlobId, 250));
+        context.Blobs.Add(Blob(tenantId, originalBlobId, 1_000, 1));
+        context.Blobs.Add(Blob(tenantId, derivativeBlobId, 250, 2));
         await context.SaveChangesAsync(default);
         context.Assets.Add(new AssetRow
         {
@@ -283,14 +307,65 @@ public sealed class AdminAdministrationTests
         await context.SaveChangesAsync(default);
     }
 
-    private static BlobRow Blob(Guid tenantId, Guid id, long size) => new()
+    private static async Task SeedManyBlobsAsync(
+        AccountSurfaceHarness harness,
+        Guid tenantId,
+        Guid ownerId,
+        int count)
+    {
+        await using VistaraDbContext context = harness.CreateContext(tenantId);
+        var assetId = Guid.CreateVersion7();
+        context.Assets.Add(new AssetRow
+        {
+            Id = assetId,
+            TenantId = tenantId,
+            OwnerId = ownerId,
+            Status = "Ready",
+            Visibility = "Private",
+            Title = "Seed",
+            CreatedAtUtc = Now,
+            UpdatedAtUtc = Now,
+            Version = 1,
+        });
+        var originals = new List<Guid>(count);
+        for (int index = 0; index < count; index++)
+        {
+            Guid originalId = Guid.CreateVersion7();
+            originals.Add(originalId);
+            context.Blobs.Add(Blob(tenantId, originalId, 10, index * 2));
+            context.Blobs.Add(Blob(tenantId, Guid.CreateVersion7(), 3, (index * 2) + 1));
+        }
+
+        await context.SaveChangesAsync(default);
+        for (int index = 0; index < count; index++)
+        {
+            context.AssetRevisions.Add(new AssetRevisionRow
+            {
+                Id = Guid.CreateVersion7(),
+                TenantId = tenantId,
+                AssetId = assetId,
+                RevisionNumber = index + 1,
+                BlobId = originals[index],
+                DetectedFormat = "Jpeg",
+                DetectedContentType = "image/jpeg",
+                Width = 10,
+                Height = 10,
+                FrameCount = 1,
+                CreatedAtUtc = Now,
+            });
+        }
+
+        await context.SaveChangesAsync(default);
+    }
+
+    private static BlobRow Blob(Guid tenantId, Guid id, long size, int seed = 0) => new()
     {
         Id = id,
         TenantId = tenantId,
         Provider = "local",
         Container = "media",
         ObjectKey = $"tenants/{tenantId:N}/{id:N}.bin",
-        Sha256 = new string('a', 64),
+        Sha256 = seed.ToString("x64", System.Globalization.CultureInfo.InvariantCulture),
         SizeBytes = size,
         ContentType = "image/jpeg",
         State = "Active",

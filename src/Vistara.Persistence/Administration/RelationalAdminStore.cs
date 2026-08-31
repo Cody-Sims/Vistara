@@ -70,16 +70,16 @@ public sealed class RelationalAdminStore(VistaraDbContext context)
     {
         RequireScope(tenantId);
         TenantKey key = tenantId;
-        Guid[] originalBlobIds = await _context.AssetRevisions
-            .AsNoTracking()
-            .Where(row => row.TenantId == key)
-            .Select(row => row.BlobId)
-            .Distinct()
-            .ToArrayAsync(cancellationToken);
 
-        var originals = await _context.Blobs
+        // Classification runs as a correlated EXISTS in the database. Nothing
+        // proportional to the tenant's object count is ever materialized.
+        IQueryable<BlobRow> blobs = _context.Blobs
             .AsNoTracking()
-            .Where(row => row.TenantId == key && originalBlobIds.Contains(row.Id))
+            .Where(row => row.TenantId == key);
+        var originals = await blobs
+            .Where(row => _context.AssetRevisions
+                .Any(revision =>
+                    revision.TenantId == key && revision.BlobId == row.Id))
             .GroupBy(_ => 1)
             .Select(group => new
             {
@@ -87,9 +87,10 @@ public sealed class RelationalAdminStore(VistaraDbContext context)
                 Count = group.LongCount(),
             })
             .SingleOrDefaultAsync(cancellationToken);
-        var others = await _context.Blobs
-            .AsNoTracking()
-            .Where(row => row.TenantId == key && !originalBlobIds.Contains(row.Id))
+        var others = await blobs
+            .Where(row => !_context.AssetRevisions
+                .Any(revision =>
+                    revision.TenantId == key && revision.BlobId == row.Id))
             .GroupBy(_ => 1)
             .Select(group => new
             {

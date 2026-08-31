@@ -71,6 +71,10 @@ public readonly record struct AdminCursor(
                 NumberStyles.AllowLeadingSign,
                 CultureInfo.InvariantCulture,
                 out long ticks) ||
+            // A tick count outside the representable range would throw while
+            // rebuilding the instant, so it is rejected as a bad cursor here.
+            ticks < 0 ||
+            ticks > DateTime.MaxValue.Ticks ||
             !Guid.TryParseExact(parts[3], "N", out Guid id))
         {
             return false;
