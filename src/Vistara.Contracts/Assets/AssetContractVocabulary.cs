@@ -28,18 +28,39 @@ public static class AssetContractVocabulary
         ["thumb", "grid", "viewer", "download-web", "original"];
 
     /// <summary>
+    /// The documented <c>AssetQueryStatus</c> tokens. The gallery list,
+    /// timeline, and facet queries never return trashed or purged assets, so
+    /// only the browsable statuses are filterable.
+    /// </summary>
+    public static IReadOnlyList<string> QueryStatuses { get; } =
+        ["processing", "ready", "failed"];
+
+    /// <summary>
     /// Translates a documented visibility token back to the stored enum name so
     /// mutations accept exactly the values the contract publishes.
     /// </summary>
-    public static bool TryReadVisibility(string? token, out string storedValue)
+    public static bool TryReadVisibility(string? token, out string storedValue) =>
+        TryReadStored(token, Visibilities, out storedValue);
+
+    /// <summary>
+    /// Translates a documented query status token back to the stored enum name
+    /// so filters accept exactly the values the contract publishes.
+    /// </summary>
+    public static bool TryReadQueryStatus(string? token, out string storedValue) =>
+        TryReadStored(token, QueryStatuses, out storedValue);
+
+    private static bool TryReadStored(
+        string? token,
+        IReadOnlyList<string> documented,
+        out string storedValue)
     {
-        foreach (string documented in Visibilities)
+        foreach (string candidate in documented)
         {
-            if (string.Equals(documented, token, StringComparison.Ordinal))
+            if (string.Equals(candidate, token, StringComparison.Ordinal))
             {
                 storedValue = string.Concat(
-                    char.ToUpperInvariant(documented[0]).ToString(),
-                    documented[1..]);
+                    char.ToUpperInvariant(candidate[0]).ToString(),
+                    candidate[1..]);
                 return true;
             }
         }
@@ -48,13 +69,13 @@ public static class AssetContractVocabulary
         return false;
     }
 
+    /// <summary>
+    /// Fails closed: a projection that carries a value outside the published
+    /// vocabulary is a contract defect, and silently lower-casing it would hide
+    /// exactly the drift this vocabulary exists to prevent.
+    /// </summary>
     internal static string Publish(string? value, IReadOnlyList<string> documented)
     {
-        if (string.IsNullOrEmpty(value))
-        {
-            return string.Empty;
-        }
-
         foreach (string candidate in documented)
         {
             if (string.Equals(candidate, value, StringComparison.OrdinalIgnoreCase))
@@ -63,11 +84,9 @@ public static class AssetContractVocabulary
             }
         }
 
-        return char.IsUpper(value[0])
-            ? string.Concat(
-                char.ToLowerInvariant(value[0]).ToString(),
-                value[1..])
-            : value;
+        throw new JsonException(
+            $"'{value}' is not a documented gallery token; " +
+            $"expected one of {string.Join(", ", documented)}.");
     }
 }
 

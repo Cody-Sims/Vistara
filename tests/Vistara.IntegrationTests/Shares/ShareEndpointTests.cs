@@ -401,7 +401,7 @@ public sealed class ShareEndpointTests
                         800,
                         [
                             new ShareRendition(
-                                "thumbnail",
+                                "thumb",
                                 "/media/thumb.webp",
                                 300,
                                 200,

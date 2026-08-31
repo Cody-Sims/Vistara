@@ -115,29 +115,6 @@ public sealed class AssetEnumSerializationContractTests
                 .GetString());
     }
 
-    [Fact]
-    public void An_album_cover_rendition_uses_the_published_vocabulary()
-    {
-        using JsonDocument json = Serialize(
-            new AlbumSummaryResponse(
-                AssetId,
-                "Alps",
-                null,
-                new AssetRenditionResponse(
-                    "thumb",
-                    "/media/pipeline/source/recipe.webp",
-                    512,
-                    384,
-                    "image/webp"),
-                1,
-                Instant,
-                new ResourceVersion(1)));
-
-        Assert.Equal(
-            "thumb",
-            json.RootElement.GetProperty("cover").GetProperty("kind").GetString());
-    }
-
     [Theory]
     [InlineData("private", "Private")]
     [InlineData("tenant", "Tenant")]
@@ -163,6 +140,64 @@ public sealed class AssetEnumSerializationContractTests
         Assert.False(
             AssetContractVocabulary.TryReadVisibility(token, out string translated));
         Assert.Equal(string.Empty, translated);
+    }
+
+    [Theory]
+    [InlineData("processing", "Processing")]
+    [InlineData("ready", "Ready")]
+    [InlineData("failed", "Failed")]
+    public void Documented_query_status_tokens_translate_back_to_stored_names(
+        string documentedToken,
+        string storedValue)
+    {
+        Assert.True(
+            AssetContractVocabulary.TryReadQueryStatus(
+                documentedToken,
+                out string translated));
+        Assert.Equal(storedValue, translated);
+    }
+
+    [Theory]
+    [InlineData("Ready")]
+    [InlineData("READY")]
+    [InlineData("trashed")]
+    [InlineData("purged")]
+    [InlineData("archived")]
+    [InlineData(null)]
+    public void Undocumented_query_status_tokens_are_rejected(string? token)
+    {
+        Assert.False(
+            AssetContractVocabulary.TryReadQueryStatus(token, out string translated));
+        Assert.Equal(string.Empty, translated);
+    }
+
+    [Theory]
+    [InlineData("Archived")]
+    [InlineData("cover")]
+    [InlineData("")]
+    public void An_undocumented_stored_status_fails_loudly_instead_of_being_lowercased(
+        string storedValue)
+    {
+        AssetSummaryResponse summary = Summary() with { Status = storedValue };
+
+        JsonException failure = Assert.Throws<JsonException>(
+            () => JsonSerializer.Serialize(summary, ResponseJsonOptions));
+
+        Assert.Contains("documented gallery token", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_undocumented_rendition_kind_fails_loudly()
+    {
+        var rendition = new AssetRenditionResponse(
+            "cover",
+            "/api/v1/assets/id/derivatives",
+            4000,
+            3000,
+            "image/jpeg");
+
+        Assert.Throws<JsonException>(
+            () => JsonSerializer.Serialize(rendition, ResponseJsonOptions));
     }
 
     /// <summary>

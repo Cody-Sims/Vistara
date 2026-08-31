@@ -46,7 +46,7 @@ public sealed class RelationalShareStoreTests
                     480,
                     [
                         new ShareRendition(
-                            "thumbnail",
+                            "thumb",
                             "/media/safe.webp",
                             320,
                             240,

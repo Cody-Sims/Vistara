@@ -8,6 +8,7 @@ using Vistara.Application.Gallery;
 using Vistara.Application.Gallery.Albums;
 using Vistara.Application.Gallery.Favorites;
 using Vistara.Application.Gallery.Tags;
+using Vistara.Persistence.Derivatives;
 using Vistara.Persistence.Jobs;
 using Vistara.Persistence.Model;
 using Vistara.Persistence.Uploads;
@@ -1671,6 +1672,13 @@ public sealed class RelationalGalleryCurationStore :
                     albums.Where(album => album.CoverAssetId is not null)
                         .Select(album => album.CoverAssetId!.Value)),
                 cancellationToken);
+        IReadOnlyDictionary<Guid, CuratedRenditionSnapshot> covers =
+            await LoadCoversAsync(
+                albums
+                    .Where(album => album.CoverAssetId is not null)
+                    .Select(album => album.CoverAssetId!.Value)
+                    .ToArray(),
+                cancellationToken);
         return albums.Select(album =>
         {
             AlbumItemRow[] albumItems = items
@@ -1682,15 +1690,12 @@ public sealed class RelationalGalleryCurationStore :
                     assets[item.AssetId],
                     item.Position,
                     item.AddedAtUtc)).ToArray();
-            CuratedRenditionSnapshot? cover = album.CoverAssetId is { } coverId &&
-                assets.TryGetValue(coverId, out CuratedAssetSnapshot? coverAsset)
-                ? new CuratedRenditionSnapshot(
-                    "cover",
-                    $"/api/v1/assets/{coverAsset.Id:D}/derivatives",
-                    coverAsset.Width,
-                    coverAsset.Height,
-                    coverAsset.ContentType)
-                : null;
+            CuratedRenditionSnapshot? cover =
+                album.CoverAssetId is { } coverId &&
+                assets.ContainsKey(coverId) &&
+                covers.TryGetValue(coverId, out CuratedRenditionSnapshot? rendition)
+                    ? rendition
+                    : null;
             DateTimeOffset effectiveUpdatedAt = updatedAt ??
                 (albumItems.Length == 0
                     ? DateTimeOffset.UnixEpoch
@@ -1706,6 +1711,90 @@ public sealed class RelationalGalleryCurationStore :
                 snapshots);
         }).ToArray();
     }
+
+    private async ValueTask<IReadOnlyDictionary<Guid, CuratedRenditionSnapshot>>
+        LoadCoversAsync(
+            Guid[] coverAssetIds,
+            CancellationToken cancellationToken)
+    {
+        if (coverAssetIds.Length == 0)
+        {
+            return new Dictionary<Guid, CuratedRenditionSnapshot>();
+        }
+
+        CoverProjection[] candidates = await _context
+            .Set<DerivativeRequestRow>()
+            .AsNoTracking()
+            .Where(row =>
+                coverAssetIds.Contains(row.AssetId) &&
+                row.State == "Ready" &&
+                row.RepresentationContentType != null)
+            .Select(row => new CoverProjection(
+                row.AssetId,
+                row.Id,
+                row.PresetName,
+                row.Width,
+                row.Height,
+                row.RepresentationContentType!,
+                row.IsPublic,
+                row.PipelineId,
+                row.SourceSha256,
+                row.RecipeSha256,
+                row.Extension))
+            .ToArrayAsync(cancellationToken);
+        return candidates
+            .GroupBy(candidate => candidate.AssetId)
+            .ToDictionary(
+                group => group.Key,
+                group => ToCover(group
+                    .OrderBy(PresetRank)
+                    .ThenBy(candidate => candidate.Width * candidate.Height)
+                    .ThenBy(candidate => candidate.RequestId)
+                    .First()));
+    }
+
+    private static int PresetRank(CoverProjection candidate)
+    {
+        IReadOnlyList<string> preference =
+            AssetRenditionDelivery.CoverPresetPreference;
+        for (int rank = 0; rank < preference.Count; rank++)
+        {
+            if (string.Equals(preference[rank], candidate.Kind, StringComparison.Ordinal))
+            {
+                return rank;
+            }
+        }
+
+        return preference.Count;
+    }
+
+    private static CuratedRenditionSnapshot ToCover(CoverProjection candidate) =>
+        new(
+            candidate.Kind,
+            AssetRenditionDelivery.Path(
+                candidate.AssetId,
+                candidate.RequestId,
+                candidate.IsPublic,
+                candidate.PipelineId,
+                candidate.SourceSha256,
+                candidate.RecipeSha256,
+                candidate.Extension),
+            candidate.Width,
+            candidate.Height,
+            candidate.ContentType);
+
+    private sealed record CoverProjection(
+        Guid AssetId,
+        Guid RequestId,
+        string Kind,
+        int Width,
+        int Height,
+        string ContentType,
+        bool IsPublic,
+        string PipelineId,
+        string SourceSha256,
+        string RecipeSha256,
+        string Extension);
 
     private async ValueTask<TagSnapshot?> LoadTagAsync(
         Guid tagId,

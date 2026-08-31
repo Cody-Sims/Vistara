@@ -188,7 +188,7 @@ public sealed class ShareServicesTests
                 800,
                 [
                     new ShareRendition(
-                        "thumbnail",
+                        "thumb",
                         "/media/revision-4.webp",
                         300,
                         200,
@@ -211,7 +211,7 @@ public sealed class ShareServicesTests
             Renditions =
             [
                 new ShareRendition(
-                    "thumbnail",
+                    "thumb",
                     "/media/revision-5.webp",
                     300,
                     200,
@@ -298,7 +298,7 @@ public sealed class ShareServicesTests
                 800,
                 [
                     new ShareRendition(
-                        "thumbnail",
+                        "thumb",
                         "/media/thumb.webp",
                         300,
                         200,
@@ -511,7 +511,7 @@ public sealed class ShareServicesTests
                     800,
                     [
                         new ShareRendition(
-                            "thumbnail",
+                            "thumb",
                             "/media/thumb.webp",
                             300,
                             200,
