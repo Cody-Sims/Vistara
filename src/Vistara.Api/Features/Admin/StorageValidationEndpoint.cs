@@ -8,17 +8,23 @@ using Vistara.Contracts.Admin;
 namespace Vistara.Api.Features.Admin;
 
 /// <summary>
-/// Validates candidate storage settings for the setup assistant without
-/// touching the active configuration. The request is ephemeral: no field is
-/// persisted, logged, or echoed, and the answer is a fixed shape that never
-/// carries provider text.
+/// Validates candidate storage settings, including the credential the operator
+/// entered, without touching the active configuration. The body is parsed by
+/// hand so a submitted secret only ever lives inside a
+/// <see cref="RedactedSecret"/>: it is never bound to a record, never echoed,
+/// and never survives the request.
 /// </summary>
 public static class StorageValidationEndpoint
 {
     private const string CodePrefix = "storage_validation";
 
-    /// <summary>Upper bound for one probe, independent of the caller.</summary>
-    internal static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(5);
+    /// <summary>Upper bound for one validation, independent of the caller.</summary>
+    internal static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>Bounds the request so a large body cannot be used as a probe.</summary>
+    public const int MaximumBodyBytes = 16 * 1024;
+
+    public const int MaximumSecretLength = 4_096;
 
     private const int MaximumFieldLength = 512;
 
@@ -26,6 +32,50 @@ public static class StorageValidationEndpoint
 
     private static readonly JsonSerializerOptions ResponseJsonOptions =
         new(JsonSerializerDefaults.Web);
+
+    private static readonly string[] SupportedProviders =
+        ["filesystem", "azureBlob", "s3"];
+
+    /// <summary>
+    /// Tells the setup assistant that this deployment can test a credential, so
+    /// a secret is never sent to a deployment that cannot check it.
+    /// </summary>
+    public static async Task DescribeAsync(
+        HttpContext context,
+        IAccountAuthorizationPort authorization,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(authorization);
+
+        AccountAccess access = await authorization.AuthorizeAsync(
+            context,
+            AccountOperation.ManageQuotas,
+            cancellationToken);
+        if (access.Actor is null)
+        {
+            await ApiProblemWriter.WriteAsync(
+                context,
+                access.Status == AccountAccessStatus.Unauthenticated
+                    ? StatusCodes.Status401Unauthorized
+                    : StatusCodes.Status403Forbidden,
+                access.Status == AccountAccessStatus.Unauthenticated
+                    ? $"{CodePrefix}.unauthenticated"
+                    : $"{CodePrefix}.forbidden",
+                "Only a tenant owner may validate storage settings.",
+                cancellationToken);
+            return;
+        }
+
+        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(
+            new StorageValidationSupportResponse(true, SupportedProviders),
+            ResponseJsonOptions);
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.ContentType = "application/json; charset=utf-8";
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.ContentLength = bytes.Length;
+        await context.Response.Body.WriteAsync(bytes, cancellationToken);
+    }
 
     public static async Task ValidateAsync(
         HttpContext context,
@@ -78,13 +128,21 @@ public static class StorageValidationEndpoint
             return;
         }
 
-        ValidateStorageRequest? request;
+        if (context.Request.ContentLength > MaximumBodyBytes)
+        {
+            await ApiProblemWriter.WriteAsync(
+                context,
+                StatusCodes.Status413PayloadTooLarge,
+                $"{CodePrefix}.body_too_large",
+                "The storage validation request is too large.",
+                cancellationToken);
+            return;
+        }
+
+        JsonDocument document;
         try
         {
-            request = await JsonSerializer.DeserializeAsync<ValidateStorageRequest>(
-                context.Request.Body,
-                ResponseJsonOptions,
-                cancellationToken);
+            document = await ReadBoundedAsync(context.Request.Body, cancellationToken);
         }
         catch (JsonException)
         {
@@ -96,55 +154,72 @@ public static class StorageValidationEndpoint
                 cancellationToken);
             return;
         }
-
-        if (request is null)
+        catch (StorageValidationBodyTooLargeException)
         {
             await ApiProblemWriter.WriteAsync(
                 context,
-                StatusCodes.Status400BadRequest,
-                $"{CodePrefix}.malformed_request",
-                "The storage validation request is required.",
+                StatusCodes.Status413PayloadTooLarge,
+                $"{CodePrefix}.body_too_large",
+                "The storage validation request is too large.",
                 cancellationToken);
             return;
         }
 
-        if (!TryReadTarget(request, out StorageValidationTarget? target, out string field))
+        StorageValidationCandidate? candidate;
+        string field;
+        using (document)
         {
-            await ApiProblemWriter.WriteAsync(
-                context,
-                StatusCodes.Status422UnprocessableEntity,
-                $"{CodePrefix}.invalid_request",
-                "The storage candidate is invalid.",
-                cancellationToken,
-                new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
-                {
-                    [field] = ["The value is not accepted for this provider."],
-                });
-            return;
+            if (!TryReadCandidate(document.RootElement, out candidate, out field))
+            {
+                await ApiProblemWriter.WriteAsync(
+                    context,
+                    StatusCodes.Status422UnprocessableEntity,
+                    $"{CodePrefix}.invalid_request",
+                    "The storage candidate is invalid.",
+                    cancellationToken,
+                    new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+                    {
+                        [field] = ["The value is not accepted for this provider."],
+                    });
+                return;
+            }
         }
 
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
-            cancellationToken);
-        timeout.CancelAfter(ProbeTimeout);
         StorageValidationOutcome outcome;
-        try
+        string provider = candidate!.Provider;
+
+        // The candidate owns the secrets, so leaving this scope zeroes them
+        // whether the probe succeeded, failed, timed out, or was cancelled.
+        using (candidate)
         {
-            outcome = await validation.ValidateAsync(target!, timeout.Token);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (OperationCanceledException)
-        {
-            outcome = StorageValidationOutcome.TimedOut;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+            timeout.CancelAfter(ProbeTimeout);
+            try
+            {
+                outcome = await validation.ValidateAsync(candidate, timeout.Token);
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                outcome = StorageValidationOutcome.Rejected(
+                    "The storage target did not answer in time.",
+                    "The provider did not answer within the validation timeout.");
+            }
         }
 
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(
             new StorageValidationResponse(
-                outcome.Reachable,
-                target!.Provider,
-                outcome.Code,
+                outcome.Valid,
+                provider,
+                [.. outcome.Checks.Select(check => new StorageValidationCheckResponse(
+                    Describe(check.Id),
+                    Describe(check.Status),
+                    check.Detail))],
                 outcome.Message),
             ResponseJsonOptions);
         context.Response.StatusCode = StatusCodes.Status200OK;
@@ -154,79 +229,282 @@ public static class StorageValidationEndpoint
         await context.Response.Body.WriteAsync(bytes, cancellationToken);
     }
 
+    internal static string Describe(StorageCheckId id) =>
+        id switch
+        {
+            StorageCheckId.Reachable => "reachable",
+            StorageCheckId.Authenticated => "authenticated",
+            StorageCheckId.Read => "read",
+            StorageCheckId.Write => "write",
+            _ => "delete",
+        };
+
+    internal static string Describe(StorageCheckStatus status) =>
+        status switch
+        {
+            StorageCheckStatus.Passed => "passed",
+            StorageCheckStatus.Failed => "failed",
+            _ => "skipped",
+        };
+
+    private static async Task<JsonDocument> ReadBoundedAsync(
+        Stream body,
+        CancellationToken cancellationToken)
+    {
+        using var buffer = new MemoryStream();
+        byte[] chunk = new byte[8 * 1024];
+        int read;
+        while ((read = await body.ReadAsync(chunk, cancellationToken)) > 0)
+        {
+            if (buffer.Length + read > MaximumBodyBytes)
+            {
+                throw new StorageValidationBodyTooLargeException();
+            }
+
+            buffer.Write(chunk, 0, read);
+        }
+
+        buffer.Position = 0;
+        return await JsonDocument.ParseAsync(
+            buffer,
+            cancellationToken: cancellationToken);
+    }
+
     /// <summary>
-    /// Accepts only the allowlisted, non-secret members of one provider shape
-    /// and rejects everything else, including a request that names more than
-    /// one provider.
+    /// Accepts exactly one provider shape and only its allowlisted members.
+    /// Secrets are lifted straight into <see cref="RedactedSecret"/> instances
+    /// so no intermediate string is retained by a DTO.
     /// </summary>
-    internal static bool TryReadTarget(
-        ValidateStorageRequest request,
-        out StorageValidationTarget? target,
+    internal static bool TryReadCandidate(
+        JsonElement root,
+        out StorageValidationCandidate? candidate,
         out string field)
     {
-        target = null;
+        candidate = null;
         field = "provider";
-        int offered =
-            (request.Filesystem is null ? 0 : 1) +
-            (request.Azure is null ? 0 : 1) +
-            (request.S3 is null ? 0 : 1);
-        if (offered != 1)
+        if (root.ValueKind != JsonValueKind.Object)
         {
             return false;
         }
 
-        switch (request.Provider)
+        bool hasFilesystem = root.TryGetProperty("filesystem", out JsonElement filesystem) &&
+            filesystem.ValueKind == JsonValueKind.Object;
+        bool hasAzure = root.TryGetProperty("azureBlob", out JsonElement azure) &&
+            azure.ValueKind == JsonValueKind.Object;
+        bool hasS3 = root.TryGetProperty("s3", out JsonElement s3) &&
+            s3.ValueKind == JsonValueKind.Object;
+        int offered = (hasFilesystem ? 1 : 0) + (hasAzure ? 1 : 0) + (hasS3 ? 1 : 0);
+        if (offered != 1 ||
+            !root.TryGetProperty("provider", out JsonElement provider) ||
+            provider.ValueKind != JsonValueKind.String)
         {
-            case "filesystem" when request.Filesystem is { } filesystem:
-                field = "filesystem.rootPath";
-                if (!IsAcceptablePath(filesystem.RootPath))
+            return false;
+        }
+
+        return provider.GetString() switch
+        {
+            "filesystem" when hasFilesystem =>
+                TryReadFilesystem(filesystem, out candidate, out field),
+            "azureBlob" when hasAzure => TryReadAzure(azure, out candidate, out field),
+            "s3" when hasS3 => TryReadS3(s3, out candidate, out field),
+            _ => false,
+        };
+    }
+
+    private static bool TryReadFilesystem(
+        JsonElement element,
+        out StorageValidationCandidate? candidate,
+        out string field)
+    {
+        candidate = null;
+        field = "filesystem.rootPath";
+        string? rootPath = ReadText(element, "rootPath", MaximumPathLength);
+        if (!IsAcceptablePath(rootPath))
+        {
+            return false;
+        }
+
+        candidate = new StorageValidationCandidate(
+            StorageCandidateKind.Filesystem,
+            "filesystem",
+            rootPath: rootPath);
+        return true;
+    }
+
+    private static bool TryReadAzure(
+        JsonElement element,
+        out StorageValidationCandidate? candidate,
+        out string field)
+    {
+        candidate = null;
+        field = "azureBlob.accountName";
+        string? accountName = ReadText(element, "accountName", 24);
+        if (!IsAcceptableAccount(accountName))
+        {
+            return false;
+        }
+
+        field = "azureBlob.container";
+        string? container = ReadText(element, "container", 63);
+        if (!IsAcceptableContainer(container))
+        {
+            return false;
+        }
+
+        field = "azureBlob.endpointSuffix";
+        string suffix = ReadText(element, "endpointSuffix", 128) ?? "core.windows.net";
+        if (!IsAcceptableHostLabelSequence(suffix))
+        {
+            return false;
+        }
+
+        field = "azureBlob.credentialKind";
+        string credentialKind =
+            ReadText(element, "credentialKind", 32) ?? "managedIdentity";
+        AzureCredentialKind kind;
+        RedactedSecret? accountKey = null;
+        RedactedSecret? sasToken = null;
+        switch (credentialKind)
+        {
+            case "managedIdentity":
+                kind = AzureCredentialKind.ManagedIdentity;
+                break;
+            case "accountKey":
+                kind = AzureCredentialKind.AccountKey;
+                field = "azureBlob.accountKey";
+                accountKey = ReadSecret(element, "accountKey");
+                if (accountKey is null)
                 {
                     return false;
                 }
 
-                target = new StorageValidationTarget(
-                    StorageCandidateKind.Filesystem,
-                    "filesystem",
-                    filesystem.RootPath,
-                    null,
-                    null);
-                return true;
-            case "azure" when request.Azure is { } azure:
-                field = "azure.serviceUri";
-                if (!IsAcceptableName(azure.AccountName) ||
-                    !IsAcceptableContainer(azure.ContainerName) ||
-                    !TryReadEndpoint(azure.ServiceUri, out Uri? azureUri))
+                break;
+            case "sasToken":
+                kind = AzureCredentialKind.SasToken;
+                field = "azureBlob.sasToken";
+                sasToken = ReadSecret(element, "sasToken");
+                if (sasToken is null)
                 {
                     return false;
                 }
 
-                target = new StorageValidationTarget(
-                    StorageCandidateKind.Azure,
-                    "azure",
-                    null,
-                    azureUri,
-                    azure.ContainerName);
-                return true;
-            case "s3" when request.S3 is { } s3:
-                field = "s3.serviceUrl";
-                if (!IsAcceptableContainer(s3.BucketName) ||
-                    !IsAcceptableName(s3.Region) ||
-                    !TryReadEndpoint(s3.ServiceUrl, out Uri? s3Uri))
-                {
-                    return false;
-                }
-
-                target = new StorageValidationTarget(
-                    StorageCandidateKind.S3,
-                    "s3",
-                    null,
-                    s3Uri,
-                    s3.BucketName);
-                return true;
+                break;
             default:
                 return false;
         }
+
+        field = "azureBlob.accountName";
+        if (!Uri.TryCreate(
+                $"https://{accountName}.blob.{suffix}",
+                UriKind.Absolute,
+                out Uri? endpoint))
+        {
+            accountKey?.Dispose();
+            sasToken?.Dispose();
+            return false;
+        }
+
+        candidate = new StorageValidationCandidate(
+            StorageCandidateKind.AzureBlob,
+            "azureBlob",
+            endpoint: endpoint,
+            container: container,
+            accountName: accountName,
+            azureCredential: kind,
+            accountKey: accountKey,
+            sasToken: sasToken);
+        return true;
     }
+
+    private static bool TryReadS3(
+        JsonElement element,
+        out StorageValidationCandidate? candidate,
+        out string field)
+    {
+        candidate = null;
+        field = "s3.bucket";
+        string? bucket = ReadText(element, "bucket", 63);
+        if (!IsAcceptableContainer(bucket))
+        {
+            return false;
+        }
+
+        field = "s3.region";
+        string? region = ReadText(element, "region", 64);
+        if (!IsAcceptableName(region))
+        {
+            return false;
+        }
+
+        field = "s3.endpoint";
+        if (!TryReadEndpoint(
+                ReadText(element, "endpoint", MaximumFieldLength),
+                out Uri? endpoint))
+        {
+            return false;
+        }
+
+        bool forcePathStyle =
+            element.TryGetProperty("forcePathStyle", out JsonElement pathStyle) &&
+            pathStyle.ValueKind == JsonValueKind.True;
+
+        RedactedSecret? accessKeyId = ReadSecret(element, "accessKeyId");
+        RedactedSecret? secretAccessKey = ReadSecret(element, "secretAccessKey");
+        RedactedSecret? sessionToken = ReadSecret(element, "sessionToken");
+        S3CredentialKind kind;
+        if (accessKeyId is null && secretAccessKey is null)
+        {
+            if (sessionToken is not null)
+            {
+                sessionToken.Dispose();
+                field = "s3.accessKeyId";
+                return false;
+            }
+
+            kind = S3CredentialKind.Anonymous;
+        }
+        else if (accessKeyId is not null && secretAccessKey is not null)
+        {
+            kind = S3CredentialKind.AccessKey;
+        }
+        else
+        {
+            accessKeyId?.Dispose();
+            secretAccessKey?.Dispose();
+            sessionToken?.Dispose();
+            field = "s3.secretAccessKey";
+            return false;
+        }
+
+        candidate = new StorageValidationCandidate(
+            StorageCandidateKind.S3,
+            "s3",
+            endpoint: endpoint,
+            container: bucket,
+            region: region,
+            forcePathStyle: forcePathStyle,
+            s3Credential: kind,
+            accessKeyId: accessKeyId,
+            secretAccessKey: secretAccessKey,
+            sessionToken: sessionToken);
+        return true;
+    }
+
+    private static RedactedSecret? ReadSecret(JsonElement element, string name) =>
+        element.TryGetProperty(name, out JsonElement member) &&
+        member.ValueKind == JsonValueKind.String &&
+        member.GetString() is { Length: > 0 } value &&
+        value.Length <= MaximumSecretLength
+            ? RedactedSecret.From(value)
+            : null;
+
+    private static string? ReadText(JsonElement element, string name, int maximum) =>
+        element.TryGetProperty(name, out JsonElement member) &&
+        member.ValueKind == JsonValueKind.String &&
+        member.GetString() is { Length: > 0 } value &&
+        value.Length <= maximum
+            ? value
+            : null;
 
     internal static bool TryReadEndpoint(string? value, out Uri? endpoint)
     {
@@ -309,6 +587,12 @@ public static class StorageValidationEndpoint
         value.All(character =>
             char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
 
+    private static bool IsAcceptableAccount(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        value.Length is >= 3 and <= 24 &&
+        value.All(character =>
+            char.IsAsciiLetterLower(character) || char.IsAsciiDigit(character));
+
     private static bool IsAcceptableContainer(string? value) =>
         !string.IsNullOrWhiteSpace(value) &&
         value.Length is >= 3 and <= 63 &&
@@ -316,4 +600,20 @@ public static class StorageValidationEndpoint
             char.IsAsciiLetterLower(character) ||
             char.IsAsciiDigit(character) ||
             character is '-' or '.');
+
+    private static bool IsAcceptableHostLabelSequence(string value) =>
+        value.Length is > 0 and <= 128 &&
+        value.All(character =>
+            char.IsAsciiLetterOrDigit(character) || character is '-' or '.') &&
+        !value.StartsWith('.') &&
+        !value.EndsWith('.');
+}
+
+/// <summary>Signals that the submitted body exceeded the accepted bound.</summary>
+internal sealed class StorageValidationBodyTooLargeException : Exception
+{
+    public StorageValidationBodyTooLargeException()
+        : base("The storage validation request body is too large.")
+    {
+    }
 }

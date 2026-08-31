@@ -48,7 +48,8 @@ A composition root wires the whole surface with
 | `GET /api/v1/admin/policies` | Retention, sharing, quotas | `ETag` |
 | `PATCH /api/v1/admin/policies` | Merge patch of the policy groups | `If-Match` |
 | `GET /api/v1/admin/audit` | Redacted audit trail | cursor |
-| `POST /api/v1/admin/storage/validate` | Probe a candidate storage target | — |
+| `GET /api/v1/admin/storage/validate` | Whether this deployment can test a credential | — |
+| `POST /api/v1/admin/storage/validate` | Test a candidate storage target and its credential | — |
 
 `/api/v1/admin/*` describes the tenant deployment rather than a gallery
 resource. Membership and API key administration keep their resource-shaped
@@ -113,44 +114,107 @@ another tab is using, so a client needs no retry-on-403 protocol; it may read
 
 ## Candidate storage validation
 
-```jsonc
-// POST /api/v1/admin/storage/validate     tenant owner + quotas.manage
-// exactly one provider object, and only these members
-{ "provider": "filesystem", "filesystem": { "rootPath": "/srv/vistara/media" } }
-{ "provider": "azure",
-  "azure": { "accountName": "acct", "containerName": "media",
-             "serviceUri": "https://acct.blob.core.windows.net" } }
-{ "provider": "s3",
-  "s3": { "bucketName": "media", "region": "eu-central-1",
-          "serviceUrl": "https://s3.example.com", "forcePathStyle": true } }
+The setup assistant reads `GET /api/v1/admin/storage/validate` before it offers
+"Test connection", so a secret is never sent to a deployment that cannot check
+it.
 
-// 200 -> exactly this shape, never provider text
-{ "reachable": true, "provider": "s3",
-  "code": "storage.reachable", "message": "The storage target answered." }
+```jsonc
+// GET /api/v1/admin/storage/validate      tenant owner + quotas.manage
+{ "supported": true, "providers": ["filesystem", "azureBlob", "s3"] }
 ```
 
-Codes: `storage.reachable`, `storage.unreachable`, `storage.denied`,
-`storage.timed_out`, `storage.path_missing`, `storage.path_not_writable`,
-`storage.blocked_endpoint`, `storage.insecure_endpoint`,
-`storage.unresolvable_endpoint`, `storage.endpoint_rejected`.
+`POST` takes exactly one provider object and only the members listed below. The
+body is parsed by hand into a redacting secret holder, so a submitted credential
+is never bound to a DTO, never printed by a `ToString`, and is zeroed when the
+request ends.
+
+```jsonc
+// POST /api/v1/admin/storage/validate     tenant owner + quotas.manage
+{ "provider": "filesystem", "filesystem": { "rootPath": "/srv/vistara/media" } }
+
+{ "provider": "azureBlob",
+  "azureBlob": {
+    "accountName": "vistaramedia",              // 3-24 lower alphanumerics
+    "container": "originals",
+    "endpointSuffix": "core.windows.net",       // optional
+    "credentialKind": "managedIdentity" | "accountKey" | "sasToken",
+    "accountKey": "<secret>",                   // required for accountKey
+    "sasToken": "<secret>"                      // required for sasToken
+  } }
+
+{ "provider": "s3",
+  "s3": {
+    "endpoint": "https://s3.eu-central-1.example",
+    "region": "eu-central-1",
+    "bucket": "vistara-media",
+    "forcePathStyle": true,
+    "accessKeyId": "<secret>",                  // with secretAccessKey, or omit both
+    "secretAccessKey": "<secret>",
+    "sessionToken": "<secret>"                  // optional, only with an access key
+  } }
+
+// 200 -> exactly this shape, never provider text and never a credential
+{ "valid": true, "provider": "s3",
+  "checks": [
+    { "id": "reachable",     "status": "passed" },
+    { "id": "authenticated", "status": "passed" },
+    { "id": "read",          "status": "passed" },
+    { "id": "write",         "status": "passed" },
+    { "id": "delete",        "status": "passed" }
+  ],
+  "message": "The storage settings are usable with the supplied credential." }
+```
+
+`checks` always carries all five ids in this order. `status` is `passed`,
+`failed`, or `skipped`; `detail` is optional and, when present, is drawn from a
+fixed catalogue:
+
+`The endpoint is not an allowed validation target.` ·
+`The storage target could not be reached.` ·
+`The credential was rejected.` ·
+`No credential is available for this provider.` ·
+`The container or bucket could not be listed with this credential.` ·
+`The probe object could not be written.` ·
+`The probe object could not be deleted.` ·
+`The directory does not exist.` ·
+`The provider did not answer within the validation timeout.`
+
+Credential kinds:
+
+- `managedIdentity` is the default for `azureBlob` and submits no secret; the
+  deployment's workload or managed identity is used.
+- `accountKey` and `sasToken` are bounded ephemeral secrets used to build one
+  throwaway container client.
+- S3 accepts a static access key with an optional session token. Omitting both
+  key members requests an anonymous client, which is only honoured when the
+  endpoint host is already in the operator's trusted endpoint host list; a
+  request can never nominate its own exemption.
+- A filesystem candidate has no credential, so `authenticated` is `skipped`.
 
 Rules:
 
-- Any member outside the lists above is rejected with `422`; a request naming
-  zero or more than one provider is rejected the same way.
-- Credentials are not accepted. The validated target has no credential member,
-  so nothing is persisted, logged, or echoed, and the active storage
-  configuration is never modified.
+- Any member outside the lists above is ignored, and a request naming zero or
+  more than one provider, or a member that fails validation, is rejected with
+  `422` and a per-field `errors` map. A body over 16 KiB or a secret field over
+  4096 characters is rejected before a client is built.
+- The probe writes and deletes one empty object under the reserved prefix
+  `.vistara-validate/` and reads only that prefix. Existing data is never
+  listed, read, written, or deleted, and the active storage configuration is
+  never modified.
+- Secrets live only in the request. They are held in a redacting wrapper, handed
+  once to the provider SDK, and zeroed on disposal. Nothing is written to a
+  `DbContext`, configuration, a file, a cache, or static state, and no secret
+  appears in a response, log message, activity tag, exception, or problem
+  document.
 - An endpoint that resolves to a loopback, private, carrier-grade, link-local,
-  unique-local, or multicast address is refused before any probe. Plaintext
-  `http` requires the operator's existing trusted endpoint host configuration.
-- Each probe is bounded by a server-side timeout and answers
-  `storage.timed_out`; a cancelled client request is not converted into a
-  timeout. The platform rate limiter guards the route and answers `429` with
-  `Retry-After`.
-- This release validates configuration shape and endpoint reachability. It
-  does not verify remote credentials, so `reachable` is not proof that a
-  future upload will be authorized.
+  unique-local, or multicast address is refused before any client is
+  constructed. Plaintext `http` requires the operator's existing trusted
+  endpoint host configuration.
+- Each validation is bounded by a server-side timeout and answers a failed
+  `reachable` check with the timeout detail; a cancelled client request is not
+  converted into a timeout. The one-shot provider client is disposed on every
+  path, including timeout and cancellation. The platform rate limiter guards the
+  route and answers `429` with `Retry-After`.
 
 ## Known limits in this release
 
@@ -163,6 +227,5 @@ Rules:
   that no asset revision references, because derivative blobs are not tracked
   separately in the core schema yet. The classification runs as a correlated
   `EXISTS`, so it does not grow with the tenant's object count.
-- `POST /api/v1/admin/storage/validate` checks reachability, not credentials.
 - The capability document has no `authentication` section, so a client cannot
   yet discover an external sign-in provider.

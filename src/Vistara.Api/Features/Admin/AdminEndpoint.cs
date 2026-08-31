@@ -467,12 +467,9 @@ public static class AdminServiceCollectionExtensions
         services.TryAddScoped<RelationalAdminStore>();
         services.TryAddScoped<IAdminPort, PlatformAdminAdapter>();
         services.TryAddSingleton<IPlatformRateLimitHook, PermitAllPlatformRateLimitHook>();
-        services.AddHttpClient(
-            PlatformStorageValidationProbe.HttpClientName,
-            client => client.Timeout = StorageValidationEndpoint.ProbeTimeout);
-        services.TryAddScoped<
-            IStorageValidationProbe,
-            PlatformStorageValidationProbe>();
+        services.TryAddSingleton<
+            IStorageValidationClientFactory,
+            PlatformStorageValidationClientFactory>();
         services.TryAddScoped<
             IStorageValidationPort,
             PlatformStorageValidationAdapter>();
@@ -512,6 +509,13 @@ public static class AdminEndpointMapping
                     context,
                     Authorization(context),
                     Admin(context),
+                    cancellationToken)));
+        Map(endpoints.MapGet(
+            "/api/v1/admin/storage/validate",
+            (HttpContext context, CancellationToken cancellationToken) =>
+                StorageValidationEndpoint.DescribeAsync(
+                    context,
+                    Authorization(context),
                     cancellationToken)));
         Map(endpoints.MapPost(
             "/api/v1/admin/storage/validate",

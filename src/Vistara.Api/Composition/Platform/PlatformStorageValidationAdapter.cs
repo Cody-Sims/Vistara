@@ -1,5 +1,13 @@
 using System.Net;
 using System.Net.Sockets;
+using Amazon.Runtime;
+using Amazon.S3;
+using Amazon.S3.Model;
+using Azure;
+using Azure.Identity;
+using Azure.Storage;
+using Azure.Storage.Blobs;
+using Azure.Storage.Blobs.Models;
 using Microsoft.Extensions.Options;
 using Vistara.Api.Composition.Media;
 using Vistara.Api.Features.Admin;
@@ -7,12 +15,14 @@ using Vistara.Api.Features.Admin;
 namespace Vistara.Api.Composition.Platform;
 
 /// <summary>
-/// Runs a candidate storage probe. The active storage configuration is only
-/// read, never written, and the deployment's existing trusted host list is the
-/// single place that can widen the network policy.
+/// Runs a candidate storage validation. The active storage configuration is
+/// only read, never written, and the deployment's existing trusted host list is
+/// the single place that can widen the network policy. Network policy is
+/// enforced before any provider client is constructed, so a rejected candidate
+/// never causes a submitted credential to be used.
 /// </summary>
 internal sealed class PlatformStorageValidationAdapter(
-    IStorageValidationProbe probe,
+    IStorageValidationClientFactory factory,
     IOptions<MediaOptions> media) : IStorageValidationPort
 {
     private readonly MediaOptions _media = media is null
@@ -20,23 +30,30 @@ internal sealed class PlatformStorageValidationAdapter(
         : media.Value;
 
     public async ValueTask<StorageValidationOutcome> ValidateAsync(
-        StorageValidationTarget target,
+        StorageValidationCandidate candidate,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(candidate);
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (target.Endpoint is { } endpoint && !IsPermitted(endpoint, out string code))
+        if (candidate.Endpoint is { } endpoint && !IsPermitted(endpoint))
         {
-            return new StorageValidationOutcome(
-                false,
-                code,
-                "The endpoint is not an allowed validation target.");
+            return StorageValidationOutcome.Rejected(
+                StorageValidationDetails.RejectedMessage,
+                StorageValidationDetails.EndpointRejected);
         }
 
+        if (!HasUsableCredential(candidate))
+        {
+            return StorageValidationOutcome.Rejected(
+                StorageValidationDetails.RejectedMessage,
+                StorageValidationDetails.CredentialMissing);
+        }
+
+        IStorageValidationClient client;
         try
         {
-            return await probe.ProbeAsync(target, cancellationToken);
+            client = await factory.CreateAsync(candidate, cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -44,21 +61,54 @@ internal sealed class PlatformStorageValidationAdapter(
         }
         catch (Exception failure) when (failure is not OutOfMemoryException)
         {
-            // Provider text routinely carries endpoints and credentials, so the
-            // caller only ever learns that the probe failed.
-            return StorageValidationOutcome.Unreachable;
+            // Client construction failures carry provider text, so the caller
+            // only ever learns that the credential was not usable.
+            return StorageValidationOutcome.Rejected(
+                StorageValidationDetails.RejectedMessage,
+                StorageValidationDetails.CredentialRejected);
+        }
+
+        // Disposal is unconditional so a timeout or caller cancellation still
+        // tears down the one-shot client and the credential it holds.
+        await using (client.ConfigureAwait(false))
+        {
+            try
+            {
+                return await client.ProbeAsync(
+                    StorageProbeNaming.CreateKey(),
+                    cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception failure) when (failure is not OutOfMemoryException)
+            {
+                return StorageValidationOutcome.Rejected(
+                    StorageValidationDetails.RejectedMessage,
+                    StorageValidationDetails.Unreachable);
+            }
         }
     }
 
-    private bool IsPermitted(Uri endpoint, out string code)
+    /// <summary>
+    /// An anonymous S3 candidate is only accepted when the operator already
+    /// trusts the endpoint host, which is how an emulator is configured.
+    /// </summary>
+    private bool HasUsableCredential(StorageValidationCandidate candidate) =>
+        candidate.Kind != StorageCandidateKind.S3 ||
+        candidate.S3Credential != S3CredentialKind.Anonymous ||
+        (candidate.Endpoint is { } endpoint &&
+            IsExplicitlyTrusted(endpoint.Host) &&
+            (_media.Storage.S3.AllowInsecureHttp || _media.Storage.Azure.EmulatorMode));
+
+    private bool IsPermitted(Uri endpoint)
     {
-        code = "storage.endpoint_rejected";
         bool trusted = IsExplicitlyTrusted(endpoint.Host);
         if (endpoint.Scheme == Uri.UriSchemeHttp &&
             !(trusted && (_media.Storage.S3.AllowInsecureHttp ||
                 _media.Storage.Azure.EmulatorMode)))
         {
-            code = "storage.insecure_endpoint";
             return false;
         }
 
@@ -69,13 +119,7 @@ internal sealed class PlatformStorageValidationAdapter(
 
         if (IPAddress.TryParse(endpoint.Host.Trim('[', ']'), out IPAddress? literal))
         {
-            if (StorageValidationEndpoint.IsBlockedAddress(literal))
-            {
-                code = "storage.blocked_endpoint";
-                return false;
-            }
-
-            return true;
+            return !StorageValidationEndpoint.IsBlockedAddress(literal);
         }
 
         IPAddress[] resolved;
@@ -85,28 +129,15 @@ internal sealed class PlatformStorageValidationAdapter(
         }
         catch (SocketException)
         {
-            code = "storage.unresolvable_endpoint";
             return false;
         }
         catch (ArgumentException)
         {
-            code = "storage.unresolvable_endpoint";
             return false;
         }
 
-        if (resolved.Length == 0)
-        {
-            code = "storage.unresolvable_endpoint";
-            return false;
-        }
-
-        if (resolved.Any(StorageValidationEndpoint.IsBlockedAddress))
-        {
-            code = "storage.blocked_endpoint";
-            return false;
-        }
-
-        return true;
+        return resolved.Length != 0 &&
+            !resolved.Any(StorageValidationEndpoint.IsBlockedAddress);
     }
 
     /// <summary>
@@ -119,78 +150,356 @@ internal sealed class PlatformStorageValidationAdapter(
 }
 
 /// <summary>
-/// The shipped probe. A filesystem candidate is checked directly; a remote
-/// candidate is checked with one bounded request through the shared client.
-/// No credential is ever accepted, so none can be sent, stored, or logged.
+/// Builds the shipped one-shot provider clients. This is the only place a
+/// submitted credential is revealed, and the value goes straight into the
+/// provider SDK without being stored, cached, or copied anywhere else.
 /// </summary>
-internal sealed class PlatformStorageValidationProbe(IHttpClientFactory clients)
-    : IStorageValidationProbe
+internal sealed class PlatformStorageValidationClientFactory
+    : IStorageValidationClientFactory
 {
-    internal const string HttpClientName = "Vistara.StorageValidation";
-
-    public async ValueTask<StorageValidationOutcome> ProbeAsync(
-        StorageValidationTarget target,
+    public ValueTask<IStorageValidationClient> CreateAsync(
+        StorageValidationCandidate candidate,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(target);
-        if (target.Kind == StorageCandidateKind.Filesystem)
+        ArgumentNullException.ThrowIfNull(candidate);
+        cancellationToken.ThrowIfCancellationRequested();
+        IStorageValidationClient client = candidate.Kind switch
         {
-            return ProbeFilesystem(target.RootPath!);
-        }
-
-        HttpClient client = clients.CreateClient(HttpClientName);
-        using var request = new HttpRequestMessage(HttpMethod.Head, target.Endpoint);
-        using HttpResponseMessage response = await client.SendAsync(
-            request,
-            HttpCompletionOption.ResponseHeadersRead,
-            cancellationToken);
-        return response.StatusCode switch
-        {
-            HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden =>
-                StorageValidationOutcome.Denied,
-            _ when (int)response.StatusCode >= 500 =>
-                StorageValidationOutcome.Unreachable,
-            _ => StorageValidationOutcome.Reached,
+            StorageCandidateKind.Filesystem =>
+                new FilesystemValidationClient(candidate.RootPath!),
+            StorageCandidateKind.AzureBlob => CreateAzure(candidate),
+            _ => CreateS3(candidate),
         };
+        return ValueTask.FromResult(client);
     }
 
-    private static StorageValidationOutcome ProbeFilesystem(string rootPath)
+    private static AzureValidationClient CreateAzure(
+        StorageValidationCandidate candidate)
     {
+        var containerUri = new Uri(
+            candidate.Endpoint!,
+            $"/{candidate.Container}");
+        BlobContainerClient container = candidate.AzureCredential switch
+        {
+            AzureCredentialKind.ManagedIdentity =>
+                new BlobContainerClient(containerUri, new DefaultAzureCredential()),
+            AzureCredentialKind.AccountKey =>
+                new BlobContainerClient(
+                    containerUri,
+                    new StorageSharedKeyCredential(
+                        candidate.AccountName!,
+                        candidate.AccountKey!.Reveal())),
+            _ => new BlobContainerClient(
+                new Uri(
+                    $"{containerUri}?{candidate.SasToken!.Reveal().TrimStart('?')}")),
+        };
+        return new AzureValidationClient(container);
+    }
+
+    private static S3ValidationClient CreateS3(
+        StorageValidationCandidate candidate)
+    {
+        var config = new AmazonS3Config
+        {
+            ServiceURL = candidate.Endpoint!.ToString(),
+            ForcePathStyle = candidate.ForcePathStyle,
+            AuthenticationRegion = candidate.Region,
+            UseHttp = candidate.Endpoint.Scheme == Uri.UriSchemeHttp,
+            MaxErrorRetry = 0,
+        };
+        AWSCredentials credentials = candidate switch
+        {
+            { S3Credential: S3CredentialKind.AccessKey, SessionToken: not null } =>
+                new SessionAWSCredentials(
+                    candidate.AccessKeyId!.Reveal(),
+                    candidate.SecretAccessKey!.Reveal(),
+                    candidate.SessionToken.Reveal()),
+            { S3Credential: S3CredentialKind.AccessKey } =>
+                new BasicAWSCredentials(
+                    candidate.AccessKeyId!.Reveal(),
+                    candidate.SecretAccessKey!.Reveal()),
+            _ => new AnonymousAWSCredentials(),
+        };
+        return new S3ValidationClient(
+            new AmazonS3Client(credentials, config),
+            candidate.Container!);
+    }
+}
+
+/// <summary>Checks a candidate directory without touching existing files.</summary>
+internal sealed class FilesystemValidationClient(string rootPath)
+    : IStorageValidationClient
+{
+    public async ValueTask<StorageValidationOutcome> ProbeAsync(
+        string probeKey,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(probeKey);
+        var recorder = new StorageProbeRecorder();
         if (!Directory.Exists(rootPath))
         {
-            return new StorageValidationOutcome(
-                false,
-                "storage.path_missing",
-                "The directory does not exist.");
+            return recorder.Fail(
+                StorageCheckId.Reachable,
+                StorageValidationDetails.PathMissing,
+                StorageValidationDetails.RejectedMessage);
         }
 
-        string probe = Path.Combine(
-            rootPath,
-            $".vistara-validate-{Guid.NewGuid():N}");
+        recorder.Pass(StorageCheckId.Reachable);
+        recorder.Skip(StorageCheckId.Authenticated, "A directory needs no credential.");
+
         try
         {
-            File.WriteAllBytes(probe, []);
-            return StorageValidationOutcome.Reached;
+            _ = Directory.EnumerateFileSystemEntries(rootPath).Take(1).Count();
+            recorder.Pass(StorageCheckId.Read);
         }
         catch (Exception failure) when (
             failure is IOException or UnauthorizedAccessException)
         {
-            return new StorageValidationOutcome(
-                false,
-                "storage.path_not_writable",
-                "The directory is not writable.");
+            return recorder.Fail(
+                StorageCheckId.Read,
+                StorageValidationDetails.ListDenied,
+                StorageValidationDetails.RejectedMessage);
         }
-        finally
+
+        string probe = Path.Combine(
+            rootPath,
+            probeKey.Replace('/', '-').Replace('\\', '-'));
+        try
         {
-            try
-            {
-                File.Delete(probe);
-            }
-            catch (Exception failure) when (
-                failure is IOException or UnauthorizedAccessException)
-            {
-                // The probe file is best effort; nothing else depends on it.
-            }
+            await File.WriteAllBytesAsync(probe, [], cancellationToken);
+            recorder.Pass(StorageCheckId.Write);
         }
+        catch (Exception failure) when (
+            failure is IOException or UnauthorizedAccessException)
+        {
+            return recorder.Fail(
+                StorageCheckId.Write,
+                StorageValidationDetails.WriteDenied,
+                StorageValidationDetails.RejectedMessage);
+        }
+
+        try
+        {
+            File.Delete(probe);
+            recorder.Pass(StorageCheckId.Delete);
+        }
+        catch (Exception failure) when (
+            failure is IOException or UnauthorizedAccessException)
+        {
+            return recorder.Fail(
+                StorageCheckId.Delete,
+                StorageValidationDetails.DeleteDenied,
+                StorageValidationDetails.RejectedMessage);
+        }
+
+        return recorder.Complete(StorageValidationDetails.ValidMessage);
+    }
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}
+
+/// <summary>
+/// Exercises an Azure Blob container with the submitted credential: list under
+/// the reserved probe prefix, then write and delete one empty probe blob.
+/// </summary>
+internal sealed class AzureValidationClient(BlobContainerClient container)
+    : IStorageValidationClient
+{
+    public async ValueTask<StorageValidationOutcome> ProbeAsync(
+        string probeKey,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(probeKey);
+        var recorder = new StorageProbeRecorder();
+        try
+        {
+            await foreach (BlobItem _ in container
+                .GetBlobsAsync(
+                    BlobTraits.None,
+                    BlobStates.None,
+                    StorageProbeNaming.Prefix,
+                    cancellationToken)
+                .ConfigureAwait(false))
+            {
+                break;
+            }
+
+            recorder.Pass(StorageCheckId.Reachable);
+            recorder.Pass(StorageCheckId.Authenticated);
+            recorder.Pass(StorageCheckId.Read);
+        }
+        catch (AuthenticationFailedException)
+        {
+            recorder.Pass(StorageCheckId.Reachable);
+            return recorder.Fail(
+                StorageCheckId.Authenticated,
+                StorageValidationDetails.CredentialRejected,
+                StorageValidationDetails.RejectedMessage);
+        }
+        catch (RequestFailedException failure)
+        {
+            if (failure.Status is 401 or 403)
+            {
+                recorder.Pass(StorageCheckId.Reachable);
+                return recorder.Fail(
+                    StorageCheckId.Authenticated,
+                    StorageValidationDetails.CredentialRejected,
+                    StorageValidationDetails.RejectedMessage);
+            }
+
+            if (failure.Status is >= 400 and < 500)
+            {
+                recorder.Pass(StorageCheckId.Reachable);
+                recorder.Pass(StorageCheckId.Authenticated);
+                return recorder.Fail(
+                    StorageCheckId.Read,
+                    StorageValidationDetails.ListDenied,
+                    StorageValidationDetails.RejectedMessage);
+            }
+
+            return recorder.Fail(
+                StorageCheckId.Reachable,
+                StorageValidationDetails.Unreachable,
+                StorageValidationDetails.RejectedMessage);
+        }
+
+        BlobClient probe = container.GetBlobClient(probeKey);
+        try
+        {
+            _ = await probe.UploadAsync(
+                Stream.Null,
+                overwrite: false,
+                cancellationToken)
+                .ConfigureAwait(false);
+            recorder.Pass(StorageCheckId.Write);
+        }
+        catch (RequestFailedException)
+        {
+            return recorder.Fail(
+                StorageCheckId.Write,
+                StorageValidationDetails.WriteDenied,
+                StorageValidationDetails.RejectedMessage);
+        }
+
+        try
+        {
+            _ = await probe.DeleteIfExistsAsync(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            recorder.Pass(StorageCheckId.Delete);
+        }
+        catch (RequestFailedException)
+        {
+            return recorder.Fail(
+                StorageCheckId.Delete,
+                StorageValidationDetails.DeleteDenied,
+                StorageValidationDetails.RejectedMessage);
+        }
+
+        return recorder.Complete(StorageValidationDetails.ValidMessage);
+    }
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}
+
+/// <summary>
+/// Exercises an S3-compatible bucket with the submitted credential: list under
+/// the reserved probe prefix, then write and delete one empty probe object.
+/// </summary>
+internal sealed class S3ValidationClient(IAmazonS3 client, string bucket)
+    : IStorageValidationClient
+{
+    public async ValueTask<StorageValidationOutcome> ProbeAsync(
+        string probeKey,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(probeKey);
+        var recorder = new StorageProbeRecorder();
+        try
+        {
+            _ = await client.ListObjectsV2Async(
+                new ListObjectsV2Request
+                {
+                    BucketName = bucket,
+                    Prefix = StorageProbeNaming.Prefix,
+                    MaxKeys = 1,
+                },
+                cancellationToken)
+                .ConfigureAwait(false);
+            recorder.Pass(StorageCheckId.Reachable);
+            recorder.Pass(StorageCheckId.Authenticated);
+            recorder.Pass(StorageCheckId.Read);
+        }
+        catch (AmazonS3Exception failure)
+        {
+            if (failure.StatusCode is HttpStatusCode.Unauthorized or
+                HttpStatusCode.Forbidden)
+            {
+                recorder.Pass(StorageCheckId.Reachable);
+                return recorder.Fail(
+                    StorageCheckId.Authenticated,
+                    StorageValidationDetails.CredentialRejected,
+                    StorageValidationDetails.RejectedMessage);
+            }
+
+            if ((int)failure.StatusCode is >= 400 and < 500)
+            {
+                recorder.Pass(StorageCheckId.Reachable);
+                recorder.Pass(StorageCheckId.Authenticated);
+                return recorder.Fail(
+                    StorageCheckId.Read,
+                    StorageValidationDetails.ListDenied,
+                    StorageValidationDetails.RejectedMessage);
+            }
+
+            return recorder.Fail(
+                StorageCheckId.Reachable,
+                StorageValidationDetails.Unreachable,
+                StorageValidationDetails.RejectedMessage);
+        }
+
+        try
+        {
+            _ = await client.PutObjectAsync(
+                new PutObjectRequest
+                {
+                    BucketName = bucket,
+                    Key = probeKey,
+                    ContentBody = string.Empty,
+                },
+                cancellationToken)
+                .ConfigureAwait(false);
+            recorder.Pass(StorageCheckId.Write);
+        }
+        catch (AmazonS3Exception)
+        {
+            return recorder.Fail(
+                StorageCheckId.Write,
+                StorageValidationDetails.WriteDenied,
+                StorageValidationDetails.RejectedMessage);
+        }
+
+        try
+        {
+            _ = await client.DeleteObjectAsync(
+                new DeleteObjectRequest { BucketName = bucket, Key = probeKey },
+                cancellationToken)
+                .ConfigureAwait(false);
+            recorder.Pass(StorageCheckId.Delete);
+        }
+        catch (AmazonS3Exception)
+        {
+            return recorder.Fail(
+                StorageCheckId.Delete,
+                StorageValidationDetails.DeleteDenied,
+                StorageValidationDetails.RejectedMessage);
+        }
+
+        return recorder.Complete(StorageValidationDetails.ValidMessage);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        client.Dispose();
+        return ValueTask.CompletedTask;
     }
 }
