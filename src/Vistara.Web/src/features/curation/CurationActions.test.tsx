@@ -927,7 +927,7 @@ describe('curation actions', () => {
     ).toBeNull();
   });
 
-  it('reads stale album versions a few at a time and respects a rate limit', async () => {
+  it('reads stale album versions a few at a time', async () => {
     const many = Array.from({ length: 200 }, (_, index) =>
       asset({ id: `asset-${index}`, title: `Image ${index}`, version: 3 }),
     );
@@ -939,18 +939,50 @@ describe('curation actions', () => {
       });
     let inFlight = 0;
     let peak = 0;
-    let refusals = 0;
     const getAsset = vi.fn(async (id: string) => {
       inFlight += 1;
       peak = Math.max(peak, inFlight);
       await new Promise((resolve) => setTimeout(resolve, 1));
       inFlight -= 1;
       if (id === 'asset-5') {
-        refusals += 1;
-        throw throttledError(3);
+        throw apiError(404);
       }
 
       return detail(asset({ id, version: 11 }));
+    });
+    const { user } = renderActions({
+      assets: many,
+      client: makeClient({ addAlbumItems, getAsset }),
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Albums' }));
+    const panel = await screen.findByRole('group', { name: 'Albums' });
+    await user.click(within(panel).getByRole('button', { name: 'Add to Summer' }));
+
+    await waitFor(() => expect(addAlbumItems).toHaveBeenCalledTimes(2));
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(4);
+    const retry = (addAlbumItems.mock.calls[1] as unknown[])[1] as {
+      items: readonly unknown[];
+    };
+    expect(retry.items).toHaveLength(199);
+    // The reference that could not be read was never sent, and says so.
+    await waitFor(() =>
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent(
+        'Added to Summer: 199 images. 1 image was left untouched.',
+      ),
+    );
+  });
+
+  it('stops a stale album recovery at the first rate limit it cannot pass', async () => {
+    const many = Array.from({ length: 200 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}`, version: 3 }),
+    );
+    const addAlbumItems = vi.fn().mockRejectedValue(apiError(412));
+    const getAsset = vi.fn(async () => {
+      throw throttledError(4);
     });
     const waits: number[] = [];
     const { user } = renderActions({
@@ -965,22 +997,115 @@ describe('curation actions', () => {
     const panel = await screen.findByRole('group', { name: 'Albums' });
     await user.click(within(panel).getByRole('button', { name: 'Add to Summer' }));
 
-    await waitFor(() => expect(addAlbumItems).toHaveBeenCalledTimes(2));
-    expect(peak).toBeGreaterThan(1);
-    expect(peak).toBeLessThanOrEqual(4);
-    // The refused read was retried once, after the delay it asked for.
-    expect(refusals).toBe(2);
-    expect(waits).toEqual([3000]);
-    const retry = (addAlbumItems.mock.calls[1] as unknown[])[1] as {
-      items: readonly unknown[];
-    };
-    expect(retry.items).toHaveLength(199);
     await waitFor(() =>
       expect(
         screen.getByRole('status', { name: 'Curation result' }),
       ).toHaveTextContent(
-        'Added to Summer: 199 images. 1 image changed elsewhere and was left alone.',
+        'Added to Summer: no images. 200 images were left untouched.',
       ),
+    );
+    // One throttle cycle for the whole run, and the reads stop with it.
+    expect(waits).toEqual([4000]);
+    expect(getAsset.mock.calls.length).toBeLessThanOrEqual(8);
+    // Nothing was changed after the run stopped.
+    expect(addAlbumItems).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the waiting banner up while a read is still waiting', async () => {
+    const many = Array.from({ length: 200 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}`, version: 3 }),
+    );
+    const addAlbumItems = vi.fn().mockRejectedValue(apiError(412));
+    const getAsset = vi.fn(async () => {
+      throw throttledError(6);
+    });
+    let release = () => undefined as void;
+    const waiting = new Promise<void>((resolve) => {
+      release = () => resolve();
+    });
+    const { user } = renderActions({
+      assets: many,
+      client: makeClient({ addAlbumItems, getAsset }),
+      wait: () => waiting,
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Albums' }));
+    const panel = await screen.findByRole('group', { name: 'Albums' });
+    await user.click(within(panel).getByRole('button', { name: 'Add to Summer' }));
+
+    const progress = await screen.findByRole('status', {
+      name: 'Curation progress',
+    });
+    await waitFor(() =>
+      expect(progress).toHaveTextContent(
+        'Waiting 6 seconds because the server asked Vistara to slow down.',
+      ),
+    );
+    // Every other worker has finished by now; the banner belongs to the run.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(
+      screen.getByRole('status', { name: 'Curation progress' }),
+    ).toHaveTextContent('Waiting 6 seconds');
+
+    release();
+    await waitFor(() =>
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent('200 images were left untouched.'),
+    );
+    // The same element carried both states, so it was updated, not replaced.
+    expect(screen.getByRole('status', { name: 'Curation progress' })).toBe(
+      progress,
+    );
+    expect(progress).toHaveTextContent('');
+  });
+
+  it('stops a recovery when the visitor stops waiting, changing nothing', async () => {
+    const many = Array.from({ length: 200 }, (_, index) =>
+      asset({ id: `asset-${index}`, title: `Image ${index}`, version: 3 }),
+    );
+    const addAlbumItems = vi.fn().mockRejectedValue(apiError(412));
+    // One reference is refused, the rest read slowly, so other workers are
+    // still looping while the run waits.
+    const getAsset = vi.fn(async (id: string) => {
+      if (id === 'asset-0') {
+        throw throttledError(30);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 8));
+      return detail(asset({ id, version: 11 }));
+    });
+    const { user } = renderActions({
+      assets: many,
+      client: makeClient({ addAlbumItems, getAsset }),
+      wait: (_milliseconds: number, signal: AbortSignal) =>
+        new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve());
+        }),
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Albums' }));
+    const panel = await screen.findByRole('group', { name: 'Albums' });
+    await user.click(within(panel).getByRole('button', { name: 'Add to Summer' }));
+
+    const stop = await screen.findByRole('button', { name: 'Stop waiting' });
+    await user.click(stop);
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole('status', { name: 'Curation result' }),
+      ).toHaveTextContent(
+        'Added to Summer: no images. 200 images were left untouched.',
+      ),
+    );
+    // The workers that were still reading stopped too, well short of the batch.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(getAsset.mock.calls.length).toBeLessThan(60);
+    expect(addAlbumItems).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Stop waiting' })).toBeNull();
+    // Focus follows the control that vanished to the result that replaced it.
+    await waitFor(() =>
+      expect(screen.getByRole('status', { name: 'Curation result' })).toHaveFocus(),
     );
   });
 

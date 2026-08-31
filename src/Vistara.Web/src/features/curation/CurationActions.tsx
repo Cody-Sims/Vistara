@@ -75,6 +75,17 @@ export interface CurationActionsProps {
 
 type Panel = 'tags' | 'albums';
 
+/**
+ * What one run of an action knows about itself: whether the visitor stopped
+ * it, whether its single throttle cycle has been spent, and whether a refusal
+ * has already told it to stop.
+ */
+interface RunContext {
+  readonly signal: AbortSignal;
+  throttleSpent: boolean;
+  stopped: boolean;
+}
+
 interface ListState<T> {
   readonly kind: 'loading' | 'ready' | 'failed';
   readonly items: readonly T[];
@@ -235,8 +246,12 @@ export function CurationActions({
   const [tags, setTags] = useState<ListState<Tag>>(idle);
   const [albums, setAlbums] = useState<ListState<AlbumSummary>>(idle);
 
-  /** Set while a rate limit is being waited out, so it can be stopped. */
+  /**
+   * The run-level waiting banner. It is counted rather than toggled, so a
+   * worker that finishes while another is still waiting cannot clear it.
+   */
   const [waitingSeconds, setWaitingSeconds] = useState<number>();
+  const waiters = useRef(0);
   const stopWaiting = useRef<AbortController>(undefined);
   /** Bumped when a finished action should take focus to its report. */
   const [focusReport, setFocusReport] = useState(0);
@@ -358,19 +373,38 @@ export function CurationActions({
     (undoButton.current ?? summaryRef.current)?.focus();
   }, [focusReport]);
 
+  function beginWait(seconds: number) {
+    waiters.current += 1;
+    setWaitingSeconds(seconds);
+  }
+
+  function endWait() {
+    waiters.current = Math.max(0, waiters.current - 1);
+    if (waiters.current === 0) {
+      setWaitingSeconds(undefined);
+    }
+  }
+
   /**
    * One attempt, then — if the API asked the caller to slow down — one more
-   * after the delay it named. The wait can be stopped, which abandons the
-   * retry and tells the caller nothing further should be attempted.
+   * after the delay it named. A run waits out at most one such delay: once it
+   * is spent, a further refusal stops the run instead of waiting again. The
+   * wait can be stopped, which abandons the retry and tells the caller that
+   * nothing further should be attempted or changed.
    */
   async function withThrottleRetry<T>(
     run: () => Promise<T>,
-    signal: AbortSignal,
+    context: RunContext,
   ): Promise<
     | { readonly kind: 'value'; readonly value: T }
     | { readonly kind: 'failed'; readonly error: unknown }
     | { readonly kind: 'throttled'; readonly error: unknown }
   > {
+    const halt = (error: unknown) => {
+      context.stopped = true;
+      return { kind: 'throttled' as const, error };
+    };
+
     try {
       return { kind: 'value', value: await run() };
     } catch (error) {
@@ -379,15 +413,20 @@ export function CurationActions({
         return { kind: 'failed', error };
       }
 
-      setWaitingSeconds(seconds);
-      try {
-        await wait(Math.min(seconds * 1000, maximumThrottleWait), signal);
-      } finally {
-        setWaitingSeconds(undefined);
+      if (context.throttleSpent || context.signal.aborted) {
+        return halt(error);
       }
 
-      if (signal.aborted) {
-        return { kind: 'throttled', error };
+      context.throttleSpent = true;
+      beginWait(seconds);
+      try {
+        await wait(Math.min(seconds * 1000, maximumThrottleWait), context.signal);
+      } finally {
+        endWait();
+      }
+
+      if (context.signal.aborted) {
+        return halt(error);
       }
     }
 
@@ -396,20 +435,30 @@ export function CurationActions({
     } catch (error) {
       return retryAfterSeconds(error) === undefined
         ? { kind: 'failed', error }
-        : { kind: 'throttled', error };
+        : halt(error);
     }
   }
 
   /** Runs an action with a controller the visitor can abort. */
-  function startRun(): AbortController {
+  function startRun(): RunContext {
     const controller = new AbortController();
     stopWaiting.current = controller;
-    return controller;
+    waiters.current = 0;
+    return {
+      signal: controller.signal,
+      throttleSpent: false,
+      stopped: false,
+    };
   }
 
-  function endRun() {
+  function endRun(context: RunContext) {
     stopWaiting.current = undefined;
+    waiters.current = 0;
     setWaitingSeconds(undefined);
+    // The control the visitor was using has gone, so the report takes focus.
+    if (context.throttleSpent) {
+      setFocusReport((current) => current + 1);
+    }
   }
 
   /**
@@ -448,19 +497,17 @@ export function CurationActions({
    */
   async function runBulk(action: string, bulkAction: AssetBulkAction) {
     setBusy(true);
-    const controller = startRun();
+    const context = startRun();
     const results: CurationItemResult[] = [];
-    const chunks = batches(actionable);
     let refused = false;
-    let stopped = false;
 
-    for (const batch of chunks) {
+    for (const batch of batches(actionable)) {
       const item = (
         target: AssetSummary,
         outcome: CurationItemResult['outcome'],
       ) => ({ id: target.id, title: target.title, outcome });
 
-      if (stopped) {
+      if (context.stopped || context.signal.aborted) {
         results.push(...batch.map((target) => item(target, 'untouched')));
         continue;
       }
@@ -471,9 +518,8 @@ export function CurationActions({
             { items: toVersionedReferences(batch), action: bulkAction },
             { idempotencyKey: createIdempotencyKey() },
           ),
-        controller.signal,
+        context,
       );
-
 
       if (answer.kind === 'value') {
         results.push(...batch.map((target) => item(target, 'queued')));
@@ -483,13 +529,16 @@ export function CurationActions({
       refused = true;
       if (answer.kind === 'throttled') {
         /**
-         * The API is still refusing after the delay it asked for, or the wait
-         * was stopped. Sending the batches behind this one would only repeat
-         * the wait, so they are left alone and said to be.
+         * The API is still refusing after the one delay this run waits out, or
+         * the wait was stopped. Sending the batches behind this one would only
+         * repeat it, so they are left alone and said to be. A batch stopped
+         * before its retry changed nothing, so it is untouched too.
          */
-        stopped = true;
-        const attempted = controller.signal.aborted ? 'untouched' : 'failed';
-        results.push(...batch.map((target) => item(target, attempted)));
+        results.push(
+          ...batch.map((target) =>
+            item(target, context.signal.aborted ? 'untouched' : 'failed'),
+          ),
+        );
         continue;
       }
 
@@ -508,7 +557,7 @@ export function CurationActions({
       );
     }
 
-    endRun();
+    endRun(context);
     report(action, results);
     setBusy(false);
     onCurated?.([]);
@@ -611,7 +660,7 @@ export function CurationActions({
    */
   async function changeAlbum(value: AlbumSummary, add: boolean) {
     setBusy(true);
-    const controller = startRun();
+    const context = startRun();
     const action = add ? `Added to ${value.name}` : `Removed from ${value.name}`;
     const call = (
       album: AlbumSummary,
@@ -629,7 +678,6 @@ export function CurationActions({
 
     let album = value;
     let committedAny = false;
-    let stopped = false;
     const results: CurationItemResult[] = [];
     const versions: AssetSummary[] = [];
 
@@ -649,24 +697,22 @@ export function CurationActions({
             outcome: value,
           }));
 
-      if (stopped) {
+      // A stopped run never sends another request and never changes anything,
+      // so every reference it did not reach is untouched.
+      if (context.stopped || context.signal.aborted) {
         results.push(...outcome('untouched'));
         continue;
       }
 
       let detail;
-      let unreadable: ReadonlySet<string> = new Set();
-      const first = await withThrottleRetry(
-        () => call(album, batch),
-        controller.signal,
-      );
+      let unread: ReadonlySet<string> = new Set();
+      const first = await withThrottleRetry(() => call(album, batch), context);
 
       if (first.kind === 'value') {
         detail = first.value.data;
       } else if (first.kind === 'throttled') {
-        stopped = true;
         results.push(
-          ...outcome(controller.signal.aborted ? 'untouched' : 'failed'),
+          ...outcome(context.signal.aborted ? 'untouched' : 'failed'),
         );
         continue;
       } else if (!isStaleVersion(first.error)) {
@@ -681,34 +727,42 @@ export function CurationActions({
          */
         const reload = await withThrottleRetry(
           () => client.getAlbum(album.id),
-          controller.signal,
+          context,
         );
         if (reload.kind !== 'value') {
-          stopped = reload.kind === 'throttled';
           results.push(
             ...outcome(
-              controller.signal.aborted ? 'untouched' : 'conflict',
+              reload.kind === 'throttled' ? 'untouched' : 'conflict',
             ),
           );
           continue;
         }
 
         album = reload.value.data.album;
-        const fresh = await refreshed(batch, controller.signal);
-        unreadable = new Set(fresh.unreadable);
+        const fresh = await refreshed(batch, context);
+        unread = new Set(fresh.unread);
+
+        // Nothing has been changed yet, so a stopped recovery leaves the whole
+        // batch as it found it rather than half applying it.
+        if (context.stopped || context.signal.aborted) {
+          results.push(...outcome('untouched'));
+          continue;
+        }
+
         if (fresh.items.length === 0) {
-          results.push(...outcome('conflict'));
+          results.push(...outcome('untouched'));
           continue;
         }
 
         const retry = await withThrottleRetry(
           () => call(album, fresh.items),
-          controller.signal,
+          context,
         );
         if (retry.kind !== 'value') {
-          stopped = retry.kind === 'throttled';
           results.push(
-            ...outcome(controller.signal.aborted ? 'untouched' : 'conflict'),
+            ...outcome(
+              retry.kind === 'throttled' ? 'untouched' : 'conflict',
+            ),
           );
           continue;
         }
@@ -720,12 +774,10 @@ export function CurationActions({
       committedAny = true;
       album = detail.album;
       const applied = new Set(
-        inBatch
-          .map((target) => target.id)
-          .filter((id) => !unreadable.has(id)),
+        inBatch.map((target) => target.id).filter((id) => !unread.has(id)),
       );
       results.push(...outcome('updated', applied));
-      results.push(...outcome('conflict', unreadable));
+      results.push(...outcome('untouched', unread));
       for (const item of detail.items.items) {
         if (applied.has(item.asset.id)) {
           versions.push(item.asset);
@@ -744,7 +796,7 @@ export function CurationActions({
       }));
     }
 
-    endRun();
+    endRun(context);
     report(action, results);
     setBusy(false);
     if (committedAny) {
@@ -755,16 +807,17 @@ export function CurationActions({
   /**
    * Reads the version each asset is on now. A stale album batch can hold two
    * hundred references, so the reads are bounded and each one follows the same
-   * rate-limit discipline as everything else: one retry after the delay the
-   * API asked for. Anything still unreadable is named, so the caller reports
-   * it rather than quietly leaving it out.
+   * rate-limit discipline as everything else. The pool checks before every
+   * read whether the run has been stopped — by the visitor or by a refusal it
+   * could not pass — and schedules nothing more once it has. References that
+   * were never read, for whatever reason, are named so the caller can say so.
    */
   async function refreshed(
     items: readonly VersionedAssetReference[],
-    signal: AbortSignal,
+    context: RunContext,
   ): Promise<{
     readonly items: readonly VersionedAssetReference[];
-    readonly unreadable: readonly string[];
+    readonly unread: readonly string[];
   }> {
     const current: (VersionedAssetReference | undefined)[] = new Array(
       items.length,
@@ -772,18 +825,27 @@ export function CurationActions({
     let next = 0;
     const worker = async () => {
       for (let index = next++; index < items.length; index = next++) {
+        if (context.stopped || context.signal.aborted) {
+          return;
+        }
+
         const item = items[index]!;
         const answer = await withThrottleRetry(
           () => client.getAsset(item.id),
-          signal,
+          context,
         );
-        current[index] =
-          answer.kind === 'value'
-            ? {
-                id: answer.value.data.asset.id,
-                version: answer.value.data.asset.version,
-              }
-            : undefined;
+        if (answer.kind === 'value') {
+          current[index] = {
+            id: answer.value.data.asset.id,
+            version: answer.value.data.asset.version,
+          };
+          continue;
+        }
+
+        if (answer.kind === 'throttled') {
+          // `withThrottleRetry` has already stopped the run; leave the rest.
+          return;
+        }
       }
     };
 
@@ -798,7 +860,7 @@ export function CurationActions({
       items: current.filter(
         (item): item is VersionedAssetReference => item !== undefined,
       ),
-      unreadable: items
+      unread: items
         .filter((_, index) => current[index] === undefined)
         .map((item) => item.id),
     };
@@ -968,19 +1030,23 @@ export function CurationActions({
 
   const reportNode = (
     <div className={styles.report}>
-      {waitingSeconds === undefined ? null : (
-        <div className={styles.waiting}>
-          <p
-            aria-label="Curation progress"
-            aria-live="polite"
-            className={styles.summary}
-            data-tone="warning"
-            role="status"
-          >
-            {`Waiting ${
-              waitingSeconds === 1 ? '1 second' : `${waitingSeconds} seconds`
-            } because the server asked Vistara to slow down.`}
-          </p>
+      <div className={styles.waiting}>
+        {/* Mounted for the life of the surface, so a delay is announced as an
+            update to a region a screen reader is already watching. */}
+        <p
+          aria-label="Curation progress"
+          aria-live="polite"
+          className={styles.summary}
+          data-tone={waitingSeconds === undefined ? undefined : 'warning'}
+          role="status"
+        >
+          {waitingSeconds === undefined
+            ? ''
+            : `Waiting ${
+                waitingSeconds === 1 ? '1 second' : `${waitingSeconds} seconds`
+              } because the server asked Vistara to slow down.`}
+        </p>
+        {waitingSeconds === undefined ? null : (
           <button
             className={styles.action}
             onClick={() => stopWaiting.current?.abort()}
@@ -988,8 +1054,8 @@ export function CurationActions({
           >
             Stop waiting
           </button>
-        </div>
-      )}
+        )}
+      </div>
       <p
         aria-label="Curation result"
         aria-live="polite"
