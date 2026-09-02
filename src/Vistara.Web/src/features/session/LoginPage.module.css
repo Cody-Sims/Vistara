@@ -159,6 +159,48 @@
   border-color: var(--color-border-strong);
 }
 
+/* The hosted providers, above the password form and never instead of it. */
+.providers {
+  display: grid;
+  inline-size: 100%;
+  gap: var(--space-3);
+}
+
+.federated[aria-busy="true"] {
+  cursor: progress;
+  opacity: 0.75;
+}
+
+.providerMark {
+  inline-size: 1.15rem;
+  block-size: 1.15rem;
+  margin-inline-end: var(--space-3);
+  flex: none;
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  text-align: center;
+}
+
+.divider::before,
+.divider::after {
+  flex: 1 1 auto;
+  border-block-start: 1px solid var(--color-border-subtle);
+  content: "";
+}
+
+@media (max-width: 30rem) {
+  .federated {
+    padding-inline: var(--space-3);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .field input,
   .submit,
