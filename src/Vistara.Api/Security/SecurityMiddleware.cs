@@ -508,10 +508,24 @@ internal static class SecurityRequestClassifier
 {
     internal static bool IsRateLimited(HttpContext context) =>
         !HttpMethods.IsOptions(context.Request.Method) &&
-        (context.Request.Path.StartsWithSegments("/api") ||
-         context.Request.Path.StartsWithSegments("/v1") ||
-         context.Request.Path.StartsWithSegments("/delivery"));
+        IsRateLimitedPath(context.Request.Path);
 
+    /// <summary>
+    /// The paths the in-process framework limiter governs. The platform
+    /// composition asks the same question when it checks that a persisted
+    /// bucket the framework also counts is one the framework can admit.
+    /// </summary>
+    internal static bool IsRateLimitedPath(PathString path) =>
+        path.StartsWithSegments("/api") ||
+        path.StartsWithSegments("/v1") ||
+        path.StartsWithSegments("/delivery");
+
+    /// <summary>
+    /// The rate-limit partition is the connection peer as it stands after
+    /// forwarded-header processing: the client itself on a direct connection,
+    /// the forwarded client behind a trusted proxy, and the ingress when no
+    /// proxy is trusted.
+    /// </summary>
     internal static string RateLimitPartition(HttpContext context) =>
         context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
 

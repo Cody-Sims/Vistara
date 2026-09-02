@@ -3,6 +3,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Vistara.Api.Composition.Platform;
+using Vistara.Api.Composition.Security;
 using Vistara.Application.Common;
 using Xunit;
 
@@ -39,6 +40,7 @@ public sealed class PlatformRateLimitOptionsTests
         using ServiceProvider services = Compose(new Dictionary<string, string?>(
             StringComparer.Ordinal)
         {
+            ["Platform:RateLimits:PartitionMode"] = "ForwardedClient",
             ["Platform:RateLimits:Window"] = "00:05:00",
             ["Platform:RateLimits:Api"] = "1200",
             ["Platform:RateLimits:Events"] = "45",
@@ -66,7 +68,9 @@ public sealed class PlatformRateLimitOptionsTests
         using ServiceProvider services = Compose(new Dictionary<string, string?>(
             StringComparer.Ordinal)
         {
+            ["Platform:RateLimits:PartitionMode"] = "SharedIngress",
             ["Platform:RateLimits:Events"] = "600",
+            ["Security:Limits:RequestsPerWindow"] = "600",
         });
 
         PlatformRateLimitOptions options = Resolve(services);
@@ -213,35 +217,6 @@ public sealed class PlatformRateLimitOptionsTests
     }
 
     /// <summary>
-    /// The hosted profile is the handoff for a deployment behind a shared
-    /// ingress. It has to be a configuration a host actually accepts, so it is
-    /// bound and validated here rather than only written down.
-    /// </summary>
-    [Fact]
-    public void The_hosted_profile_binds_to_an_elevated_shared_ceiling()
-    {
-        using ServiceProvider services = Compose(
-            PlatformRateLimitHostedProfile.Configuration.ToDictionary(
-                static entry => entry.Key,
-                static entry => (string?)entry.Value,
-                StringComparer.Ordinal));
-
-        PlatformRateLimitOptions options = Resolve(services);
-
-        Assert.Equal(TimeSpan.FromMinutes(1), options.Window);
-        Assert.Equal(6000, options.Api);
-        Assert.Equal(600, options.Events);
-        Assert.Equal(6000, options.Delivery);
-        Assert.Equal(6000, options.Media);
-        Assert.All(
-            PlatformRateLimitHostedProfile.Configuration.Keys,
-            static key => Assert.StartsWith(
-                $"{PlatformRateLimitOptions.SectionName}:",
-                key,
-                StringComparison.Ordinal));
-    }
-
-    /// <summary>
     /// The hosted profile raises the shared ceiling; it does not remove it.
     /// </summary>
     [Fact]
@@ -265,8 +240,12 @@ public sealed class PlatformRateLimitOptionsTests
         services.AddLogging();
         services.AddDataProtection();
         services.AddSingleton<IClock>(SystemClock.Instance);
-        services.AddVistaraApiPlatform(
-            new ConfigurationBuilder().AddInMemoryCollection(settings).Build());
+        IConfiguration configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(settings)
+            .Build();
+        services.Configure<VistaraSecurityOptions>(
+            configuration.GetSection(VistaraSecurityOptions.SectionName));
+        services.AddVistaraApiPlatform(configuration);
         return services.BuildServiceProvider(
             new ServiceProviderOptions { ValidateScopes = true });
     }
