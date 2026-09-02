@@ -36,6 +36,20 @@ public static class PlatformServiceCollectionExtensions
             ServiceDescriptor.Singleton<
                 IValidateOptions<PlatformOptions>,
                 PlatformOptionsValidator>());
+
+        // The persisted rate-limit ceiling is bound and bounded here rather
+        // than compiled in, because the same limit is a per-client budget on a
+        // Compose host and a deployment-wide ceiling behind a shared ingress.
+        // It is validated whether or not persistence is composed, so a limit
+        // that would fail at the first request fails the host instead.
+        services.AddOptions<PlatformRateLimitOptions>().ValidateOnStart();
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IConfigureOptions<PlatformRateLimitOptions>>(
+                new PlatformRateLimitOptionsSetup(configuration)));
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<
+                IValidateOptions<PlatformRateLimitOptions>,
+                PlatformRateLimitOptionsValidator>());
         services.AddAuthentication(options =>
             {
                 options.DefaultAuthenticateScheme =
