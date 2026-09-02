@@ -678,6 +678,107 @@ public sealed class OidcSignInRuntimeTests
     }
 
     /// <summary>
+    /// Cookie authentication rotates a session once the sliding refresh
+    /// interval has elapsed: the presented token is revoked and a refreshed
+    /// one is appended to the very response the sign-out is answering. Acting
+    /// on the presented token would revoke a row that is already gone and
+    /// leave the refreshed session live, handing the caller a working cookie
+    /// from their own sign-out. Sign-out must act on the effective session and
+    /// the response must carry only the deletion.
+    /// </summary>
+    [Fact]
+    public async Task Relying_party_sign_out_revokes_a_session_rotated_by_this_request()
+    {
+        await using OidcSignInHost host = await OidcSignInHost.CreateAsync();
+        Guid tenantId = await host.ProvisionLocalOwnerAsync();
+        Guid userId = await host.ReadOwnerUserIdAsync(tenantId);
+        await host.LinkDirectoryIdentityAsync(tenantId, userId, MemberObjectId);
+        string original = Assert.IsType<string>(
+            (await host.SignInAsync(MemberObjectId))
+                .CookieValue(CookieAuthOptions.ProductionCookieName));
+        string csrfToken = Assert.IsType<string>(
+            (await host.GetCurrentUserAsync(original)).Json()
+                .GetProperty("csrfToken")
+                .GetString());
+        Assert.Equal(1, await host.CountLiveSessionsAsync());
+
+        host.Clock.Advance(
+            host.CookieOptions.SlidingRefreshInterval + TimeSpan.FromMinutes(1));
+
+        TestResponse response = await host.SignOutAsync(original, csrfToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(response.Json().GetProperty("endSessionUrl").GetString());
+
+        // The refreshed cookie must not survive as an instruction the browser
+        // could keep, and no session may remain live behind it.
+        string session = Assert.IsType<string>(
+            Assert.Single(
+                response.SetCookies,
+                cookie => cookie.StartsWith(
+                    CookieAuthOptions.ProductionCookieName + "=",
+                    StringComparison.Ordinal)));
+        Assert.Contains("Max-Age=0", session, StringComparison.Ordinal);
+        Assert.Equal(0, await host.CountLiveSessionsAsync());
+
+        string? refreshed = response.CookieValue(CookieAuthOptions.ProductionCookieName);
+        Assert.Null(refreshed);
+        Assert.Equal(
+            HttpStatusCode.Unauthorized,
+            (await host.GetCurrentUserAsync(original)).StatusCode);
+
+        string audit = string.Join("\n", host.AuditRecords);
+        Assert.Contains("session_revoked", audit, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "no_live_session_to_revoke",
+            audit,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The audit answers whether a session was actually revoked, so a sign-out
+    /// that found nothing to revoke must not record one that succeeded.
+    /// </summary>
+    [Fact]
+    public async Task Relying_party_sign_out_does_not_audit_a_revocation_that_did_not_happen()
+    {
+        await using OidcSignInHost host = await OidcSignInHost.CreateAsync();
+        Guid tenantId = await host.ProvisionLocalOwnerAsync();
+        Guid userId = await host.ReadOwnerUserIdAsync(tenantId);
+        await host.LinkDirectoryIdentityAsync(tenantId, userId, MemberObjectId);
+        string session = Assert.IsType<string>(
+            (await host.SignInAsync(MemberObjectId))
+                .CookieValue(CookieAuthOptions.ProductionCookieName));
+        string csrfToken = Assert.IsType<string>(
+            (await host.GetCurrentUserAsync(session)).Json()
+                .GetProperty("csrfToken")
+                .GetString());
+
+        _ = await host.SignOutAsync(session, csrfToken);
+        int auditedBefore = host.AuditRecords.Count(
+            record => record.Contains("session_revoked", StringComparison.Ordinal));
+        Assert.Equal(1, auditedBefore);
+        Assert.Equal(0, await host.CountLiveSessionsAsync());
+
+        // The browser still holds the cookie, so the request is well formed
+        // and answered. It simply revoked nothing, and the audit has to say so
+        // rather than record a second sign-out.
+        TestResponse repeated = await host.SignOutAsync(session, csrfToken);
+
+        Assert.Equal(HttpStatusCode.OK, repeated.StatusCode);
+        Assert.True(repeated.ClearsCookie(CookieAuthOptions.ProductionCookieName));
+        Assert.Equal(0, await host.CountLiveSessionsAsync());
+        Assert.Equal(
+            auditedBefore,
+            host.AuditRecords.Count(
+                record => record.Contains("session_revoked", StringComparison.Ordinal)));
+        Assert.Contains(
+            "no_live_session_to_revoke",
+            string.Join("\n", host.AuditRecords),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Sign-out acts on the session the caller presents, so an anonymous or
     /// forged cross-site POST has nothing to act on and learns nothing.
     /// </summary>

@@ -107,6 +107,10 @@ internal sealed class OidcSignInHost : IAsyncDisposable
 
     internal IServiceProvider Services => _app.Services;
 
+    /// <summary>The composed cookie policy, so tests read real lifetimes.</summary>
+    internal CookieAuthOptions CookieOptions =>
+        _app.Services.GetRequiredService<CookieAuthOptions>();
+
     internal static async Task<OidcSignInHost> CreateAsync(
         bool bootstrapEnabled = false,
         IReadOnlyList<Guid>? allowedObjectIds = null,

@@ -144,8 +144,10 @@ internal sealed class PlatformOidcAuditSink(ILogger<PlatformOidcAuditSink> logge
 /// </summary>
 internal sealed class PlatformOidcSignOutAdapter(
     IBrowserSessionPort sessions,
+    PlatformLoginSessionFactory sessionFactory,
     PlatformOidcProviderRegistry registry,
-    IOidcAuditSink audit) : IOidcSignOutPort
+    IOidcAuditSink audit,
+    IClock clock) : IOidcSignOutPort
 {
     private const string SignOutStage = "sign-out";
 
@@ -155,8 +157,18 @@ internal sealed class PlatformOidcSignOutAdapter(
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionToken);
+
+        // Whether a live session existed is established before it is revoked,
+        // because afterwards every token looks the same. Recording a
+        // revocation that did not happen would make the audit useless for
+        // exactly the question it is there to answer. The routing row survives
+        // revocation, so liveness is read from the session record itself.
+        bool wasLive = await HasLiveSessionAsync(sessionToken, cancellationToken);
         string setCookieHeader = await sessions.LogoutAsync(sessionToken, cancellationToken);
-        audit.Record(new OidcAuditEvent(providerId, SignOutStage, "session_revoked"));
+        audit.Record(new OidcAuditEvent(
+            providerId,
+            SignOutStage,
+            wasLive ? "session_revoked" : "no_live_session_to_revoke"));
 
         PlatformOidcProvider? provider = registry.Find(providerId);
         if (provider?.Options.PostLogoutRedirectUri is not { } postLogoutRedirectUri)
@@ -187,6 +199,26 @@ internal sealed class PlatformOidcSignOutAdapter(
                 $"client_id={Uri.EscapeDataString(provider.Options.ClientId)}"),
         };
         return new OidcSignOutResult(setCookieHeader, endSessionUrl.Uri.AbsoluteUri);
+    }
+
+    private async ValueTask<bool> HasLiveSessionAsync(
+        string sessionToken,
+        CancellationToken cancellationToken)
+    {
+        string digest = CookieTokenCryptography.ComputeDigest(sessionToken);
+        if (await sessionFactory.FindSessionTenantAsync(digest, cancellationToken)
+            is not { } tenantId)
+        {
+            return false;
+        }
+
+        PersistedCookieSession? session = await sessionFactory
+            .CreateStore(tenantId)
+            .FindCookieSessionAsync(digest, cancellationToken);
+        DateTimeOffset now = clock.UtcNow.ToUniversalTime();
+        return session is { RevokedAtUtc: null } &&
+            session.IdleExpiresAtUtc > now &&
+            session.AbsoluteExpiresAtUtc > now;
     }
 }
 

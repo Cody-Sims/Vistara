@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Primitives;
 using Microsoft.Net.Http.Headers;
+using Vistara.Api.Composition.Platform;
 using Vistara.Api.Features;
 using Vistara.Auth.Cookies;
 using Vistara.Contracts.Identity;
@@ -218,7 +219,13 @@ public static class OidcAuthenticationEndpoint
         ArgumentNullException.ThrowIfNull(signOut);
         ArgumentNullException.ThrowIfNull(cookies);
 
-        if (ReadSessionToken(context, cookies) is not { } sessionToken)
+        // Cookie authentication may have rotated this session while the
+        // request was being authenticated, which revokes the token the browser
+        // presented and appends a refreshed one to this very response. Revoking
+        // the presented token would then leave the refreshed session live and
+        // hand the caller a working cookie from their own sign-out, so the
+        // effective token wins over the request cookie.
+        if (EffectiveSessionToken(context, cookies) is not { } sessionToken)
         {
             // Sign-out acts on the session the caller presents. With none
             // presented there is nothing to act on, and answering anyway would
@@ -237,7 +244,7 @@ public static class OidcAuthenticationEndpoint
             providerId,
             sessionToken,
             cancellationToken);
-        context.Response.Headers.Append(HeaderNames.SetCookie, result.SetCookieHeader);
+        ReplaceSessionCookie(context, cookies, result.SetCookieHeader);
         context.Response.Headers.CacheControl = "no-store";
         context.Response.ContentType = "application/json; charset=utf-8";
         context.Response.StatusCode = StatusCodes.Status200OK;
@@ -300,6 +307,43 @@ public static class OidcAuthenticationEndpoint
 
         string? value = values[0];
         return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    /// <summary>
+    /// The session token this request is authenticated by. Authentication may
+    /// replace the presented cookie, in which case the presented one is
+    /// already revoked and only the rotated token names a live session.
+    /// </summary>
+    private static string? EffectiveSessionToken(
+        HttpContext context,
+        CookieAuthOptions cookies) =>
+        PlatformAuthenticationState.ReadEffectiveSessionToken(context)
+        ?? ReadSessionToken(context, cookies);
+
+    /// <summary>
+    /// Writes the deletion cookie as the only session cookie on the response.
+    ///
+    /// A rotated session leaves a refreshed <c>Set-Cookie</c> already appended
+    /// by authentication. Appending the deletion header after it would rely on
+    /// the browser preferring the last header for a name, which is not
+    /// something a sign-out should depend on, and any client that kept the
+    /// refreshed value would hold a cookie for a session the server has
+    /// revoked. The earlier header is dropped instead, so the response carries
+    /// exactly one instruction for this cookie.
+    /// </summary>
+    private static void ReplaceSessionCookie(
+        HttpContext context,
+        CookieAuthOptions cookies,
+        string deletionHeader)
+    {
+        string prefix = cookies.CookieName + "=";
+        string[] retained = [.. context.Response.Headers[HeaderNames.SetCookie]
+            .Where(value =>
+                value is not null &&
+                !value.StartsWith(prefix, StringComparison.Ordinal))
+            .Select(value => value!)];
+        context.Response.Headers[HeaderNames.SetCookie] = retained;
+        context.Response.Headers.Append(HeaderNames.SetCookie, deletionHeader);
     }
 
     private static string? ReadSessionToken(
