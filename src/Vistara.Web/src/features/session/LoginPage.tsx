@@ -78,7 +78,14 @@ export function LoginPage({ setup }: LoginPageProps = {}) {
   const [password, setPassword] = useState('');
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [failure, setFailure] = useState('');
-  const [hostedFailure, setHostedFailure] = useState(false);
+  /**
+   * Whether this page was reached by a hosted sign-in that failed. It is read
+   * once, on the render that arrived with the code, so the message survives
+   * the code being taken out of the address bar.
+   */
+  const [hostedFailure, setHostedFailure] = useState(
+    () => searchParams.get('error') === hostedFailureCode,
+  );
   const [submitting, setSubmitting] = useState(false);
   const [starting, setStarting] = useState<string>();
   const loginField = useRef<HTMLInputElement>(null);
@@ -123,28 +130,28 @@ export function LoginPage({ setup }: LoginPageProps = {}) {
   }, [setup]);
 
   /**
-   * A hosted sign-in that failed comes back as a redirect carrying one code.
-   * It is announced once and then taken out of the address bar, so a reload,
-   * a shared link, or a screen reader revisiting the page does not repeat a
-   * failure that already happened. The return target is left alone.
+   * The failure is announced once and the code is then taken out of the
+   * address bar, so a reload, a shared link, or a screen reader revisiting the
+   * page does not repeat a failure that already happened. The return target is
+   * left alone.
    */
   useEffect(() => {
-    if (searchParams.get('error') !== hostedFailureCode) {
+    if (!hostedFailure || !searchParams.has('error')) {
       return;
     }
 
-    setFailure(hostedFailureMessage);
-    setHostedFailure(true);
     const remaining = new URLSearchParams(searchParams);
     remaining.delete('error');
     setSearchParams(remaining, { replace: true });
-  }, [searchParams, setSearchParams]);
+  }, [hostedFailure, searchParams, setSearchParams]);
 
   useEffect(() => {
     if (hostedFailure) {
       failureMessage.current?.focus();
     }
   }, [hostedFailure]);
+
+  const announced = failure || (hostedFailure ? hostedFailureMessage : '');
 
   const hostedProviders = publishedProviders(providers, destination);
 
@@ -195,14 +202,14 @@ export function LoginPage({ setup }: LoginPageProps = {}) {
           control.
         </p>
 
-        {failure ? (
+        {announced ? (
           <p
             className={styles.failure}
             ref={failureMessage}
             role="alert"
             tabIndex={hostedFailure ? -1 : undefined}
           >
-            {failure}
+            {announced}
           </p>
         ) : null}
 
