@@ -3,7 +3,7 @@
     "Ground truth for the configuration keys deploy/azure/infra/main.bicep is allowed to emit.",
     "Each entry names the type and property that binds the key so a rename in the",
     "application breaks this contract instead of silently producing a container that",
-    "ignores its own configuration. Entries whose owner has not landed on this branch",
+    "ignores its own configuration.",
     "Entries carrying pendingOwner are contributed by a sibling task that has not landed on this branch: the test asserts they are still absent so the marker cannot rot."
   ],
   "keys": [
@@ -31,7 +31,8 @@
       "owner": "HB-05",
       "sourceFile": "deploy/containers/migration-entrypoint.sh",
       "sourceToken": "MIGRATION_PROVIDER",
-      "required": true
+      "required": true,
+      "emittedValue": "PostgreSql"
     },
     {
       "name": "MIGRATION_MANAGED_IDENTITY_CLIENT_ID",
@@ -39,8 +40,7 @@
       "owner": "HB-05",
       "sourceFile": "deploy/containers/migration-entrypoint.sh",
       "sourceToken": "MIGRATION_MANAGED_IDENTITY_CLIENT_ID",
-      "required": true,
-      "pendingOwner": "HB-05"
+      "required": true
     },
     {
       "name": "MIGRATION_ENTRA_TOKEN_SCOPE",
@@ -48,16 +48,15 @@
       "owner": "HB-05",
       "sourceFile": "deploy/containers/migration-entrypoint.sh",
       "sourceToken": "MIGRATION_ENTRA_TOKEN_SCOPE",
-      "required": false,
-      "pendingOwner": "HB-05"
+      "required": false
     },
     {
       "name": "ConnectionStrings__Vistara",
       "kind": "configuration",
-      "owner": "HB-05",
+      "owner": "base",
       "configurationKey": "ConnectionStrings:Vistara",
-      "sourceFile": "src/Vistara.Persistence/PersistenceServiceCollectionExtensions.cs",
-      "sourceToken": "Vistara",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformComposition.cs",
+      "sourceToken": "GetConnectionString(\"Vistara\")",
       "required": true
     },
     {
@@ -67,7 +66,10 @@
       "configurationKey": "Persistence:Provider",
       "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformComposition.cs",
       "sourceToken": "Persistence:Provider",
-      "required": true
+      "required": true,
+      "emittedValue": "PostgreSql",
+      "enumType": "VistaraDatabaseProvider",
+      "enumSourceFile": "src/Vistara.Persistence/PersistenceServiceCollectionExtensions.cs"
     },
     {
       "name": "Persistence__Azure__EntraTokenEnabled",
@@ -76,8 +78,7 @@
       "sourceFile": "src/Vistara.Persistence/Azure/PersistenceAzureOptions.cs",
       "optionsType": "PersistenceAzureOptions",
       "property": "EntraTokenEnabled",
-      "required": true,
-      "pendingOwner": "HB-05"
+      "required": true
     },
     {
       "name": "Persistence__Azure__ManagedIdentityClientId",
@@ -86,8 +87,7 @@
       "sourceFile": "src/Vistara.Persistence/Azure/PersistenceAzureOptions.cs",
       "optionsType": "PersistenceAzureOptions",
       "property": "ManagedIdentityClientId",
-      "required": true,
-      "pendingOwner": "HB-05"
+      "required": true
     },
     {
       "name": "Persistence__Azure__TokenRefreshInterval",
@@ -96,8 +96,7 @@
       "sourceFile": "src/Vistara.Persistence/Azure/PersistenceAzureOptions.cs",
       "optionsType": "PersistenceAzureOptions",
       "property": "TokenRefreshInterval",
-      "required": false,
-      "pendingOwner": "HB-05"
+      "required": false
     },
     {
       "name": "Persistence__Azure__TokenRetryInterval",
@@ -106,8 +105,7 @@
       "sourceFile": "src/Vistara.Persistence/Azure/PersistenceAzureOptions.cs",
       "optionsType": "PersistenceAzureOptions",
       "property": "TokenRetryInterval",
-      "required": false,
-      "pendingOwner": "HB-05"
+      "required": false
     },
     {
       "name": "Persistence__Azure__TokenScope",
@@ -116,8 +114,7 @@
       "sourceFile": "src/Vistara.Persistence/Azure/PersistenceAzureOptions.cs",
       "optionsType": "PersistenceAzureOptions",
       "property": "TokenScope",
-      "required": false,
-      "pendingOwner": "HB-05"
+      "required": false
     },
     {
       "name": "Security__Hosts__AllowedHosts__0",
@@ -518,7 +515,9 @@
       "sourceFile": "src/Vistara.Api/Composition/Media/MediaComposition.cs",
       "optionsType": "MediaStorageOptions",
       "property": "Provider",
-      "required": true
+      "required": true,
+      "emittedValue": "Azure",
+      "enumType": "MediaStorageProvider"
     },
     {
       "name": "Media__Storage__Azure__AccountName",
@@ -554,7 +553,9 @@
       "sourceFile": "src/Vistara.Api/Composition/Media/MediaComposition.cs",
       "optionsType": "MediaAzureOptions",
       "property": "CredentialMode",
-      "required": true
+      "required": true,
+      "emittedValue": "ManagedIdentity",
+      "enumType": "MediaAzureCredentialMode"
     },
     {
       "name": "Media__Storage__Azure__ManagedIdentityClientId",
@@ -572,7 +573,9 @@
       "sourceFile": "src/Vistara.Api/Composition/Media/MediaComposition.cs",
       "optionsType": "MediaImagingOptions",
       "property": "Provider",
-      "required": true
+      "required": true,
+      "emittedValue": "NetVips",
+      "enumType": "MediaImagingProvider"
     },
     {
       "name": "Worker__InstanceId",

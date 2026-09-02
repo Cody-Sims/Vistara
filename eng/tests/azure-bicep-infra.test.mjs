@@ -658,6 +658,71 @@ test('contract entries name a property that the owning source really declares', 
   assert.ok(pending > 0, 'pending markers vanished without the contract changing');
 });
 
+/**
+ * Reads the members of a C# enum declaration so a contract value can be
+ * checked against the members the application really accepts.
+ */
+function enumMembers(source, enumType) {
+  const declaration = new RegExp(`enum ${enumType}\\s*\\{([\\s\\S]*?)\\n\\}`).exec(
+    source,
+  );
+  if (!declaration) {
+    return null;
+  }
+
+  return [...declaration[1].matchAll(/^\s{4}([A-Za-z][A-Za-z0-9]*),/gm)].map(
+    (match) => match[1],
+  );
+}
+
+test('enum-valued keys emit a member the owning source really accepts', () => {
+  let checked = 0;
+  for (const entry of CONFIG_CONTRACT.keys) {
+    if (!entry.emittedValue) {
+      continue;
+    }
+
+    assert.match(
+      MAIN,
+      new RegExp(`name: '${entry.name}'\\s*\\n\\s*value: '${entry.emittedValue}'`),
+      `main.bicep must emit '${entry.name}' as '${entry.emittedValue}'`,
+    );
+
+    if (entry.pendingOwner) {
+      continue;
+    }
+
+    const path = resolve(
+      REPOSITORY_ROOT,
+      entry.enumSourceFile ?? entry.sourceFile,
+    );
+    const source = readFileSync(path, 'utf8');
+    if (entry.enumType) {
+      const members = enumMembers(source, entry.enumType);
+      assert.notEqual(
+        members,
+        null,
+        `${entry.enumSourceFile ?? entry.sourceFile} must declare enum ${entry.enumType}`,
+      );
+      assert.ok(
+        members.includes(entry.emittedValue),
+        `${entry.enumType} has no member '${entry.emittedValue}' for '${entry.name}'`,
+      );
+    } else {
+      // A shell contract has no enum: the entrypoint's own case arm is the
+      // list of accepted values.
+      assert.ok(
+        source.includes(entry.emittedValue),
+        `${entry.sourceFile} must accept '${entry.emittedValue}' for '${entry.name}'`,
+      );
+    }
+
+    checked += 1;
+  }
+
+  assert.ok(checked >= 5, `only ${checked} enum-valued keys were checked`);
+});
+
 test('pending contract entries name a real sibling task', () => {
   const owners = new Set(
     CONFIG_CONTRACT.keys
