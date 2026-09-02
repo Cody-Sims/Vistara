@@ -73,9 +73,12 @@ requested, and both implicit grants are explicitly disabled.
 
 ### 1.2 Tools
 
-`up.sh` checks for `az`, `azd`, `curl`, and `openssl` before it does anything at
-all, and the preflight that `azd` runs at the start of each provisioning pass
-re-checks them with version floors and adds Bicep:
+`up.sh` checks for `az`, `azd`, `curl`, `openssl`, and a PostgreSQL client
+before it does anything at all — before it reads your subscription, before the
+confirmation, and therefore before the run has created anything. The preflight
+that `azd` runs at the start of each provisioning pass checks them again with
+version floors and adds Bicep, because `azd provision` and `azd up` reach it
+without going through the wrapper:
 
 | Tool | Minimum | Install |
 |---|---|---|
@@ -84,22 +87,33 @@ re-checks them with version floors and adds Bicep:
 | Bicep | 0.36.1 (0.46.1 is the compiler CI validates against) | `az bicep install` |
 | `curl` | any | preinstalled on macOS and most Linux |
 | `openssl` | any | generates the API key pepper |
+| `psql` **or** a container runtime | any | creates the three managed-identity database roles |
 
-**Install a PostgreSQL client, or Docker, before you start.** The three database
-principals are created by running `deploy/azure/sql/bootstrap-roles.sql`, and
-that step uses `psql` if you have it and otherwise runs the same file inside a
-`postgres:17-alpine` container:
+The last one is not optional tooling. The three PostgreSQL principals are
+created by connecting to the server and calling a function on it, and Azure
+exposes no ARM resource and no CLI command that does it instead — so a machine
+with neither cannot finish a deployment. The scripts print exactly this:
 
-```bash
-brew install libpq        # macOS; or: apt install postgresql-client
+```text
+  macOS   brew install libpq && brew link --force libpq
+  Debian  sudo apt-get install postgresql-client
+  Docker  any container runtime; the bootstrap runs psql in a container instead
 ```
 
-Neither is part of the up-front tool check today. The database step runs after
-the platform pass, so a machine with neither is turned away there with exit 69,
-once resources already exist. Nothing is deleted, nothing is half-configured,
-and rerunning the same command after installing one resumes at that step — but
-it is a slower way to find out than installing it now. `--what-if`
-([§5.2](#52-preview-with---what-if)) never reaches that step and needs neither.
+With `psql` on `PATH` the bootstrap SQL runs locally; without it, the same file
+runs inside a `postgres:17-alpine` container (`VISTARA_PSQL_IMAGE` overrides
+the image).
+
+**Two runs are exempt, because neither reaches that step:**
+
+- `--what-if` ([§5.2](#52-preview-with---what-if)), which only reads;
+- a rerun of an environment whose database roles are already recorded as
+  created — `VISTARA_DATABASE_BOOTSTRAP_STATE` is set — which skips the step
+  that would connect ([§5.1](#51-rerun-to-resume)).
+
+The database step keeps its own check as well, so it stays correct however it
+was reached; in a normal run that check never fires, because the wrapper and
+the preflight have already refused a run that could not finish.
 
 `open` or `xdg-open` is optional. Without one, the sign-in URL is printed
 rather than launched, and `up.sh` tells you so at the start instead of at the
@@ -352,13 +366,18 @@ that has not completed. What makes that safe:
   valid;
 - the database bootstrap records the exact server-and-identity signature it
   completed for, and skips when it matches — so a rerun does not reopen the
-  firewall;
+  firewall, and does not require a PostgreSQL client either
+  ([§1.2](#12-tools));
 - the migration records the digest it completed, and skips when the digest is
   unchanged;
 - the budget start date, once written, is never recomputed.
 
 To force a step: `VISTARA_FORCE_DATABASE_BOOTSTRAP=1` or
-`VISTARA_FORCE_MIGRATION=1`.
+`VISTARA_FORCE_MIGRATION=1`. Forcing the database bootstrap does need a
+PostgreSQL client, since it is the step that connects — and it is the one case
+where the up-front check cannot know that, because the recorded state it reads
+is exactly what the flag overrides. The database step's own check is what
+catches it, at that step.
 
 ### 5.2 Preview with `--what-if`
 
@@ -373,9 +392,9 @@ environment, not the recorded budget start date. It runs
 preview the application pass, and it does not preview the hooks — the Entra
 registration, the pepper, the database roles, and the migration are not ARM
 resources and have no what-if. Because it never reaches a hook, it also needs
-none of what they need: no PostgreSQL client, no Docker, and no application
-registration rights — the directory probe runs in the preflight, which a
-preview never triggers. It still needs a first owner, so pass
+none of what they need: no PostgreSQL client, no container runtime, and no
+application registration rights — the client check and the directory probe both
+sit on paths a preview does not take. It still needs a first owner, so pass
 `--owner-object-id` if your signed-in object ID cannot be read.
 
 ### 5.3 Upgrading images
@@ -749,7 +768,7 @@ specific code and `up.sh` recovers it. Both scripts draw from one taxonomy;
 |---|---|---|
 | `0` | Success, **or** a declined confirmation that changed nothing | — |
 | `64` | Usage | A bad flag or value, a tenant that does not match the subscription, a first owner that was not confirmed, `--yes` without `--owner-object-id` or `--location`, a prompt with no terminal, an environment name `down.sh` cannot find, or a bare `azd down` blocked by the predown guard |
-| `69` | Missing or too-old tool | `az`, `azd`, `curl`, or `openssl` before anything is created; Bicep at the preflight; neither `psql` nor `docker` at the database step, which is after the platform pass |
+| `69` | Missing or too-old tool | `az`, `azd`, `curl`, `openssl`, or a PostgreSQL client, all before anything is created; Bicep and the same client again at the preflight |
 | `70` | Provisioning or teardown failure | An ARM error, an unresolvable Key Vault reference, a failed database bootstrap, a registration that does not match the deployment, or an `azd down` that did not finish |
 | `71` | Migration failure | The migration job execution failed, or did not finish inside `VISTARA_MIGRATION_TIMEOUT_SECONDS` (default 900) |
 | `75` | Health timeout | A probe never answered 200/204 inside `VISTARA_HEALTH_TIMEOUT_SECONDS` (default 300), or `/api/v1/setup` neither advertised Entra nor offered first-owner setup |
@@ -915,17 +934,33 @@ The database step needs the address to allow through the server firewall:
 An IPv6-only network cannot be allowed through a flexible-server firewall rule;
 use a network with IPv4 egress for that step.
 
-### 13.12 `neither psql nor docker is available` (69)
+### 13.12 `a PostgreSQL client is required` (69)
 
-This one arrives **after** the platform pass, because the database step is the
-first thing that needs a PostgreSQL client and it runs there rather than in the
-up-front tool check ([§1.2](#12-tools)). The resources it created are intact
-and nothing was rolled back.
+The full message names what needs one and why:
 
-Install a PostgreSQL client (`brew install libpq`, `apt install
-postgresql-client`) or Docker, then rerun the same command; it resumes at the
-database step. With Docker, the same SQL file runs in `postgres:17-alpine`
-(`VISTARA_PSQL_IMAGE` overrides the image).
+```text
+error: neither psql nor docker is available.
+error: the deployment has to connect to PostgreSQL to create the three
+       managed-identity roles, and Azure offers no server-side way to do it
+       instead.
+error: Install one of these and rerun:
+error:   macOS   brew install libpq && brew link --force libpq
+error:   Debian  sudo apt-get install postgresql-client
+error:   Docker  any container runtime; the bootstrap runs psql in a container instead
+```
+
+`up.sh` asks before it reads your subscription and before the confirmation, so
+this arrives with **nothing created and nothing changed** — not the `azd`
+environment, not your selected subscription. Install one and rerun. The same
+refusal from `azd provision` or `azd up` comes from the preflight and names
+`provisioning`; the refusal from the database step itself names
+`creating the database roles`, and in a normal run it never fires, because one
+of the earlier two already did.
+
+The one way to meet it late is `VISTARA_FORCE_DATABASE_BOOTSTRAP=1` against an
+environment whose roles were already recorded ([§5.1](#51-rerun-to-resume)):
+the up-front check reads that record and steps aside, and the database step's
+own check catches it. Nothing is deleted there either, and a rerun resumes.
 
 ### 13.13 `role X is mapped to a different directory object` (70)
 

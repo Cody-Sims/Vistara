@@ -21,6 +21,12 @@ exit code. This file only says what lives here.
 
 `up.sh --help` and `down.sh --help` list every flag.
 
+`up.sh` needs `az`, `azd`, `curl`, `openssl`, and either `psql` or a container
+runtime, and it checks for all of them before the confirmation — so a machine
+that cannot finish a deployment is turned away before one is created. The
+PostgreSQL client is exempted only for `--what-if` and for a rerun whose
+database roles are already recorded.
+
 ## Why a wrapper rather than bare `azd`
 
 `azure.yaml` is a normal `azd` project, and `up.sh` is a wrapper around it
@@ -42,16 +48,16 @@ then fail on the locks.
 
 | Path | What it is |
 |---|---|
-| `up.sh` | The supported entry point: tool and account checks, digest resolution, confirmation, `--what-if`, two provisioning passes, sign-in URL |
+| `up.sh` | The supported entry point: tool, PostgreSQL-client, and account checks, digest resolution, confirmation, `--what-if`, two provisioning passes, sign-in URL |
 | `down.sh` | Teardown: retains data by default; `--delete-data` needs the environment name typed |
 | `azure.yaml` | The `azd` project: prebuilt images only, and the four hook bindings |
-| `hooks/lib/common.sh` | Shared exit codes, redaction, `0600` scratch files, prompts, and `azd` environment access |
-| `hooks/preprovision-preflight.sh` | Tool versions, sign-in, subscription match, digest-pinned images, resource providers, directory rights |
+| `hooks/lib/common.sh` | Shared exit codes, redaction, `0600` scratch files, prompts, the PostgreSQL-client requirement, and `azd` environment access |
+| `hooks/preprovision-preflight.sh` | Tool versions, a PostgreSQL client, sign-in, subscription match, digest-pinned images, resource providers, directory rights |
 | `hooks/postprovision.sh` | Runs the ordered post-provision chain below and keeps the first failure's exit code |
 | `hooks/postprovision-app-registration.sh` | Creates or reconciles the Entra application, service principal, and federated identity credential |
 | `hooks/postprovision-verify-fic.sh` | Byte-compares reply URLs and the federated credential; read-only, never repairs |
 | `hooks/postprovision-secrets.sh` | Generates the API key pepper into Key Vault without it ever reaching a command line |
-| `hooks/postprovision-database.sh` | Opens the firewall for one step, runs `sql/bootstrap-roles.sql`, closes it again on any exit |
+| `hooks/postprovision-database.sh` | Re-checks for a PostgreSQL client, opens the firewall for one step, runs `sql/bootstrap-roles.sql`, closes it again on any exit |
 | `hooks/postprovision-migrate.sh` | Starts the migration job and polls the execution it started |
 | `hooks/postdeploy-health.sh` | Polls `/health/live`, `/health/startup`, `/health/ready`, then `/api/v1/setup` |
 | `hooks/predown-retention.sh` | Refuses an `azd down` that did not come through `down.sh` |
