@@ -1,0 +1,52 @@
+# Vistara hosted evaluation deployment.
+#
+# `./deploy/azure/up.sh` is the supported entry point. It is a wrapper around
+# this project rather than a replacement for it: the wrapper resolves image
+# digests, confirms the first owner, and runs the two provisioning passes that
+# the dependency order requires, while everything that happens during a
+# provisioning pass lives in the hooks below. That keeps a direct
+# `azd provision` or `azd up` on an already bootstrapped environment honest —
+# it runs the same preflight, the same verification, and the same health gate.
+#
+# The services declare prebuilt images and no project path, so `azd` never
+# builds from source: the digests the wrapper resolved are the digests that
+# run, and `azd deploy` can only move an application to another reviewed
+# digest. The container apps themselves are created by Bicep with those same
+# digests, so a deployment is complete after provisioning alone.
+name: vistara
+metadata:
+  template: vistara-hosted-bootstrap
+
+infra:
+  provider: bicep
+  path: infra
+
+services:
+  api:
+    host: containerapp
+    image: ${VISTARA_API_IMAGE}
+  worker:
+    host: containerapp
+    image: ${VISTARA_WORKER_IMAGE}
+
+hooks:
+  preprovision:
+    shell: sh
+    run: hooks/preprovision-preflight.sh
+    continueOnError: false
+    interactive: true
+  postprovision:
+    shell: sh
+    run: hooks/postprovision.sh
+    continueOnError: false
+    interactive: true
+  postdeploy:
+    shell: sh
+    run: hooks/postdeploy-health.sh
+    continueOnError: false
+    interactive: true
+  predown:
+    shell: sh
+    run: hooks/predown-retention.sh
+    continueOnError: false
+    interactive: true

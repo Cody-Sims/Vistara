@@ -26,6 +26,9 @@ TestResults/
 .env
 .env.*
 !.env.example
+# azd environment state: plaintext deployment outputs and the bootstrap scratch
+# directory that briefly holds generated secret material.
+.azure/
 appsettings.*.local.json
 secrets.json
 
