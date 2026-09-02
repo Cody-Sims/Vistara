@@ -649,6 +649,7 @@ public sealed class OidcSignInRuntimeTests
 
         Assert.Equal(FailureLocation, started.Response.Location);
         Assert.Null(started.HandleCookie);
+        Assert.True(started.Response.ClearsCookie("__Host-vistara-oidc"));
         Assert.Equal(0, await host.CountLoginRequestsAsync());
     }
 

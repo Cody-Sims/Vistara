@@ -98,6 +98,11 @@ public static class OidcAuthenticationEndpoint
             cancellationToken);
         if (!started.TryGetValue(out OidcStartResult? result))
         {
+            // A sign-in that did not start must not leave the browser holding
+            // a handle from an earlier attempt.
+            context.Response.Headers.Append(
+                HeaderNames.SetCookie,
+                OidcHandleCookie.DeletionHeader);
             WriteFailureRedirect(context);
             return;
         }
