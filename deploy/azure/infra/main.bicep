@@ -167,16 +167,68 @@ var apiKeyPepperSecretName = 'api-key-pepper'
 var apiKeyPepperVersion = 'v1'
 var apiKeyPepperConfigurationKey = 'Platform:Authentication:ApiKeys:Peppers:${apiKeyPepperVersion}'
 
-// Rate-limit budget for the framework limiter. Behind the Container Apps
-// ingress proxy the limiter's partition key is the proxy address, so this is
-// one shared bucket per replica for the whole deployment, not a per-client
-// allowance. It is sized for an evaluation stack: at the default two API
-// replicas a browsing operator plus the gallery's thumbnail fan-out stays far
-// inside it, while a single replica still sheds load long before Kestrel does.
-// Raising it does not weaken the sensitive endpoints, which are throttled
-// separately and persistently by the application.
+// The frozen OidcRoutes reply paths. The provider validator compares them byte
+// for byte against the Entra registration, so they are named here rather than
+// spelled out at each use.
+var oidcCallbackPath = '/api/v1/auth/oidc/entra/callback'
+var oidcSignedOutPath = '/api/v1/auth/oidc/entra/signed-out'
+
+// The hosted rate profile, which is PlatformRateLimitHostedProfile expressed as
+// container environment variables. Both ceilings - the persisted bucket counter
+// and the in-process framework limiter - count the connection peer after
+// forwarded-header processing, and behind the Container Apps ingress that peer
+// is always the proxy, so every request in the deployment shares one bucket.
+// PartitionMode says so out loud: the application refuses a bucket raised above
+// its shipped rate unless the deployment has declared whose requests the bucket
+// counts, which stops hosted-scale ceilings from being handed to every client
+// on a deployment that really can see them.
+//
+// Events stays an order of magnitude below the other buckets because a stream
+// holds a connection, and the sensitive surfaces keep their own guards.
+var hostedRateLimitPartitionMode = 'SharedIngress'
+var hostedRateLimitWindow = '00:01:00'
+var hostedRateLimitApi = 6000
+var hostedRateLimitEvents = 600
+var hostedRateLimitDelivery = 6000
+var hostedRateLimitMedia = 6000
 var sharedIngressRequestsPerWindow = 6000
 var sharedIngressRateLimitWindow = '00:01:00'
+
+// Ordered exactly as PlatformRateLimitHostedProfile.EnvironmentVariables.
+var hostedRateLimitEnvironmentVariables = [
+  {
+    name: 'Platform__RateLimits__PartitionMode'
+    value: hostedRateLimitPartitionMode
+  }
+  {
+    name: 'Platform__RateLimits__Window'
+    value: hostedRateLimitWindow
+  }
+  {
+    name: 'Platform__RateLimits__Api'
+    value: string(hostedRateLimitApi)
+  }
+  {
+    name: 'Platform__RateLimits__Events'
+    value: string(hostedRateLimitEvents)
+  }
+  {
+    name: 'Platform__RateLimits__Delivery'
+    value: string(hostedRateLimitDelivery)
+  }
+  {
+    name: 'Platform__RateLimits__Media'
+    value: string(hostedRateLimitMedia)
+  }
+  {
+    name: 'Security__Limits__RequestsPerWindow'
+    value: string(sharedIngressRequestsPerWindow)
+  }
+  {
+    name: 'Security__Limits__RateLimitWindow'
+    value: sharedIngressRateLimitWindow
+  }
+]
 
 // substring fails the deployment when '@sha256:' is absent, which is the only
 // assertion primitive available without the experimental assertions feature.
@@ -431,9 +483,19 @@ var jwtEnvironmentVariables = [
 // Interactive sign-in and first-owner bootstrap only appear once a client ID
 // exists. Until then the deployment is healthy and Entra sign-in is simply
 // absent from /api/v1/setup rather than half-configured.
+//
+// Every name below is a property of PlatformOidcOptions, PlatformOidcProviderOptions,
+// PlatformBootstrapOptions, or PlatformFirstOwnerOptions. The reply URLs are the
+// frozen OidcRoutes paths, which the provider validator compares byte for byte
+// against the registration, and the application base URL must contain the reply
+// URL, so it carries the trailing slash the validator requires.
 var oidcEnvironmentVariables = empty(applicationClientId)
   ? []
   : [
+      {
+        name: 'Platform__Authentication__Oidc__Enabled'
+        value: 'true'
+      }
       {
         name: 'Platform__Authentication__Oidc__Providers__0__ProviderId'
         value: 'entra'
@@ -443,24 +505,28 @@ var oidcEnvironmentVariables = empty(applicationClientId)
         value: 'Microsoft Entra ID'
       }
       {
-        name: 'Platform__Authentication__Oidc__Providers__0__MetadataAddress'
-        value: entraMetadataAddress
-      }
-      {
-        name: 'Platform__Authentication__Oidc__Providers__0__ExpectedIssuer'
-        value: entraAuthority
+        name: 'Platform__Authentication__Oidc__Providers__0__TenantId'
+        value: resolvedTenantId
       }
       {
         name: 'Platform__Authentication__Oidc__Providers__0__ClientId'
         value: applicationClientId
       }
       {
-        name: 'Platform__Authentication__Oidc__Providers__0__AllowedTenantIds__0'
-        value: resolvedTenantId
+        name: 'Platform__Authentication__Oidc__Providers__0__Authority'
+        value: entraAuthority
+      }
+      {
+        name: 'Platform__Authentication__Oidc__Providers__0__ApplicationBaseUri'
+        value: '${apiUri}/'
       }
       {
         name: 'Platform__Authentication__Oidc__Providers__0__RedirectUri'
-        value: '${apiUri}/api/v1/auth/oidc/entra/callback'
+        value: '${apiUri}${oidcCallbackPath}'
+      }
+      {
+        name: 'Platform__Authentication__Oidc__Providers__0__PostLogoutRedirectUri'
+        value: '${apiUri}${oidcSignedOutPath}'
       }
       {
         name: 'Platform__Authentication__Oidc__Providers__0__Scopes__0'
@@ -475,39 +541,30 @@ var oidcEnvironmentVariables = empty(applicationClientId)
         value: 'email'
       }
       {
-        name: 'Platform__Authentication__Oidc__Providers__0__Prompt'
-        value: 'select_account'
+        name: 'Platform__Authentication__Oidc__Providers__0__AllowedSigningAlgorithms__0'
+        value: 'RS256'
       }
+      // Loopback HTTP is only ever allowed for an integration fixture.
       {
-        name: 'Platform__Authentication__Oidc__Providers__0__LoginRequestLifetime'
-        value: '00:10:00'
+        name: 'Platform__Authentication__Oidc__Providers__0__RequireHttps'
+        value: 'true'
       }
+      // The secretless path: the API identity mints the federated client
+      // assertion, so no client secret exists to configure.
       {
-        name: 'Platform__Authentication__Oidc__Providers__0__ClockSkew'
-        value: '00:02:00'
-      }
-      {
-        name: 'Platform__Authentication__Oidc__Providers__0__AllowHttpMetadata'
-        value: 'false'
-      }
-      {
-        name: 'Platform__Authentication__Oidc__Providers__0__ClientCredential__Kind'
-        value: 'FederatedManagedIdentity'
-      }
-      {
-        name: 'Platform__Authentication__Oidc__Providers__0__ClientCredential__ManagedIdentityClientId'
+        name: 'Platform__Authentication__Oidc__Providers__0__ManagedIdentityClientId'
         value: identity.outputs.apiClientId
       }
       {
-        name: 'Platform__Authentication__Oidc__Providers__0__ClientCredential__TokenExchangeAudience'
-        value: 'api://AzureADTokenExchange'
+        name: 'Platform__Bootstrap__FirstOwner__Enabled'
+        value: 'true'
       }
       {
         name: 'Platform__Bootstrap__FirstOwner__ProviderId'
         value: 'entra'
       }
       {
-        name: 'Platform__Bootstrap__FirstOwner__TenantId'
+        name: 'Platform__Bootstrap__FirstOwner__DirectoryTenantId'
         value: resolvedTenantId
       }
       {
@@ -575,23 +632,7 @@ var apiEnvironmentVariables = concat(
     // discards X-Forwarded-For. Security__Proxy__ForwardLimit is deliberately
     // not emitted: without a trust list it configures nothing, and shipping it
     // would suggest the deployment reads a client address that it does not.
-    //
-    // The consequence is that the framework rate limiter partitions on the
-    // transport peer, which is always the ingress proxy, so every caller shares
-    // one bucket per replica. The budget below is therefore a deployment-wide
-    // ceiling for an evaluation stack, not a per-client control, and it is
-    // sized so ordinary browsing by a handful of operators cannot exhaust it.
-    // Abuse protection for the sensitive surfaces stays where it is effective:
-    // /api/v1/setup and the storage-validation endpoint keep their own
-    // persisted per-bucket throttles, which this template does not configure.
-    {
-      name: 'Security__Limits__RequestsPerWindow'
-      value: string(sharedIngressRequestsPerWindow)
-    }
-    {
-      name: 'Security__Limits__RateLimitWindow'
-      value: sharedIngressRateLimitWindow
-    }
+    // What follows from that is the hosted rate profile appended below.
     {
       name: 'Security__DataProtection__Enabled'
       value: 'true'
@@ -649,6 +690,7 @@ var apiEnvironmentVariables = concat(
     }
   ],
   allowedHosts,
+  hostedRateLimitEnvironmentVariables,
   mediaEnvironmentVariables,
   jwtEnvironmentVariables,
   oidcEnvironmentVariables

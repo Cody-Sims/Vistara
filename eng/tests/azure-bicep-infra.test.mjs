@@ -454,7 +454,125 @@ test('no forwarded address is trusted and no proxy range is invented', () => {
   );
 });
 
-test('the rate limit is an explicit shared bucket the options accept', () => {
+test('the API emits the hosted rate profile the application defines', () => {
+  // PlatformRateLimitHostedProfile is the application's own statement of what a
+  // hosted deployment must set. Read the numbers out of it rather than
+  // restating them, so a profile change breaks the template instead of the
+  // template quietly drifting below the ceiling the application was tuned for.
+  const rateSource = readFileSync(
+    resolve(
+      REPOSITORY_ROOT,
+      'src/Vistara.Api/Composition/Platform/PlatformRateLimitOptions.cs',
+    ),
+    'utf8',
+  );
+
+  const profile = /class PlatformRateLimitHostedProfile[\s\S]*?\n\}/.exec(
+    rateSource,
+  )?.[0];
+  assert.ok(profile, 'PlatformRateLimitHostedProfile must exist');
+
+  function constant(name) {
+    const value = new RegExp(
+      `public const (?:int|string) ${name} = "?([^";]+)"?;`,
+    ).exec(profile)?.[1];
+    assert.ok(value !== undefined, `the profile must declare ${name}`);
+    return value;
+  }
+
+  const section =
+    /class PlatformRateLimitOptions[\s\S]*?SectionName = "([^"]+)"/.exec(
+      rateSource,
+    )?.[1];
+  assert.equal(section, 'Platform:RateLimits');
+
+  // The declared partition must be a real member of the real enum.
+  const modes = enumMembers(rateSource, 'PlatformRateLimitPartitionMode');
+  assert.ok(modes.includes('SharedIngress'));
+  assert.ok(modes.includes('ForwardedClient'));
+  assert.match(
+    profile,
+    /nameof\(PlatformRateLimitPartitionMode\.SharedIngress\)/,
+    'the hosted profile must declare the shared-ingress partition',
+  );
+
+  const expected = new Map([
+    ['Platform__RateLimits__PartitionMode', 'SharedIngress'],
+    ['Platform__RateLimits__Window', constant('Window')],
+    ['Platform__RateLimits__Api', constant('Api')],
+    ['Platform__RateLimits__Events', constant('Events')],
+    ['Platform__RateLimits__Delivery', constant('Delivery')],
+    ['Platform__RateLimits__Media', constant('Media')],
+    ['Security__Limits__RequestsPerWindow', constant('FrameworkRequestsPerWindow')],
+    ['Security__Limits__RateLimitWindow', constant('FrameworkWindow')],
+  ]);
+
+  // The reviewed hosted rate, restated so a silent weakening of the profile
+  // cannot pass this gate by moving both sides at once.
+  assert.deepEqual(
+    [...expected.entries()],
+    [
+      ['Platform__RateLimits__PartitionMode', 'SharedIngress'],
+      ['Platform__RateLimits__Window', '00:01:00'],
+      ['Platform__RateLimits__Api', '6000'],
+      ['Platform__RateLimits__Events', '600'],
+      ['Platform__RateLimits__Delivery', '6000'],
+      ['Platform__RateLimits__Media', '6000'],
+      ['Security__Limits__RequestsPerWindow', '6000'],
+      ['Security__Limits__RateLimitWindow', '00:01:00'],
+    ],
+  );
+
+  const block =
+    /var hostedRateLimitEnvironmentVariables = \[([\s\S]*?)\n\]/.exec(MAIN)?.[1];
+  assert.ok(block, 'main.bicep must declare hostedRateLimitEnvironmentVariables');
+  assert.deepEqual(
+    [...block.matchAll(/name: '([^']+)'/g)].map((match) => match[1]),
+    [...expected.keys()],
+    'the template must emit the profile in the order the application lists it',
+  );
+
+  const literals = new Map(
+    [...MAIN.matchAll(/^var (hostedRateLimit\w+|sharedIngress\w+) = '?([^'\n]+)'?$/gm)]
+      .map((match) => [match[1], match[2]]),
+  );
+  const bindings = new Map([
+    ['Platform__RateLimits__PartitionMode', 'hostedRateLimitPartitionMode'],
+    ['Platform__RateLimits__Window', 'hostedRateLimitWindow'],
+    ['Platform__RateLimits__Api', 'hostedRateLimitApi'],
+    ['Platform__RateLimits__Events', 'hostedRateLimitEvents'],
+    ['Platform__RateLimits__Delivery', 'hostedRateLimitDelivery'],
+    ['Platform__RateLimits__Media', 'hostedRateLimitMedia'],
+    ['Security__Limits__RequestsPerWindow', 'sharedIngressRequestsPerWindow'],
+    ['Security__Limits__RateLimitWindow', 'sharedIngressRateLimitWindow'],
+  ]);
+  for (const [name, variable] of bindings) {
+    assert.match(
+      block,
+      new RegExp(`name: '${name}'\\s*\\n\\s*value: (?:string\\()?${variable}\\)?$`, 'm'),
+      `${name} must be bound to ${variable}`,
+    );
+    assert.equal(
+      literals.get(variable),
+      expected.get(name),
+      `${variable} must carry the profile value for ${name}`,
+    );
+  }
+
+  // The profile is API-only: the worker serves no HTTP surface.
+  const worker =
+    /var workerEnvironmentVariables = concat\(([\s\S]*?)\n\)/.exec(MAIN)?.[1];
+  assert.ok(worker);
+  assert.doesNotMatch(worker, /RateLimits|Security__Limits__/);
+
+  // Every value must survive the options validator.
+  assert.match(rateSource, /MinimumLimit = 1;/);
+  assert.match(rateSource, /MaximumLimit = 1_000_000;/);
+  for (const name of ['Api', 'Events', 'Delivery', 'Media']) {
+    const permits = Number(expected.get(`Platform__RateLimits__${name}`));
+    assert.ok(permits >= 1 && permits <= 1_000_000, `${name} is out of range`);
+  }
+
   const security = readFileSync(
     resolve(
       REPOSITORY_ROOT,
@@ -462,57 +580,18 @@ test('the rate limit is an explicit shared bucket the options accept', () => {
     ),
     'utf8',
   );
-
-  // The limiter partitions on the transport peer, which behind the Container
-  // Apps proxy is the proxy itself, so the budget is deployment wide.
-  const classifier = readFileSync(
-    resolve(REPOSITORY_ROOT, 'src/Vistara.Api/Security/SecurityMiddleware.cs'),
-    'utf8',
-  );
-  assert.match(
-    classifier,
-    /RateLimitPartition\(HttpContext context\) =>\s*\n\s*context\.Connection\.RemoteIpAddress/,
-  );
-
-  const permits = Number(
-    /var sharedIngressRequestsPerWindow = (\d+)/.exec(MAIN)?.[1],
-  );
-  const window = /var sharedIngressRateLimitWindow = '([\d:]+)'/.exec(MAIN)?.[1];
-  assert.equal(permits, 6000);
-  assert.equal(window, '00:01:00');
-  assert.match(
-    MAIN,
-    /name: 'Security__Limits__RequestsPerWindow'\s*\n\s*value: string\(sharedIngressRequestsPerWindow\)/,
-  );
-  assert.match(
-    MAIN,
-    /name: 'Security__Limits__RateLimitWindow'\s*\n\s*value: sharedIngressRateLimitWindow/,
-  );
-
-  // The emitted values must survive VistaraSecurityOptionsValidator.
   assert.match(security, /limits\.RequestsPerWindow is < 1 or > 1_000_000/);
-  assert.ok(permits >= 1 && permits <= 1_000_000);
-  assert.match(security, /limits\.RateLimitWindow < TimeSpan\.FromSeconds\(1\)/);
-  assert.match(security, /limits\.RateLimitWindow > TimeSpan\.FromHours\(1\)/);
-  const [hours, minutes, seconds] = window.split(':').map(Number);
-  const windowSeconds = hours * 3600 + minutes * 60 + seconds;
-  assert.ok(windowSeconds >= 1 && windowSeconds <= 3600);
+  const framework = Number(expected.get('Security__Limits__RequestsPerWindow'));
+  assert.ok(framework >= 1 && framework <= 1_000_000);
+  for (const key of ['Platform__RateLimits__Window', 'Security__Limits__RateLimitWindow']) {
+    const [hours, minutes, seconds] = expected.get(key).split(':').map(Number);
+    const windowSeconds = hours * 3600 + minutes * 60 + seconds;
+    assert.ok(windowSeconds >= 1 && windowSeconds <= 3600, `${key} is out of range`);
+  }
 
-  // Widening the shared bucket must not widen the sensitive surfaces, which
-  // are throttled persistently by the application and not configured here.
-  const adapter = readFileSync(
-    resolve(
-      REPOSITORY_ROOT,
-      'src/Vistara.Api/Composition/Platform/PlatformRateLimitPersistenceAdapter.cs',
-    ),
-    'utf8',
-  );
-  assert.match(adapter, /private static int Limit\(string bucket\)/);
-  assert.doesNotMatch(MAIN, /Platform__RateLimit|Security__Limits__(?!RequestsPerWindow|RateLimitWindow)/);
-
-  // The shared bucket must be documented as shared wherever it is read.
-  assert.match(MAIN, /one shared bucket per replica/i);
-  assert.match(MAIN, /not a per-client/i);
+  // The shared bucket must be documented as shared where it is configured.
+  assert.match(MAIN, /shares one bucket/i);
+  assert.match(MAIN, /PlatformRateLimitHostedProfile/);
 });
 
 test('the API ingress is public HTTPS only and tagged for azd deploy', () => {
@@ -873,7 +952,26 @@ test('contract entries name a property that the owning source really declares', 
   }
 
   assert.ok(verified > 15, `only ${verified} contract entries could be verified`);
-  assert.ok(pending > 0, 'pending markers vanished without the contract changing');
+  assert.equal(
+    pending,
+    0,
+    'every hosted bootstrap task has landed, so no entry may still be pending',
+  );
+});
+
+test('the pending-owner mechanism stays wired even with nothing pending', () => {
+  // The marker is empty now. It must still be checked, or the next sibling
+  // task's key would be silently unverifiable.
+  const source = readFileSync(
+    resolve(HERE, 'azure-bicep-infra.test.mjs'),
+    'utf8',
+  );
+  assert.match(source, /if \(entry\.pendingOwner\) \{/);
+  assert.match(source, /has landed: '\$\{entry\.name\}' is now declared in/);
+  assert.match(
+    JSON.stringify(CONFIG_CONTRACT.$comment),
+    /Every hosted bootstrap task has now landed/,
+  );
 });
 
 /**
@@ -900,9 +998,15 @@ test('enum-valued keys emit a member the owning source really accepts', () => {
       continue;
     }
 
-    assert.match(
-      MAIN,
-      new RegExp(`name: '${entry.name}'\\s*\\n\\s*value: '${entry.emittedValue}'`),
+    const binding = new RegExp(
+      `name: '${entry.name}'\\s*\\n\\s*value: (?:'([^']+)'|([A-Za-z0-9_]+))$`,
+      'm',
+    ).exec(MAIN);
+    assert.ok(binding, `main.bicep must emit '${entry.name}'`);
+    const emitted = binding[1] ?? literalVariables(MAIN).get(binding[2]);
+    assert.equal(
+      emitted,
+      entry.emittedValue,
       `main.bicep must emit '${entry.name}' as '${entry.emittedValue}'`,
     );
 
@@ -947,7 +1051,7 @@ test('pending contract entries name a real sibling task', () => {
       .filter((entry) => entry.pendingOwner)
       .map((entry) => entry.pendingOwner),
   );
-  assert.ok(owners.size > 0);
+  assert.equal(owners.size, 0, `nothing is pending, found ${[...owners]}`);
   for (const owner of owners) {
     assert.match(owner, /^HB-\d{2}$/, `'${owner}' is not a hosted bootstrap task id`);
   }
