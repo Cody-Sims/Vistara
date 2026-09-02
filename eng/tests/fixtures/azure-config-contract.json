@@ -4,7 +4,8 @@
     "Each entry names the type and property that binds the key so a rename in the",
     "application breaks this contract instead of silently producing a container that",
     "ignores its own configuration.",
-    "Entries carrying pendingOwner are contributed by a sibling task that has not landed on this branch: the test asserts they are still absent so the marker cannot rot."
+    "Entries carrying pendingOwner are contributed by a sibling task that has not landed on this branch: the test asserts they are still absent so the marker cannot rot.",
+    "Security:Proxy:KnownProxies, Security:Proxy:KnownNetworks, and Security:Proxy:ForwardLimit are intentionally absent: Container Apps publishes no address range for the internal ingress hop, so the deployment trusts no forwarded address and the client IP is not observable."
   ],
   "keys": [
     {
@@ -177,12 +178,22 @@
       "required": true
     },
     {
-      "name": "Security__Proxy__ForwardLimit",
+      "name": "Security__Limits__RequestsPerWindow",
       "kind": "options",
       "owner": "base",
       "sourceFile": "src/Vistara.Api/Composition/Security/SecurityComposition.cs",
-      "optionsType": "SecurityProxyOptions",
-      "property": "ForwardLimit",
+      "optionsType": "SecurityLimitOptions",
+      "property": "RequestsPerWindow",
+      "required": true,
+      "$comment": "Shared bucket per replica: behind the Container Apps ingress proxy the limiter partitions on the proxy address, so this is a deployment-wide ceiling and not a per-client allowance."
+    },
+    {
+      "name": "Security__Limits__RateLimitWindow",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Security/SecurityComposition.cs",
+      "optionsType": "SecurityLimitOptions",
+      "property": "RateLimitWindow",
       "required": true
     },
     {

@@ -59,6 +59,17 @@ function moduleSource(name) {
   return readFileSync(resolve(MODULES, name), 'utf8');
 }
 
+/**
+ * Drops whole-line Bicep comments so a rule about what the template *emits* is
+ * not satisfied or broken by prose that explains why it does not.
+ */
+function withoutComments(source) {
+  return source
+    .split('\n')
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join('\n');
+}
+
 function declaredParameters(source) {
   return [...source.matchAll(/^param\s+([A-Za-z0-9_]+)\s/gm)].map(
     (match) => match[1],
@@ -392,6 +403,116 @@ test('every probe presents the ingress host the API allows', () => {
   assert.ok(allowed, 'main.bicep must declare allowedHosts');
   assert.match(allowed, /name: 'Security__Hosts__AllowedHosts__0'\s*\n\s*value: apiDefaultFqdn/);
   assert.match(allowed, /name: 'Security__Hosts__AllowedHosts__1'\s*\n\s*value: customDomainName/);
+});
+
+test('no forwarded address is trusted and no proxy range is invented', () => {
+  // Container Apps publishes no address range for the internal hop between its
+  // ingress proxy and the replica, and managedEnvironments.staticIp is the
+  // environment's own address rather than that peer. An empty trust list makes
+  // the API discard X-Forwarded-For; a guessed one would make it believe a
+  // header any caller can set.
+  const sources = [MAIN, ...EXPECTED_MODULES.map(moduleSource)];
+  for (const source of sources) {
+    const code = withoutComments(source);
+    assert.doesNotMatch(code, /Security__Proxy__/);
+    // A wildcard trust list is the specific failure this guards against.
+    assert.doesNotMatch(code, /0\.0\.0\.0\/0|::\/0/);
+    assert.doesNotMatch(code, /staticIp/);
+  }
+
+  // The reasoning has to survive in the template, not only in this gate.
+  assert.match(MAIN, /trusts no forwarded address/);
+  assert.match(
+    moduleSource('environment.bicep'),
+    /staticIp is deliberately not published/,
+  );
+
+  // ForwardedHeadersOptions is inert without a trust list, so emitting a
+  // forward limit would advertise a client address the deployment never reads.
+  assert.equal(
+    CONFIG_CONTRACT.keys.filter((entry) =>
+      entry.name.startsWith('Security__Proxy__')).length,
+    0,
+    'the config contract must not declare any proxy trust key',
+  );
+  assert.match(
+    JSON.stringify(CONFIG_CONTRACT.$comment),
+    /trusts no forwarded address/,
+  );
+
+  // The application really does fail closed on an empty trust list.
+  const security = readFileSync(
+    resolve(
+      REPOSITORY_ROOT,
+      'src/Vistara.Api/Composition/Security/SecurityComposition.cs',
+    ),
+    'utf8',
+  );
+  assert.match(
+    security,
+    /options\.KnownProxies\.Count == 0 &&\s*\n\s*options\.KnownIPNetworks\.Count == 0\)\s*\n\s*\{[\s\S]{0,200}?options\.KnownProxies\.Add\(IPAddress\.None\)/,
+  );
+});
+
+test('the rate limit is an explicit shared bucket the options accept', () => {
+  const security = readFileSync(
+    resolve(
+      REPOSITORY_ROOT,
+      'src/Vistara.Api/Composition/Security/SecurityComposition.cs',
+    ),
+    'utf8',
+  );
+
+  // The limiter partitions on the transport peer, which behind the Container
+  // Apps proxy is the proxy itself, so the budget is deployment wide.
+  const classifier = readFileSync(
+    resolve(REPOSITORY_ROOT, 'src/Vistara.Api/Security/SecurityMiddleware.cs'),
+    'utf8',
+  );
+  assert.match(
+    classifier,
+    /RateLimitPartition\(HttpContext context\) =>\s*\n\s*context\.Connection\.RemoteIpAddress/,
+  );
+
+  const permits = Number(
+    /var sharedIngressRequestsPerWindow = (\d+)/.exec(MAIN)?.[1],
+  );
+  const window = /var sharedIngressRateLimitWindow = '([\d:]+)'/.exec(MAIN)?.[1];
+  assert.equal(permits, 6000);
+  assert.equal(window, '00:01:00');
+  assert.match(
+    MAIN,
+    /name: 'Security__Limits__RequestsPerWindow'\s*\n\s*value: string\(sharedIngressRequestsPerWindow\)/,
+  );
+  assert.match(
+    MAIN,
+    /name: 'Security__Limits__RateLimitWindow'\s*\n\s*value: sharedIngressRateLimitWindow/,
+  );
+
+  // The emitted values must survive VistaraSecurityOptionsValidator.
+  assert.match(security, /limits\.RequestsPerWindow is < 1 or > 1_000_000/);
+  assert.ok(permits >= 1 && permits <= 1_000_000);
+  assert.match(security, /limits\.RateLimitWindow < TimeSpan\.FromSeconds\(1\)/);
+  assert.match(security, /limits\.RateLimitWindow > TimeSpan\.FromHours\(1\)/);
+  const [hours, minutes, seconds] = window.split(':').map(Number);
+  const windowSeconds = hours * 3600 + minutes * 60 + seconds;
+  assert.ok(windowSeconds >= 1 && windowSeconds <= 3600);
+
+  // Widening the shared bucket must not widen the sensitive surfaces, which
+  // are throttled persistently by the application and not configured here.
+  const adapter = readFileSync(
+    resolve(
+      REPOSITORY_ROOT,
+      'src/Vistara.Api/Composition/Platform/PlatformRateLimitPersistenceAdapter.cs',
+    ),
+    'utf8',
+  );
+  assert.match(adapter, /private static int Limit\(string bucket\)/);
+  assert.doesNotMatch(MAIN, /Platform__RateLimit|Security__Limits__(?!RequestsPerWindow|RateLimitWindow)/);
+
+  // The shared bucket must be documented as shared wherever it is read.
+  assert.match(MAIN, /one shared bucket per replica/i);
+  assert.match(MAIN, /not a per-client/i);
 });
 
 test('the API ingress is public HTTPS only and tagged for azd deploy', () => {
@@ -968,6 +1089,9 @@ test('the pinned bicep compiler builds and lints the template', (t) => {
     'the custom domain must be the second allowed host',
   );
 
+  assert.doesNotMatch(rendered, /Security__Proxy__/);
+  assert.doesNotMatch(rendered, /staticIp/);
+  assert.match(rendered, /Security__Limits__RequestsPerWindow/);
 
   for (const module of EXPECTED_MODULES) {
     const lint = spawnSync(BICEP_CLI, ['lint', resolve(MODULES, module)], {

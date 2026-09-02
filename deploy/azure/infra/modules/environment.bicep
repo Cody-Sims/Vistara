@@ -47,4 +47,11 @@ resource managedEnvironment 'Microsoft.App/managedEnvironments@2026-01-01' = {
 output resourceId string = managedEnvironment.id
 output name string = managedEnvironment.name
 output defaultDomain string = managedEnvironment.properties.defaultDomain
-output staticIp string = managedEnvironment.properties.staticIp
+
+// staticIp is deliberately not published. It is the environment's own
+// ingress/egress address, not the internal peer a replica observes behind the
+// Container Apps proxy, and Microsoft documents no address range for that hop.
+// Surfacing it here would invite a forwarded-header trust list built on an
+// address that never appears as the remote peer, which fails open: an empty
+// trust list makes the API ignore X-Forwarded-For, while a wrong one makes it
+// believe a header any caller can set.
