@@ -9,7 +9,6 @@ test.describe('integrated gallery workflows', () => {
   test('uploads, browses, organizes, shares, restores, and preserves navigation state', {
     tag: '@smoke',
   }, async ({
-    browser,
     browserName,
     page,
     request,
@@ -197,8 +196,9 @@ test.describe('integrated gallery workflows', () => {
     const shareUrl = await page.getByLabel('New share link').inputValue();
     await expect(page.getByRole('article', { name: shareName })).toBeVisible();
 
-    const publicContext = await browser.newContext();
-    const publicPage = await publicContext.newPage();
+    // The API key is scoped to `page`, so another page in this context is an
+    // anonymous recipient without requiring a second traced browser context.
+    const publicPage = await page.context().newPage();
     await publicPage.goto(shareUrl);
     await expect(publicPage.getByRole('heading', { name: shareName })).toBeVisible();
     await expect(publicPage.getByText(uploadedTitle, { exact: true })).toBeVisible();
@@ -216,7 +216,7 @@ test.describe('integrated gallery workflows', () => {
     expect(delivered.status()).toBe(200);
     expect(delivered.headers()['cache-control']).toBe('private,no-store');
     expect((await delivered.body()).length).toBeGreaterThan(0);
-    await publicContext.close();
+    await publicPage.close();
 
     await page.getByRole('button', { name: 'Close without copying' }).click();
     await page
