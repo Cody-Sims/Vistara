@@ -140,6 +140,7 @@ public static class PlatformServiceCollectionExtensions
                 provider.GetRequiredService<IJwtTenantMembershipProvider>(),
                 provider.GetRequiredService<IJwtRevocationStore>(),
                 provider.GetRequiredService<IClock>()));
+        services.AddVistaraApiOidc(configuration);
         services.AddVistaraApiUploads();
         return services;
     }
