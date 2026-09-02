@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Net.Http.Headers;
 using Vistara.Api.Composition.Platform;
+using Vistara.Api.Features.Oidc;
 using Vistara.Auth.Cookies;
 using Vistara.Contracts.Identity;
 using Vistara.Domain.Common;
@@ -169,18 +170,21 @@ public static class AccountEndpoint
     }
 
     /// <summary>
-    /// Publishes whether first-run provisioning is still open. This is the one
-    /// anonymous read on the account surface, so it is throttled and answers a
-    /// single boolean: no identity count, tenant count, or topology.
+    /// Publishes whether first-run provisioning is still open and which hosted
+    /// identity providers exist. This is the one anonymous read on the account
+    /// surface, so it is throttled and answers a single boolean plus provider
+    /// keys: no identity count, tenant count, directory, or topology.
     /// </summary>
     public static async Task DescribeSetupAsync(
         HttpContext context,
         IFirstOwnerProvisioningPort provisioning,
+        IOidcProviderCatalog identityProviders,
         IPlatformRateLimitHook rateLimit,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(provisioning);
+        ArgumentNullException.ThrowIfNull(identityProviders);
         ArgumentNullException.ThrowIfNull(rateLimit);
 
         PlatformRateLimitDecision decision =
@@ -207,7 +211,12 @@ public static class AccountEndpoint
             context,
             StatusCodes.Status200OK,
             new SetupAvailabilityResponse(
-                await provisioning.IsAvailableAsync(cancellationToken)),
+                await provisioning.IsAvailableAsync(cancellationToken),
+                [.. identityProviders.Providers.Select(provider =>
+                    new SignInProviderDescriptor(
+                        provider.ProviderId,
+                        provider.DisplayName,
+                        provider.StartPath))]),
             cancellationToken);
     }
 

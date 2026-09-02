@@ -52,11 +52,26 @@ public sealed record LoginResponse(
     [property: JsonPropertyName("csrfToken")] string CsrfToken);
 
 /// <summary>
-/// Whether first-owner provisioning is still open. Answered anonymously so a
-/// first-run client can link to setup without guessing.
+/// Whether first-owner provisioning is still open, and which hosted identity
+/// providers a visitor may sign in with. Answered anonymously so a first-run
+/// client can link to setup and render sign-in without guessing.
 /// </summary>
 public sealed record SetupAvailabilityResponse(
-    [property: JsonPropertyName("available")] bool Available);
+    [property: JsonPropertyName("available")] bool Available,
+    [property: JsonPropertyName("signInProviders")]
+    IReadOnlyList<SignInProviderDescriptor> SignInProviders);
+
+/// <summary>
+/// One hosted sign-in provider. Only the key, the label, and the URL to start
+/// sign-in at are published: directory tenants, client identifiers,
+/// authorities, and bootstrap allowlists never leave the server. The start URL
+/// is a same-origin path, and starting sign-in is a browser navigation rather
+/// than a fetch.
+/// </summary>
+public sealed record SignInProviderDescriptor(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("displayName")] string DisplayName,
+    [property: JsonPropertyName("startUrl")] string StartUrl);
 
 public sealed record ProvisionFirstOwnerRequest(
     [property: JsonPropertyName("tenantSlug")] string? TenantSlug,

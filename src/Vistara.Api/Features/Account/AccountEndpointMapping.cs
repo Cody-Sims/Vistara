@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Vistara.Api.Composition.Platform;
+using Vistara.Api.Features.Oidc;
 using Vistara.Application.Common;
 using Vistara.Application.Identity;
 using Vistara.Application.Tenancy;
@@ -26,6 +27,7 @@ public static class AccountServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
 
         services.TryAddScoped<IAccountAuthorizationPort, ClaimsAccountAuthorizationPort>();
+        services.TryAddSingleton<IOidcProviderCatalog, EmptyOidcProviderCatalog>();
         services.TryAddSingleton<IPlatformRateLimitHook, PermitAllPlatformRateLimitHook>();
         services.TryAddSingleton<IClock>(SystemClock.Instance);
         services.TryAddSingleton<IUuid7Generator, Uuid7Generator>();
@@ -96,6 +98,8 @@ public static class AccountEndpointMapping
                         context,
                         context.RequestServices
                             .GetRequiredService<IFirstOwnerProvisioningPort>(),
+                        context.RequestServices
+                            .GetRequiredService<IOidcProviderCatalog>(),
                         context.RequestServices
                             .GetRequiredService<IPlatformRateLimitHook>(),
                         cancellationToken))
