@@ -14,8 +14,11 @@ architecture; no AI capability exists in the codebase. Nothing in
 `docs/future-ideas/` — AI metadata and editing, a Model Context Protocol server,
 or cloud imports — is implemented or scheduled. Wave 8 and
 `docs/future-plans/` describe planned hosted identity and Azure bootstrap work;
-that work is not implemented or committed to a release. The staged capabilities
-are summarized in `README.md` and `docs/release-notes.md`.
+that work is now implemented on `dev` — Microsoft Entra sign-in, guarded
+external first-owner provisioning, managed-identity PostgreSQL, the Bicep
+infrastructure, and `./deploy/azure/up.sh` — but has not been validated against
+a live Azure subscription and is not part of the 0.1.0 release. The staged
+capabilities are summarized in `README.md` and `docs/release-notes.md`.
 
 ## 1. Executive product definition
 
@@ -1458,9 +1461,16 @@ npm --prefix tests/Vistara.E2E run test
 
 ### Wave 8 — hosted identity and Azure bootstrap
 
-**Status: not started.** This planned wave is not part of version 0.1.0 and has
-no release date. The detailed security, infrastructure, rollout, and acceptance
-plan is in
+**Status: implementation complete on `dev`; live subscription validation
+pending.** Every `CLOUD` task below is implemented and covered by repository
+gates, and the operator runbook is
+[`operations/azure-hosted-bootstrap.md`](operations/azure-hosted-bootstrap.md).
+What has **not** happened is the rollout step the plan lists last: a live
+deployment, migration, backup/restore, rotation, and teardown drill against a
+real Azure subscription with observed cost. Until that runs, this wave is not
+part of the 0.1.0 release, the template is not a supported production artifact,
+and Compose remains the supported self-hosting path. The detailed security,
+infrastructure, rollout, and acceptance plan is in
 [`future-plans/hosted-identity-and-azure-bootstrap.md`](future-plans/hosted-identity-and-azure-bootstrap.md).
 
 | ID | Size | Dependencies | Ownership | Verification |

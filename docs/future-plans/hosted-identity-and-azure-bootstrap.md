@@ -1,6 +1,32 @@
 # Hosted identity and Azure bootstrap
 
-**Status:** Planned post-MVP work - not implemented or committed to a release
+**Status:** Implementation complete on `dev`; live Azure subscription
+validation pending. Not part of the 0.1.0 release.
+
+The plan below is the approved design and its security boundaries are kept as
+written, because they are the contract the implementation was reviewed against;
+only the status above and the resolved decisions at the end have been updated.
+Where the plan says `azd up`, the implemented entry point is
+`./deploy/azure/up.sh`, which wraps the `azd` project. What now exists in the
+repository:
+
+| Plan item | Implemented as |
+|---|---|
+| `CLOUD-01` | `.shadow/decisions/DEC-0009.json` |
+| `CLOUD-02` | `src/Vistara.Persistence` external identity catalog and the paired `oidc_login_requests` migrations |
+| `CLOUD-03` | `src/Vistara.Auth/Oidc/**`, `src/Vistara.Api/Features/Oidc/**`, the web sign-in provider, and the Playwright OIDC session spec |
+| `CLOUD-04` | External-identity first-owner provisioning against the same bootstrap singleton as local setup |
+| `CLOUD-05` | `src/Vistara.Persistence/Azure/**` and `deploy/containers/migration-entrypoint.sh` Entra mode |
+| `CLOUD-06` | `deploy/azure/infra/**` |
+| `CLOUD-07` | `deploy/azure/azure.yaml`, `up.sh`, `down.sh`, and `deploy/azure/hooks/**` |
+| `CLOUD-08` | [`docs/operations/azure-hosted-bootstrap.md`](../operations/azure-hosted-bootstrap.md) |
+
+**What is still outstanding** is the rollout step this plan lists last: a live
+deployment, migration, backup/restore, rotation, and teardown drill against a
+real Azure subscription, with observed cost. Until that runs, the template is
+**not** a supported production artifact, and every cost and Azure-behaviour
+claim in the operator runbook is derived from documentation rather than
+observed. Compose remains the supported self-hosting path.
 
 ## Outcome
 
@@ -157,9 +183,14 @@ back by restoring an older application image alone.
 
 ## Decisions still required
 
-- OIDC client library and server-side token-cache strategy.
-- Object-ID versus group-ID bootstrap allowlists and group overage handling.
-- Public Container Apps ingress versus private networking plus an edge.
-- ACR versus GHCR as the default image source.
-- PostgreSQL private access, DNS, and token-provider implementation details.
-- Whether `azd down` retains PostgreSQL and Blob resources by default.
+All resolved by the implementation; recorded here so the plan is not read as
+still open.
+
+| Question | Decision |
+|---|---|
+| OIDC client library and server-side token-cache strategy | A first-party `Vistara.Auth.Oidc` protocol library with a bounded discovery/JWKS cache; no third-party OIDC middleware, and no provider access or refresh token is persisted |
+| Object-ID versus group-ID bootstrap allowlists | Exact Entra object IDs in one directory tenant. Group membership is not accepted, so there is no overage case |
+| Public Container Apps ingress versus private networking plus an edge | Public HTTPS ingress for the evaluation deployment, stated as such; a production edge is explicitly out of scope |
+| ACR versus GHCR as the default image source | Public GHCR, resolved to immutable digests; a private registry is configured through a Key Vault secret reference |
+| PostgreSQL private access, DNS, and token-provider implementation | Public access with Entra-only authentication and a Npgsql periodic token provider; private networking is left to a production deployment |
+| Whether `azd down` retains PostgreSQL and Blob resources by default | Yes. `down.sh` deletes compute by default and requires `--delete-data` plus a typed environment name to remove data; the data resources carry `CanNotDelete` locks |
