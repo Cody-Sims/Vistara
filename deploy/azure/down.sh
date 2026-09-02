@@ -244,7 +244,11 @@ EOF
     printf '%s\n' "$retained" | sed 's/^/  /' >&2
   done
 
-  budget_spend=$(az consumption budget show \
+  # `az consumption budget show` addresses a subscription-scoped budget and
+  # answers nothing for this one: the template creates it at resource-group
+  # scope, which is what the -with-rg form addresses.
+  budget_spend=$(az consumption budget show-with-rg \
+    --resource-group "$resource_group" \
     --budget-name "budget-vistara-$(printf '%s' "$env_name" | tr '[:upper:]' '[:lower:]')" \
     --subscription "$subscription_id" \
     --query 'currentSpend.amount' --output tsv 2>/dev/null | tr -d '\r\n' || true)

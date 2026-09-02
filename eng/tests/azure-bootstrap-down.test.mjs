@@ -304,3 +304,51 @@ test('a bare azd down is refused while the data locks are in place', () => {
     assert.match(result.output, /about to delete Microsoft.DBforPostgreSQL/);
   });
 });
+
+test('the budget is read at the scope the template creates it', () => {
+  withSandbox('down-budget-scope', (sandbox) => {
+    const result = run(sandbox, DOWN_SCRIPT, ['--env-name', 'eval', '--yes']);
+    assert.equal(result.status, 0, result.output);
+
+    const budgetCalls = sandbox
+      .calls()
+      .filter((call) => call[0] === 'az' && call[1] === 'consumption');
+    assert.equal(budgetCalls.length, 1, 'the budget is asked for exactly once');
+
+    const [budget] = budgetCalls;
+    assert.deepEqual(
+      budget.slice(1, 4),
+      ['consumption', 'budget', 'show-with-rg'],
+      'a resource-group budget is not addressable through the subscription-scoped form',
+    );
+    assert.equal(budget[budget.indexOf('--resource-group') + 1], RESOURCE_GROUP);
+    assert.equal(
+      budget[budget.indexOf('--budget-name') + 1],
+      'budget-vistara-eval',
+      'the name the template gives it',
+    );
+    assert.equal(budget[budget.indexOf('--subscription') + 1], SUBSCRIPTION_ID);
+    assert.equal(budget[budget.indexOf('--query') + 1], 'currentSpend.amount');
+
+    // The stand-in answers nothing unless the exact command is used, so the
+    // figure appearing at all is what proves the right one was.
+    assert.match(result.output, /Month to date against the budget: 12\.34/);
+  });
+});
+
+test('the subscription-scoped budget command is never used', () => {
+  withSandbox('down-budget-negative', (sandbox) => {
+    const result = run(sandbox, DOWN_SCRIPT, ['--env-name', 'eval', '--yes']);
+    assert.equal(result.status, 0, result.output);
+    for (const call of sandbox.calls()) {
+      if (call[0] !== 'az' || call[1] !== 'consumption') {
+        continue;
+      }
+      assert.notEqual(
+        call[3],
+        'show',
+        'az consumption budget show addresses a subscription budget and answers nothing for this one',
+      );
+    }
+  });
+});

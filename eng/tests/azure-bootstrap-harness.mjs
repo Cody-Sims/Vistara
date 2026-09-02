@@ -400,6 +400,19 @@ case "\${1:-}" in
     esac
     ;;
   consumption)
+    # Only the resource-group form addresses the budget this template creates.
+    # The subscription-scoped form is answered the way Azure answers it for a
+    # budget it does not address: with nothing.
+    if [ "\${2:-} \${3:-}" != 'budget show-with-rg' ]; then
+      echo "The budget 'x' is not found." >&2
+      exit 1
+    fi
+    if [ -z "$(flag_value --resource-group "$@")" ] \
+      || [ -z "$(flag_value --budget-name "$@")" ] \
+      || [ -z "$(flag_value --subscription "$@")" ]; then
+      echo "the following arguments are required" >&2
+      exit 1
+    fi
     printf '12.34\\n'
     exit 0
     ;;
