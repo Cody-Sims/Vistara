@@ -5,6 +5,13 @@ The API, worker, and migration containers run as UID/GID `1654`, with read-only
 root filesystems, dropped capabilities, bounded temporary storage, and explicit
 resource/restart policies.
 
+> Deploying to Azure instead? [`deploy/azure/`](azure/README.md) holds the
+> hosted evaluation bootstrap — `./deploy/azure/up.sh` provisions, migrates,
+> and hands you a browser sign-in — and
+> [`docs/operations/azure-hosted-bootstrap.md`](../docs/operations/azure-hosted-bootstrap.md)
+> is its operator runbook. Nothing below changes because of it: Compose remains
+> the supported self-hosting path.
+
 ## Generate local credentials
 
 Do not copy example passwords into a deployment. Generate an ignored environment
@@ -101,6 +108,8 @@ Both scripts remove only the containers, networks, and volumes they created.
 
 ## Backup, restore, and release runbooks
 
+- `deploy/azure/` holds the hosted Azure bootstrap documented in
+  `docs/operations/azure-hosted-bootstrap.md`.
 - `deploy/backup/` holds the backup, restore, and non-destructive restore-drill
   scripts documented in `docs/operations/backup-and-restore.md`.
 - Ordered migration rollout, release artifacts, and rollback are documented in
