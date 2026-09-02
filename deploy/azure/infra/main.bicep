@@ -157,6 +157,7 @@ var mediaContainerName = 'media'
 var dataProtectionContainerName = 'dataprotection'
 var dataProtectionBlobName = 'keys.xml'
 var postgresDatabaseName = 'vistara'
+var postgresPort = 5432
 var postgresTokenScope = 'https://ossrdbms-aad${environment().suffixes.sqlServerHostname}/.default'
 var postgresApiRole = 'vistara_api_runtime'
 var postgresWorkerRole = 'vistara_worker_runtime'
@@ -335,12 +336,13 @@ var postgresFqdn = postgres.outputs.fullyQualifiedDomainName
 
 // No password appears in any connection string: Npgsql supplies an Entra
 // access token through the periodic password provider.
-func postgresConnectionString(host string, role string, database string) string =>
-  'Host=${host};Port=5432;Database=${database};Username=${role};SSL Mode=VerifyFull;GSS Encryption Mode=Disable;Include Error Detail=false'
+func postgresConnectionString(host string, port int, role string, database string) string =>
+  'Host=${host};Port=${port};Database=${database};Username=${role};SSL Mode=VerifyFull;GSS Encryption Mode=Disable;Include Error Detail=false'
 
-var apiConnectionString = postgresConnectionString(postgresFqdn, postgresApiRole, postgresDatabaseName)
-var workerConnectionString = postgresConnectionString(postgresFqdn, postgresWorkerRole, postgresDatabaseName)
-var migrationConnectionString = postgresConnectionString(postgresFqdn, postgresMigratorRole, postgresDatabaseName)
+// Only the API and worker bind a connection string. The migration job builds
+// its own from discrete variables, so this value is never handed to the job.
+var apiConnectionString = postgresConnectionString(postgresFqdn, postgresPort, postgresApiRole, postgresDatabaseName)
+var workerConnectionString = postgresConnectionString(postgresFqdn, postgresPort, postgresWorkerRole, postgresDatabaseName)
 
 var allowedHosts = empty(customDomainName)
   ? [
@@ -541,6 +543,10 @@ var apiEnvironmentVariables = concat(
       name: 'Persistence__Azure__TokenRetryInterval'
       value: '00:00:05'
     }
+    {
+      name: 'Persistence__Azure__TokenScope'
+      value: postgresTokenScope
+    }
     // Container Apps ingress already refuses plain HTTP (allowInsecure is
     // false), and the forwarded-header middleware trusts no proxy address by
     // default, so an in-process redirect would loop against the edge instead of
@@ -678,20 +684,36 @@ var workerEnvironmentVariables = concat(
 )
 
 // The migration entrypoint reads its token straight from the Container Apps
-// identity endpoint, so it takes MIGRATION_MANAGED_IDENTITY_CLIENT_ID rather
-// than the Persistence:Azure options the long-running hosts bind.
+// identity endpoint and builds the connection string itself from discrete,
+// individually validated values. Npgsql accepts keyword aliases and repeated
+// keywords, so a connection string handed to the job could smuggle a password
+// past a string-inspecting guard; deploy/containers/migration-entrypoint.sh
+// therefore ignores ConnectionStrings__Vistara and Persistence__ConnectionString
+// entirely, and this template never emits either one for the job.
 var migrationEnvironmentVariables = [
   {
     name: 'MIGRATION_PROVIDER'
     value: 'PostgreSql'
   }
   {
-    name: 'ConnectionStrings__Vistara'
-    value: migrationConnectionString
-  }
-  {
     name: 'MIGRATION_MANAGED_IDENTITY_CLIENT_ID'
     value: identity.outputs.migrateClientId
+  }
+  {
+    name: 'MIGRATION_POSTGRES_HOST'
+    value: postgresFqdn
+  }
+  {
+    name: 'MIGRATION_POSTGRES_PORT'
+    value: string(postgresPort)
+  }
+  {
+    name: 'MIGRATION_POSTGRES_DATABASE'
+    value: postgres.outputs.databaseName
+  }
+  {
+    name: 'MIGRATION_POSTGRES_USERNAME'
+    value: postgresMigratorRole
   }
   {
     name: 'MIGRATION_ENTRA_TOKEN_SCOPE'

@@ -470,6 +470,72 @@ test('the migration job is a manually triggered one-shot', () => {
   assert.match(MAIN, /name: 'MIGRATION_PROVIDER'\s*\n\s*value: 'PostgreSql'/);
 });
 
+test('the migration job builds its connection from discrete settings', () => {
+  // Npgsql accepts keyword aliases and repeated keywords, so a connection
+  // string handed to the job can be walked past a string-inspecting guard.
+  // deploy/containers/migration-entrypoint.sh therefore ignores
+  // ConnectionStrings__Vistara and Persistence__ConnectionString outright and
+  // reads these six variables instead.
+  const migration =
+    /var migrationEnvironmentVariables = \[([\s\S]*?)\n\]/.exec(MAIN)?.[1];
+  assert.ok(migration, 'main.bicep must declare migrationEnvironmentVariables');
+
+  const emitted = [...migration.matchAll(/name: '([^']+)'/g)].map(
+    (match) => match[1],
+  );
+  assert.deepEqual(emitted, [
+    'MIGRATION_PROVIDER',
+    'MIGRATION_MANAGED_IDENTITY_CLIENT_ID',
+    'MIGRATION_POSTGRES_HOST',
+    'MIGRATION_POSTGRES_PORT',
+    'MIGRATION_POSTGRES_DATABASE',
+    'MIGRATION_POSTGRES_USERNAME',
+    'MIGRATION_ENTRA_TOKEN_SCOPE',
+    'AZURE_CLIENT_ID',
+  ]);
+  assert.doesNotMatch(migration, /ConnectionStrings__|Persistence__/);
+
+  // Host, database, and role come from the deployed server, never from a
+  // literal that can drift away from the resource.
+  assert.match(migration, /name: 'MIGRATION_POSTGRES_HOST'\s*\n\s*value: postgresFqdn/);
+  assert.match(
+    migration,
+    /name: 'MIGRATION_POSTGRES_DATABASE'\s*\n\s*value: postgres\.outputs\.databaseName/,
+  );
+  assert.match(
+    migration,
+    /name: 'MIGRATION_POSTGRES_USERNAME'\s*\n\s*value: postgresMigratorRole/,
+  );
+  assert.match(
+    migration,
+    /name: 'MIGRATION_POSTGRES_PORT'\s*\n\s*value: string\(postgresPort\)/,
+  );
+  assert.match(
+    migration,
+    /name: 'MIGRATION_ENTRA_TOKEN_SCOPE'\s*\n\s*value: postgresTokenScope/,
+  );
+
+  // Only the API and worker bind a connection string.
+  const connectionStringUses = [
+    ...MAIN.matchAll(/name: 'ConnectionStrings__Vistara'/g),
+  ];
+  assert.equal(connectionStringUses.length, 2);
+  assert.doesNotMatch(MAIN, /migrationConnectionString/);
+});
+
+test('every host that binds Persistence:Azure gets the same token scope', () => {
+  const scopes = [
+    ...MAIN.matchAll(
+      /name: 'Persistence__Azure__TokenScope'\s*\n\s*value: postgresTokenScope/g,
+    ),
+  ];
+  assert.equal(scopes.length, 2, 'the API and the worker must both be scoped');
+  assert.match(
+    MAIN,
+    /var postgresTokenScope = 'https:\/\/ossrdbms-aad\$\{environment\(\)\.suffixes\.sqlServerHostname\}\/\.default'/,
+  );
+});
+
 test('role assignments use the reviewed built-in role identifiers', () => {
   const rbac = moduleSource('rbac.bicep');
   assert.match(rbac, /ba92f5b4-2d11-453d-a403-e96b0029c9fe/);

@@ -43,12 +43,44 @@
       "required": true
     },
     {
+      "name": "MIGRATION_POSTGRES_HOST",
+      "kind": "process",
+      "owner": "HB-05",
+      "sourceFile": "deploy/containers/migration-entrypoint.sh",
+      "sourceToken": "MIGRATION_POSTGRES_HOST",
+      "required": true
+    },
+    {
+      "name": "MIGRATION_POSTGRES_PORT",
+      "kind": "process",
+      "owner": "HB-05",
+      "sourceFile": "deploy/containers/migration-entrypoint.sh",
+      "sourceToken": "MIGRATION_POSTGRES_PORT",
+      "required": true
+    },
+    {
+      "name": "MIGRATION_POSTGRES_DATABASE",
+      "kind": "process",
+      "owner": "HB-05",
+      "sourceFile": "deploy/containers/migration-entrypoint.sh",
+      "sourceToken": "MIGRATION_POSTGRES_DATABASE",
+      "required": true
+    },
+    {
+      "name": "MIGRATION_POSTGRES_USERNAME",
+      "kind": "process",
+      "owner": "HB-05",
+      "sourceFile": "deploy/containers/migration-entrypoint.sh",
+      "sourceToken": "MIGRATION_POSTGRES_USERNAME",
+      "required": true
+    },
+    {
       "name": "MIGRATION_ENTRA_TOKEN_SCOPE",
       "kind": "process",
       "owner": "HB-05",
       "sourceFile": "deploy/containers/migration-entrypoint.sh",
       "sourceToken": "MIGRATION_ENTRA_TOKEN_SCOPE",
-      "required": false
+      "required": true
     },
     {
       "name": "ConnectionStrings__Vistara",
@@ -57,7 +89,8 @@
       "configurationKey": "ConnectionStrings:Vistara",
       "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformComposition.cs",
       "sourceToken": "GetConnectionString(\"Vistara\")",
-      "required": true
+      "required": true,
+      "$comment": "API and worker only. The migration job builds its connection string from the discrete MIGRATION_POSTGRES_* variables above."
     },
     {
       "name": "Persistence__Provider",
