@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
+using System.Data.Common;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Vistara.Persistence;
 using Vistara.Persistence.Auth;
 using Xunit;
@@ -336,6 +338,160 @@ public sealed class RelationalRateLimitStoreTests
                 Window,
                 0,
                 CancellationToken.None));
+    }
+
+    /// <summary>
+    /// Contention that never clears is still not a broken deployment. The
+    /// last classified attempt refuses the request for the length of the
+    /// window instead of letting the fault escape as a failed request: a
+    /// caller being throttled is told to retry, not told the server broke.
+    /// </summary>
+    [Fact]
+    public async Task Unrelenting_contention_refuses_rather_than_fails()
+    {
+        var contention = new FaultInterceptor(
+            () => new SqliteException("database is locked", 5));
+        await using RateLimitCatalogDbContext context = new(
+            new DbContextOptionsBuilder<RateLimitCatalogDbContext>()
+                .UseSqlite("Data Source=:memory:")
+                .AddInterceptors(contention)
+                .Options);
+        var store = new RelationalRateLimitStore(context);
+
+        PersistedRateLimitDecision decision = await store.TryAcquireAsync(
+            Key,
+            Start,
+            Window,
+            10,
+            CancellationToken.None);
+
+        Assert.False(decision.IsAllowed);
+        Assert.Equal(Window, decision.RetryAfter);
+        Assert.True(
+            contention.Faults > 1,
+            "Contention should be retried before the request is refused.");
+    }
+
+    /// <summary>
+    /// A constraint violation on every attempt is the same story: the row is
+    /// contended, not the deployment broken.
+    /// </summary>
+    [Fact]
+    public async Task An_unrelenting_constraint_violation_refuses_rather_than_fails()
+    {
+        var contention = new FaultInterceptor(
+            () => new SqliteException("UNIQUE constraint failed", 19));
+        await using RateLimitCatalogDbContext context = new(
+            new DbContextOptionsBuilder<RateLimitCatalogDbContext>()
+                .UseSqlite("Data Source=:memory:")
+                .AddInterceptors(contention)
+                .Options);
+        var store = new RelationalRateLimitStore(context);
+
+        PersistedRateLimitDecision decision = await store.TryAcquireAsync(
+            Key,
+            Start,
+            TimeSpan.FromSeconds(30),
+            10,
+            CancellationToken.None);
+
+        Assert.False(decision.IsAllowed);
+        Assert.Equal(TimeSpan.FromSeconds(30), decision.RetryAfter);
+    }
+
+    /// <summary>
+    /// A fault that is not contention is not retried into a throttling
+    /// decision: it is the deployment's problem and it surfaces.
+    /// </summary>
+    [Fact]
+    public async Task A_fault_that_is_not_contention_still_surfaces()
+    {
+        var broken = new FaultInterceptor(
+            () => new SqliteException("no such table", 1));
+        await using RateLimitCatalogDbContext context = new(
+            new DbContextOptionsBuilder<RateLimitCatalogDbContext>()
+                .UseSqlite("Data Source=:memory:")
+                .AddInterceptors(broken)
+                .Options);
+        var store = new RelationalRateLimitStore(context);
+
+        await Assert.ThrowsAnyAsync<SqliteException>(
+            async () => await store.TryAcquireAsync(
+                Key,
+                Start,
+                Window,
+                10,
+                CancellationToken.None));
+        Assert.Equal(1, broken.Faults);
+    }
+
+    /// <summary>
+    /// Cancellation during contention is cancellation, not a throttling
+    /// decision.
+    /// </summary>
+    [Fact]
+    public async Task Cancellation_during_contention_is_surfaced()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var contention = new FaultInterceptor(
+            () => new SqliteException("database is locked", 5),
+            onFault: cancellation.Cancel);
+        await using RateLimitCatalogDbContext context = new(
+            new DbContextOptionsBuilder<RateLimitCatalogDbContext>()
+                .UseSqlite("Data Source=:memory:")
+                .AddInterceptors(contention)
+                .Options);
+        var store = new RelationalRateLimitStore(context);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await store.TryAcquireAsync(
+                Key,
+                Start,
+                Window,
+                10,
+                cancellation.Token));
+    }
+
+    /// <summary>
+    /// Fails every statement the store issues with one chosen fault, so the
+    /// classification is exercised rather than waited for.
+    /// </summary>
+    private sealed class FaultInterceptor(
+        Func<DbException> fault,
+        Action? onFault = null) : DbCommandInterceptor
+    {
+        private int _faults;
+
+        internal int Faults => Volatile.Read(ref _faults);
+
+        public override InterceptionResult<int> NonQueryExecuting(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result) => throw Fail();
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default) => throw Fail();
+
+        public override InterceptionResult<DbDataReader> ReaderExecuting(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result) => throw Fail();
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default) => throw Fail();
+
+        private DbException Fail()
+        {
+            Interlocked.Increment(ref _faults);
+            onFault?.Invoke();
+            return fault();
+        }
     }
 
     /// <summary>

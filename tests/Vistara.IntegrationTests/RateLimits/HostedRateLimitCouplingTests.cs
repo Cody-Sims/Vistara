@@ -103,6 +103,157 @@ public sealed class HostedRateLimitCouplingTests
         Assert.Equal(60, Resolve(services).Api);
     }
 
+    /// <summary>
+    /// A bucket is raised by shortening the window as surely as by raising the
+    /// number. Three hundred requests every three seconds is twenty times the
+    /// rate this deployment ships with, and it needs the same declaration.
+    /// </summary>
+    [Theory]
+    [InlineData("Platform:RateLimits:Api", "300", "00:00:03")]
+    [InlineData("Platform:RateLimits:Media", "600", "00:00:01")]
+    [InlineData("Platform:RateLimits:Events", "30", "00:00:30")]
+    public void Raising_a_rate_by_shortening_the_window_needs_a_declaration(
+        string key,
+        string limit,
+        string window)
+    {
+        using ServiceProvider services = Compose(new Dictionary<string, string?>(
+            StringComparer.Ordinal)
+        {
+            ["Platform:RateLimits:Window"] = window,
+            [key] = limit,
+        });
+
+        AssertRejects(services, "PartitionMode");
+    }
+
+    /// <summary>
+    /// A shorter window with nothing else changed raises every bucket, so it
+    /// needs the declaration too.
+    /// </summary>
+    [Fact]
+    public void A_shorter_window_alone_needs_a_declaration()
+    {
+        using ServiceProvider services = Compose(new Dictionary<string, string?>(
+            StringComparer.Ordinal)
+        {
+            ["Platform:RateLimits:Window"] = "00:00:30",
+        });
+
+        AssertRejects(services, "PartitionMode");
+    }
+
+    /// <summary>
+    /// The same rate expressed over a different window is the same rate. A
+    /// deployment that restates its shipped limits has not raised anything.
+    /// </summary>
+    [Fact]
+    public void Restating_the_shipped_rate_over_a_longer_window_is_not_a_raise()
+    {
+        using ServiceProvider services = Compose(new Dictionary<string, string?>(
+            StringComparer.Ordinal)
+        {
+            ["Platform:RateLimits:Window"] = "00:02:00",
+            ["Platform:RateLimits:Api"] = "600",
+            ["Platform:RateLimits:Events"] = "60",
+            ["Platform:RateLimits:Delivery"] = "240",
+            ["Platform:RateLimits:Media"] = "1200",
+        });
+
+        PlatformRateLimitOptions options = Resolve(services);
+
+        Assert.Equal(TimeSpan.FromMinutes(2), options.Window);
+        Assert.Equal(600, options.Api);
+        Assert.Equal(1200, options.Media);
+    }
+
+    /// <summary>
+    /// A longer window with the shipped numbers is a lower rate, and lowering
+    /// is always safe.
+    /// </summary>
+    [Fact]
+    public void A_longer_window_with_the_shipped_limits_is_not_a_raise()
+    {
+        using ServiceProvider services = Compose(new Dictionary<string, string?>(
+            StringComparer.Ordinal)
+        {
+            ["Platform:RateLimits:Window"] = "00:05:00",
+        });
+
+        Assert.Equal(TimeSpan.FromMinutes(5), Resolve(services).Window);
+    }
+
+    /// <summary>
+    /// So is a shorter window whose numbers come down with it.
+    /// </summary>
+    [Fact]
+    public void A_shorter_window_with_lower_numbers_is_not_a_raise()
+    {
+        using ServiceProvider services = Compose(new Dictionary<string, string?>(
+            StringComparer.Ordinal)
+        {
+            ["Platform:RateLimits:Window"] = "00:00:30",
+            ["Platform:RateLimits:Api"] = "150",
+            ["Platform:RateLimits:Events"] = "15",
+            ["Platform:RateLimits:Delivery"] = "60",
+            ["Platform:RateLimits:Media"] = "100",
+        });
+
+        PlatformRateLimitOptions options = Resolve(services);
+
+        Assert.Equal(150, options.Api);
+        Assert.Equal(100, options.Media);
+    }
+
+    /// <summary>
+    /// The comparison is a rate, so it multiplies a limit by a window. Both
+    /// ends of what a deployment can configure have to answer, not overflow:
+    /// the largest limit over the shortest window, and a window so long that
+    /// it is refused for being one.
+    /// </summary>
+    [Fact]
+    public void The_highest_configurable_rate_is_answered_not_overflowed()
+    {
+        using ServiceProvider services = Compose(new Dictionary<string, string?>(
+            StringComparer.Ordinal)
+        {
+            ["Platform:RateLimits:PartitionMode"] = "ForwardedClient",
+            ["Platform:RateLimits:Window"] = "00:00:01",
+            ["Platform:RateLimits:Api"] = "1000000",
+            ["Platform:RateLimits:Events"] = "1000000",
+            ["Platform:RateLimits:Delivery"] = "1000000",
+            ["Platform:RateLimits:Media"] = "1000000",
+        });
+
+        PlatformRateLimitOptions options = Resolve(services);
+
+        Assert.Equal(TimeSpan.FromSeconds(1), options.Window);
+        Assert.Equal(1_000_000, options.Api);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("ForwardedClient")]
+    [InlineData("SharedIngress")]
+    public void A_window_beyond_every_bound_fails_the_host_without_overflowing(
+        string? mode)
+    {
+        var settings = new Dictionary<string, string?>(StringComparer.Ordinal)
+        {
+            ["Platform:RateLimits:Window"] = "10675199.02:48:05",
+            ["Platform:RateLimits:Api"] = "1000000",
+            ["Platform:RateLimits:Media"] = "1000000",
+        };
+        if (mode is not null)
+        {
+            settings["Platform:RateLimits:PartitionMode"] = mode;
+        }
+
+        using ServiceProvider services = Compose(settings);
+
+        AssertRejects(services, "Window");
+    }
+
     [Theory]
     [InlineData("shared-ingress")]
     [InlineData("Shared")]

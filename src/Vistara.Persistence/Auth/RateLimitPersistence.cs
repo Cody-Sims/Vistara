@@ -143,6 +143,7 @@ public sealed class RelationalRateLimitStore(
         for (int attempt = 0; ; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            bool lastAttempt = attempt + 1 >= MaximumAttempts;
             try
             {
                 PersistedRateLimitDecision? decision = await AttemptAsync(
@@ -158,25 +159,40 @@ public sealed class RelationalRateLimitStore(
                 }
             }
             catch (Exception failure) when (
-                !cancellationToken.IsCancellationRequested &&
-                attempt + 1 < MaximumAttempts &&
                 RelationalFaultClassifier.IsContentionOrConstraint(failure))
             {
+                // A caller that went away is not a throttling decision, and a
+                // contended row is not a broken deployment: the same
+                // classified fault on the last attempt refuses the request
+                // rather than failing it.
+                cancellationToken.ThrowIfCancellationRequested();
                 context.ChangeTracker.Clear();
+                if (lastAttempt)
+                {
+                    return Refused(window);
+                }
+
+                await Task.Delay(Backoff(attempt), cancellationToken);
+                continue;
             }
 
-            if (attempt + 1 >= MaximumAttempts)
+            if (lastAttempt)
             {
-                // Every attempt was lost to another writer or to database
-                // contention. Refusing the request is the honest answer: the
-                // count could not be established, and a limiter that fails
-                // open is not a limiter.
-                return new PersistedRateLimitDecision(false, window);
+                return Refused(window);
             }
 
             await Task.Delay(Backoff(attempt), cancellationToken);
         }
     }
+
+    /// <summary>
+    /// The count could not be established, so the request is refused for the
+    /// length of the window. A limiter that fails open is not a limiter, and a
+    /// caller being throttled is told to retry rather than told the server
+    /// broke.
+    /// </summary>
+    private static PersistedRateLimitDecision Refused(TimeSpan window) =>
+        new(false, window);
 
     /// <summary>
     /// One attempt. Returns null when the row moved underneath it and the

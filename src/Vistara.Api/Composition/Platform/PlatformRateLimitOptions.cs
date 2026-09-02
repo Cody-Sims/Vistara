@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Numerics;
 using Microsoft.Extensions.Options;
 using Vistara.Api.Composition.Security;
 using Vistara.Api.Security;
@@ -103,8 +104,9 @@ public sealed class PlatformRateLimitOptions
     /// <summary>
     /// Whose requests a bucket counts. Undeclared means the shipped
     /// per-client behaviour, which is the only thing an existing deployment
-    /// can be, and any bucket raised above the limit it ships with requires
-    /// this to be declared.
+    /// can be, and any bucket raised above the rate it ships with requires
+    /// this to be declared - a rate, so shortening
+    /// <see cref="Window"/> raises every bucket with it.
     /// </summary>
     public PlatformRateLimitPartitionMode? PartitionMode { get; set; }
 
@@ -142,9 +144,36 @@ internal enum PlatformRateLimitBucket
     Media,
 }
 
-internal static class PlatformRateLimitBuckets
+/// <summary>
+/// A limit is only half a ceiling: what a deployment configures is a rate, and
+/// the same number over a shorter window is a higher one.
+/// </summary>
+internal static class PlatformRateLimitRate
 {
-    internal static readonly PlatformRateLimitBucket[] All =
+    /// <summary>
+    /// Whether <paramref name="limit"/> per <paramref name="window"/> is a
+    /// higher rate than <paramref name="otherLimit"/> per
+    /// <paramref name="otherWindow"/>.
+    ///
+    /// The comparison cross-multiplies rather than dividing, so no rate is
+    /// rounded into passing, and it does so in arbitrary precision, so no
+    /// configured pair of values can overflow the comparison into the wrong
+    /// answer. A window that is not a duration cannot be a rate at all and
+    /// never exceeds anything; it is reported as the bad window it is.
+    /// </summary>
+    internal static bool Exceeds(
+        int limit,
+        TimeSpan window,
+        int otherLimit,
+        TimeSpan otherWindow) =>
+        window > TimeSpan.Zero &&
+        otherWindow > TimeSpan.Zero &&
+        (BigInteger)limit * otherWindow.Ticks >
+            (BigInteger)otherLimit * window.Ticks;
+}
+
+internal static class PlatformRateLimitBuckets
+{    internal static readonly PlatformRateLimitBucket[] All =
     [
         PlatformRateLimitBucket.Api,
         PlatformRateLimitBucket.Events,
@@ -425,6 +454,11 @@ internal sealed class PlatformRateLimitOptionsValidator :
                 "must be between 1 second and 1 hour"));
         }
 
+        // A window outside its bounds is already reported, and it is not a
+        // rate, so nothing is compared against it.
+        bool comparableWindow =
+            options.Window >= PlatformRateLimitOptions.MinimumWindow &&
+            options.Window <= PlatformRateLimitOptions.MaximumWindow;
         bool raised = false;
         foreach (PlatformRateLimitBucket bucket in PlatformRateLimitBuckets.All)
         {
@@ -438,7 +472,14 @@ internal sealed class PlatformRateLimitOptionsValidator :
                 continue;
             }
 
-            raised |= limit > PlatformRateLimitBuckets.ShippedLimit(bucket);
+            // What was raised is the rate, not the number. Shortening the
+            // window raises every bucket with it, and the shipped rate
+            // restated over a longer window raises nothing.
+            raised |= comparableWindow && PlatformRateLimitRate.Exceeds(
+                limit,
+                options.Window,
+                PlatformRateLimitBuckets.ShippedLimit(bucket),
+                PlatformRateLimitOptions.DefaultWindow);
         }
 
         // Raising a bucket is the moment the deployment has to say whose
@@ -451,7 +492,8 @@ internal sealed class PlatformRateLimitOptionsValidator :
                 $"must be declared as " +
                 $"{nameof(PlatformRateLimitPartitionMode.SharedIngress)} or " +
                 $"{nameof(PlatformRateLimitPartitionMode.ForwardedClient)} " +
-                "before a bucket is raised above the limit it ships with"));
+                "before a bucket is raised above the rate it ships with, " +
+                "which a shorter window raises as surely as a larger number"));
         }
 
         return failures.Count == 0
@@ -519,10 +561,11 @@ internal sealed class PlatformRateLimitCouplingValidator(
                     continue;
                 }
 
-                // frameworkPermits / frameworkWindow >= limit / window, as
-                // whole numbers so no rate is rounded into passing.
-                if ((long)limits.RequestsPerWindow * options.Window.Ticks <
-                    (long)limit * limits.RateLimitWindow.Ticks)
+                if (PlatformRateLimitRate.Exceeds(
+                        limit,
+                        options.Window,
+                        limits.RequestsPerWindow,
+                        limits.RateLimitWindow))
                 {
                     failures.Add(PlatformRateLimitOptions.Failure(
                         PlatformRateLimitBuckets.Setting(bucket),
