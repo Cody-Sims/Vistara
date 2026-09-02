@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Vistara.Api.Composition.Platform;
 using Vistara.Api.Features.Account;
+using Vistara.Api.Features.Oidc;
 using Vistara.Domain.Common;
 using Xunit;
 
@@ -132,11 +133,45 @@ public sealed class FirstOwnerProvisioningContractTests
         Assert.Equal("no-store", response.CacheControl);
         using JsonDocument json = JsonDocument.Parse(response.Body);
         Assert.Equal(
-            ["available"],
+            ["available", "signInProviders"],
             json.RootElement.EnumerateObject()
                 .Select(member => member.Name)
                 .ToArray());
         Assert.Equal(available, json.RootElement.GetProperty("available").GetBoolean());
+        Assert.Empty(json.RootElement.GetProperty("signInProviders").EnumerateArray());
+    }
+
+    /// <summary>
+    /// The hosted providers are published anonymously, so the payload must
+    /// stay limited to what a sign-in button needs. A directory tenant, a
+    /// client identifier, an authority, or a bootstrap allowlist appearing
+    /// here would be a disclosure, not a feature.
+    /// </summary>
+    [Fact]
+    public async Task Setup_availability_publishes_only_the_sign_in_button_fields()
+    {
+        var provisioning = new FakeProvisioningPort();
+
+        TestResponse response = await DescribeAsync(
+            provisioning,
+            catalog: new StubOidcProviderCatalog(
+                new OidcProviderCapability(
+                    "entra",
+                    "Microsoft Entra ID",
+                    "/api/v1/auth/oidc/entra/start")));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using JsonDocument json = JsonDocument.Parse(response.Body);
+        JsonElement provider = Assert.Single(
+            json.RootElement.GetProperty("signInProviders").EnumerateArray());
+        Assert.Equal(
+            ["id", "displayName", "startUrl"],
+            provider.EnumerateObject().Select(member => member.Name).ToArray());
+        Assert.Equal("entra", provider.GetProperty("id").GetString());
+        Assert.Equal("Microsoft Entra ID", provider.GetProperty("displayName").GetString());
+        Assert.Equal(
+            "/api/v1/auth/oidc/entra/start",
+            provider.GetProperty("startUrl").GetString());
     }
 
     [Fact]
@@ -155,13 +190,19 @@ public sealed class FirstOwnerProvisioningContractTests
 
     private static async Task<TestResponse> DescribeAsync(
         IFirstOwnerProvisioningPort provisioning,
-        IPlatformRateLimitHook? rateLimit = null)
+        IPlatformRateLimitHook? rateLimit = null,
+        IOidcProviderCatalog? catalog = null)
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.Services.AddSingleton(provisioning);
         if (rateLimit is not null)
         {
             builder.Services.AddSingleton(rateLimit);
+        }
+
+        if (catalog is not null)
+        {
+            builder.Services.AddSingleton(catalog);
         }
 
         builder.Services.AddVistaraAccountSurface();
@@ -248,6 +289,12 @@ public sealed class FirstOwnerProvisioningContractTests
             CancellationToken cancellationToken) =>
             ValueTask.FromResult(
                 PlatformRateLimitDecision.Reject(TimeSpan.FromSeconds(30)));
+    }
+
+    private sealed class StubOidcProviderCatalog(params OidcProviderCapability[] providers) :
+        IOidcProviderCatalog
+    {
+        public IReadOnlyList<OidcProviderCapability> Providers { get; } = providers;
     }
 
     private sealed class FakeProvisioningPort : IFirstOwnerProvisioningPort

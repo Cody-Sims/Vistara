@@ -70,7 +70,8 @@ public static class OidcRoutes
         }
 
         string remainder = rest.Value!;
-        if (!remainder.EndsWith(StartSuffix, StringComparison.OrdinalIgnoreCase))
+        if (!remainder.EndsWith(StartSuffix, StringComparison.OrdinalIgnoreCase) ||
+            remainder.Length < StartSuffix.Length + 2)
         {
             return false;
         }
