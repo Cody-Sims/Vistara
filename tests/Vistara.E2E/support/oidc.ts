@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { suiteRateLimits } from './deployment.js';
 import { artifactsDirectory } from './paths.js';
 
 /**
@@ -18,7 +19,7 @@ import { artifactsDirectory } from './paths.js';
  * this run starts, and the password only by the throwaway database it seeds.
  */
 export const oidcEnvironment = {
-  baseUrl: process.env.VISTARA_E2E_OIDC_BASE_URL ?? 'http://127.0.0.1:5189',
+  baseUrl: process.env.VISTARA_E2E_OIDC_BASE_URL ?? 'https://127.0.0.1:5189',
   identityProviderPort: 5190,
   get identityProviderUrl() {
     return `https://127.0.0.1:${this.identityProviderPort}`;
@@ -47,6 +48,14 @@ export const oidcMediaRoot = path.join(artifactsDirectory, 'oidc-media');
 export const oidcCertificatePath = path.join(
   artifactsDirectory,
   'stub-identity-provider.cer',
+);
+/**
+ * Where the hosted sign-in API publishes the public half of its own run
+ * certificate, so the probe that waits for it can pin that one certificate.
+ */
+export const oidcApiCertificatePath = path.join(
+  artifactsDirectory,
+  'vistara-e2e-oidc-api.cer',
 );
 
 export const oidcRoutes = {
@@ -91,10 +100,6 @@ export function oidcApiEnvironment(): Record<string, string> {
     Platform__Authentication__Oidc__Providers__0__RedirectUri: `${oidcEnvironment.baseUrl}${oidcRoutes.callbackPath}`,
     Platform__Authentication__Oidc__Providers__0__ApplicationBaseUri: `${oidcEnvironment.baseUrl}/`,
     Platform__Authentication__Oidc__Providers__0__PostLogoutRedirectUri: `${oidcEnvironment.baseUrl}${oidcRoutes.signedOutPath}`,
-    // The application is reached over loopback HTTP in this suite, which the
-    // provider options allow only when a deployment says so explicitly. The
-    // provider itself is still reached over TLS.
-    Platform__Authentication__Oidc__Providers__0__RequireHttps: 'false',
     Platform__Bootstrap__FirstOwner__Enabled: 'true',
     Platform__Bootstrap__FirstOwner__ProviderId: oidcEnvironment.providerId,
     Platform__Bootstrap__FirstOwner__DirectoryTenantId:
@@ -105,8 +110,12 @@ export function oidcApiEnvironment(): Record<string, string> {
     Platform__Bootstrap__FirstOwner__AllowedObjectIds__0:
       oidcEnvironment.allowedOwnerObjectId,
     // The API trusts exactly the certificate the stub provider wrote for this
-    // run, and nothing else about the transport changes.
+    // run, and nothing else about the transport changes. The application is
+    // itself served over TLS with a certificate it generates per run, so the
+    // reply URLs above are https and RequireHttps keeps its shipped value.
     VISTARA_E2E_OIDC_CERTIFICATE: oidcCertificatePath,
+    VISTARA_E2E_SERVER_CERTIFICATE: oidcApiCertificatePath,
+    ...suiteRateLimits,
   };
 }
 

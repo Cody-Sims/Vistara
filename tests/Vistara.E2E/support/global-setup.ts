@@ -7,11 +7,11 @@ import {
   mkdirSync,
   writeFileSync,
 } from 'node:fs';
-import { request as httpsRequest } from 'node:https';
 import { randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import type { FullConfig } from '@playwright/test';
 import {
+  apiCertificatePath,
   artifactsDirectory,
   databasePath,
   fixturePath,
@@ -25,6 +25,7 @@ import {
 } from './paths.js';
 import {
   identityProviderArguments,
+  oidcApiCertificatePath,
   oidcApiEnvironment,
   oidcCertificatePath,
   oidcEnvironment,
@@ -32,8 +33,24 @@ import {
   oidcRoutes,
   oidcSeedArguments,
 } from './oidc.js';
+import { suiteRateLimits } from './deployment.js';
+import {
+  isSuccess,
+  pinnedGet,
+  pinnedGetJson,
+  readPinnedCertificate,
+} from './tls.js';
 
-const baseUrl = process.env.VISTARA_E2E_BASE_URL ?? 'http://127.0.0.1:5188';
+/**
+ * Everything this run serves is served over TLS on the loopback interface.
+ * Vistara's session cookie and hosted sign-in login handle are `__Host-`
+ * cookies, and WebKit declines to keep a `Secure` cookie delivered over
+ * `http://127.0.0.1`, so a plain-HTTP harness could only ever sign in on
+ * Chromium and Gecko. Each host generates its own certificate for the run and
+ * publishes the public half into the ignored artifacts folder; every probe
+ * below pins exactly that certificate.
+ */
+const baseUrl = process.env.VISTARA_E2E_BASE_URL ?? 'https://127.0.0.1:5188';
 const pepper = randomBytes(32).toString('base64');
 
 export default async function globalSetup(_config: FullConfig) {
@@ -105,6 +122,8 @@ export default async function globalSetup(_config: FullConfig) {
           'https://issuer.e2e.invalid/.well-known/openid-configuration',
         Platform__Authentication__Jwt__Issuers__0__AllowedAlgorithms__0:
           'RS256',
+        VISTARA_E2E_SERVER_CERTIFICATE: apiCertificatePath,
+        ...suiteRateLimits,
       },
       stdio: ['ignore', stdout, stderr],
     },
@@ -225,31 +244,19 @@ function spawnHost(
 
 /**
  * Waits for the stub provider to be answering over TLS and to have published
- * the certificate the API pins. The certificate is self-signed and trusted for
- * this one probe only.
+ * the certificate the API pins. The probe pins that same certificate, so a
+ * provider presenting anything else fails the wait rather than passing it.
  */
 async function waitForIdentityProvider() {
   let lastError: unknown;
   for (let attempt = 0; attempt < 60; attempt++) {
     try {
-      const status = await new Promise<number>((resolve, reject) => {
-        const probe = httpsRequest(
-          `${oidcEnvironment.identityProviderUrl}/health`,
-          { rejectUnauthorized: false },
-          (response) => {
-            response.resume();
-            resolve(response.statusCode ?? 0);
-          },
-        );
-        probe.on('error', reject);
-        probe.end();
-      });
-      if (status !== 200) {
+      const { status } = await pinnedGet(
+        `${oidcEnvironment.identityProviderUrl}/health`,
+        pinnedCertificate(oidcCertificatePath),
+      );
+      if (!isSuccess(status)) {
         throw new Error(`The stub identity provider answered ${status}.`);
-      }
-
-      if (!existsSync(oidcCertificatePath)) {
-        throw new Error('The stub identity provider published no certificate.');
       }
 
       return;
@@ -274,14 +281,16 @@ async function waitForHostedSignIn() {
   let lastError: unknown;
   for (let attempt = 0; attempt < 60; attempt++) {
     try {
-      const response = await fetch(`${oidcEnvironment.baseUrl}/api/v1/setup`);
-      const document = (await response.json()) as {
+      const { status, body } = await pinnedGetJson<{
         signInProviders?: { id?: string; startUrl?: string }[];
-      };
-      const provider = document.signInProviders?.find(
+      }>(
+        `${oidcEnvironment.baseUrl}/api/v1/setup`,
+        pinnedCertificate(oidcApiCertificatePath),
+      );
+      const provider = body.signInProviders?.find(
         (candidate) => candidate.id === oidcEnvironment.providerId,
       );
-      if (!response.ok || provider?.startUrl !== oidcRoutes.startPath) {
+      if (!isSuccess(status) || provider?.startUrl !== oidcRoutes.startPath) {
         throw new Error('Hosted sign-in published no start URL.');
       }
 
@@ -314,20 +323,20 @@ async function waitForApi(url: string) {
   let lastError: unknown;
   for (let attempt = 0; attempt < 60; attempt++) {
     try {
-      const health = await fetch(`${url}/health/live`);
-      if (!health.ok) {
+      const certificate = pinnedCertificate(apiCertificatePath);
+      const health = await pinnedGet(`${url}/health/live`, certificate);
+      if (!isSuccess(health.status)) {
         throw new Error(`Health returned ${health.status}.`);
       }
 
-      const openApi = await fetch(`${url}/openapi/gallery-v1.json`);
-      const document = (await openApi.json()) as {
+      const openApi = await pinnedGetJson<{
         paths?: Record<string, unknown>;
         'x-vistara-runtime-gallery-routes'?: boolean;
-      };
+      }>(`${url}/openapi/gallery-v1.json`, certificate);
       if (
-        !openApi.ok ||
-        document['x-vistara-runtime-gallery-routes'] !== true ||
-        operationCount(document.paths ?? {}) !== 35
+        !isSuccess(openApi.status) ||
+        openApi.body['x-vistara-runtime-gallery-routes'] !== true ||
+        operationCount(openApi.body.paths ?? {}) !== 35
       ) {
         throw new Error('Runtime OpenAPI did not match the gallery route catalog.');
       }
@@ -340,6 +349,19 @@ async function waitForApi(url: string) {
   }
 
   throw new Error(`Vistara API did not become ready: ${String(lastError)}`);
+}
+
+/**
+ * The certificate a host published for this run. It appears the moment that
+ * host starts, so a missing file is one more reason to keep waiting rather
+ * than a reason to trust something else.
+ */
+function pinnedCertificate(certificatePath: string) {
+  if (!existsSync(certificatePath)) {
+    throw new Error(`${certificatePath} has not been published yet.`);
+  }
+
+  return readPinnedCertificate(certificatePath);
 }
 
 async function waitForProcess(pid: number | undefined) {

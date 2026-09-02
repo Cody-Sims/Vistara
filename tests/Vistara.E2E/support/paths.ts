@@ -10,6 +10,15 @@ export const statePath = path.join(artifactsDirectory, 'state.json');
 export const fixturePath = path.join(artifactsDirectory, 'tiny.png');
 export const databasePath = path.join(artifactsDirectory, 'vistara-e2e.db');
 export const mediaRoot = path.join(artifactsDirectory, 'media');
+/**
+ * Where the gallery API publishes the public half of the certificate it
+ * generated for this run, so probes can pin it. The private key stays in the
+ * host process and the artifacts folder is ignored by Git.
+ */
+export const apiCertificatePath = path.join(
+  artifactsDirectory,
+  'vistara-e2e-api.cer',
+);
 export const hostProject = path.join(
   e2eDirectory,
   'host',
