@@ -60,7 +60,7 @@ public sealed class OidcRouteContractTests
     /// would widen the anonymous surface without changing the allowlist.
     /// </summary>
     [Theory]
-    [InlineData("/api/v1/auth/oidc/{providerId}/start")]
+    [InlineData("/api/v1/auth/oidc/{providerId:vistaraOidcProviderKey}/start")]
     [InlineData("/api/v1/auth/oidc/entra/callback")]
     [InlineData("/api/v1/auth/oidc/entra/frontchannel-logout")]
     [InlineData("/api/v1/auth/oidc/entra/signed-out")]
@@ -87,7 +87,7 @@ public sealed class OidcRouteContractTests
         RouteEndpoint endpoint = Assert.Single(
             MapRoutes(),
             candidate => candidate.RoutePattern.RawText ==
-                "/api/v1/auth/oidc/{providerId}/sign-out");
+                "/api/v1/auth/oidc/{providerId:vistaraOidcProviderKey}/sign-out");
 
         Assert.Equal(
             ["POST"],
@@ -97,6 +97,220 @@ public sealed class OidcRouteContractTests
             PlatformAuthenticationDefaults.CookieScheme,
             PlatformAuthenticationSelector.Select(
                 RequestWithStaleSession("POST", "/api/v1/auth/oidc/entra/sign-out")));
+    }
+
+    /// <summary>
+    /// The provider segment is judged by routing, so an attacker-chosen
+    /// segment never reaches a handler, the provider registry, or the audit
+    /// sink. The constraint is the shipped predicate rather than a second
+    /// spelling of it.
+    /// </summary>
+    [Theory]
+    [InlineData("entra", true)]
+    [InlineData("Entra-2_0", true)]
+    [InlineData("", false)]
+    [InlineData("has space", false)]
+    [InlineData("has%2Fslash", false)]
+    [InlineData("carriage\rreturn", false)]
+    [InlineData("line\nfeed", false)]
+    [InlineData("null\0byte", false)]
+    [InlineData("semi;colon", false)]
+    [InlineData("dot.dot", false)]
+    public void The_provider_constraint_admits_exactly_the_provider_keys(
+        string candidate,
+        bool admitted)
+    {
+        var constraint = new OidcProviderKeyRouteConstraint();
+
+        bool matched = constraint.Match(
+            new DefaultHttpContext(),
+            null,
+            OidcRoutes.ProviderRouteParameter,
+            new RouteValueDictionary
+            {
+                [OidcRoutes.ProviderRouteParameter] = candidate,
+            },
+            RouteDirection.IncomingRequest);
+
+        Assert.Equal(admitted, matched);
+        Assert.Equal(admitted, OidcRoutes.IsProviderKey(candidate));
+    }
+
+    [Fact]
+    public void An_oversized_provider_segment_is_refused_by_the_constraint()
+    {
+        var constraint = new OidcProviderKeyRouteConstraint();
+
+        Assert.False(constraint.Match(
+            new DefaultHttpContext(),
+            null,
+            OidcRoutes.ProviderRouteParameter,
+            new RouteValueDictionary
+            {
+                [OidcRoutes.ProviderRouteParameter] = new string('a', 2048),
+            },
+            RouteDirection.IncomingRequest));
+    }
+
+    /// <summary>
+    /// Mapping without the constraint registered would leave the provider
+    /// segment unbounded, so it is a startup failure rather than a silently
+    /// wider route.
+    /// </summary>
+    [Fact]
+    public void Mapping_without_the_constraint_registered_fails()
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.Services.AddSingleton<IOidcProviderCatalog>(new StubOidcProviderCatalog());
+        WebApplication app = builder.Build();
+
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(
+            () => app.MapVistaraOidcAuthentication());
+
+        Assert.Contains(
+            OidcRoutes.ProviderKeyConstraintName,
+            error.Message,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A segment that is not a provider key is answered with a bare 404 and no
+    /// audit record. The sign-in port is never asked, so nothing can record
+    /// what was attempted.
+    /// </summary>
+    [Fact]
+    public async Task A_segment_that_is_not_a_provider_key_is_a_bare_not_found()
+    {
+        var login = new StubOidcLoginPort();
+        var context = new DefaultHttpContext();
+        context.Response.Body = new MemoryStream();
+
+        await OidcAuthenticationEndpoint.StartAsync(
+            context,
+            login,
+            "../../etc/passwd",
+            CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status404NotFound, context.Response.StatusCode);
+        Assert.Equal(0, context.Response.ContentLength);
+        Assert.Equal(string.Empty, context.Response.Headers.Location.ToString());
+        Assert.False(login.WasStarted);
+    }
+
+    /// <summary>
+    /// Audit records are operator-facing text, so a provider key that is not
+    /// one is replaced with a fixed token at construction. A caller cannot put
+    /// attacker-chosen bytes into a log line by forgetting to check first.
+    /// </summary>
+    [Theory]
+    [InlineData("entra", "entra")]
+    [InlineData("", OidcRoutes.UnknownProviderAuditToken)]
+    [InlineData("evil\r\nInjected: header", OidcRoutes.UnknownProviderAuditToken)]
+    [InlineData("../../etc/passwd", OidcRoutes.UnknownProviderAuditToken)]
+    public void An_audit_event_never_carries_a_raw_route_segment(
+        string providerId,
+        string recorded)
+    {
+        Assert.Equal(
+            recorded,
+            new OidcAuditEvent(providerId, "start", "provider_not_configured").ProviderId);
+    }
+
+    /// <summary>
+    /// A deployment with no configured provider has no reply URL registered
+    /// with anyone and no visitor who can start a sign-in, so it maps nothing.
+    /// </summary>
+    [Fact]
+    public void An_unconfigured_deployment_maps_no_hosted_route()
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.Services.AddSingleton<IOidcProviderCatalog, EmptyOidcProviderCatalog>();
+        builder.Services.AddVistaraOidcRouting();
+        WebApplication app = builder.Build();
+
+        app.MapVistaraOidcAuthentication();
+
+        Assert.Empty(
+            ((IEndpointRouteBuilder)app).DataSources.SelectMany(
+                source => source.Endpoints));
+    }
+
+    [Fact]
+    public void The_hosted_surface_maps_no_other_route()
+    {
+        string[] patterns = MapRoutes()
+            .Select(endpoint => endpoint.RoutePattern.RawText!)
+            .Where(pattern => pattern.StartsWith(
+                OidcRoutes.Prefix,
+                StringComparison.Ordinal))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(HostedRoutePatterns, patterns);
+    }
+
+    /// <summary>
+    /// The stale cookie is the whole point: a browser arriving from the
+    /// provider routinely carries a revoked or wrong-tenant session, and if it
+    /// selected the cookie scheme a normal sign-in would be challenged.
+    /// </summary>
+    [Theory]
+    [InlineData("GET", "/api/v1/auth/oidc/entra/start")]
+    [InlineData("GET", "/api/v1/auth/oidc/entra/callback")]
+    [InlineData("GET", "/api/v1/auth/oidc/entra/frontchannel-logout")]
+    [InlineData("GET", "/api/v1/auth/oidc/entra/signed-out")]
+    [InlineData("GET", "/API/V1/AUTH/OIDC/ENTRA/CALLBACK")]
+    [InlineData("GET", "/api/v1/auth/oidc/some-other-provider/start")]
+    public void The_selector_authenticates_the_hosted_routes_anonymously(
+        string method,
+        string path)
+    {
+        Assert.Equal(
+            PlatformAuthenticationDefaults.AnonymousScheme,
+            PlatformAuthenticationSelector.Select(
+                RequestWithStaleSession(method, path)));
+    }
+
+    /// <summary>
+    /// The allowlist entry is a method and a path, not a path. Anything else
+    /// under the hosted prefix - another method, a nested provider segment, an
+    /// empty one, or a neighbouring route - keeps the cookie scheme.
+    /// </summary>
+    [Theory]
+    [InlineData("POST", "/api/v1/auth/oidc/entra/callback")]
+    [InlineData("DELETE", "/api/v1/auth/oidc/entra/frontchannel-logout")]
+    [InlineData("POST", "/api/v1/auth/oidc/entra/start")]
+    [InlineData("GET", "/api/v1/auth/oidc/entra/token")]
+    [InlineData("GET", "/api/v1/auth/oidc//start")]
+    [InlineData("GET", "/api/v1/auth/oidc/entra/nested/start")]
+    [InlineData("GET", "/api/v1/auth/oidc/entra%2Fnested/start")]
+    [InlineData("GET", "/api/v1/auth/oidc/start")]
+    [InlineData("GET", "/api/v1/auth/oidcentra/start")]
+    [InlineData("GET", "/api/v1/auth/login")]
+    public void The_selector_keeps_every_other_request_authenticated(
+        string method,
+        string path)
+    {
+        Assert.Equal(
+            PlatformAuthenticationDefaults.CookieScheme,
+            PlatformAuthenticationSelector.Select(
+                RequestWithStaleSession(method, path)));
+    }
+
+    /// <summary>
+    /// A start route whose provider segment is not a bounded provider key is
+    /// not the start route. The bound matters because the segment reaches the
+    /// login request store and the audit record.
+    /// </summary>
+    [Fact]
+    public void An_oversized_provider_segment_is_not_the_start_route()
+    {
+        Assert.Equal(
+            PlatformAuthenticationDefaults.CookieScheme,
+            PlatformAuthenticationSelector.Select(
+                RequestWithStaleSession(
+                    "GET",
+                    $"/api/v1/auth/oidc/{new string('a', 65)}/start")));
     }
 
     /// <summary>
@@ -344,6 +558,7 @@ public sealed class OidcRouteContractTests
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.Services.AddSingleton<IOidcProviderCatalog>(new StubOidcProviderCatalog());
+        builder.Services.AddVistaraOidcRouting();
         WebApplication app = builder.Build();
         app.MapVistaraOidcAuthentication();
         return ((IEndpointRouteBuilder)app).DataSources
@@ -361,6 +576,7 @@ public sealed class OidcRouteContractTests
         builder.Services.AddSingleton(login);
         builder.Services.AddSingleton(new CookieAuthOptions());
         builder.Services.AddSingleton<IOidcProviderCatalog>(new StubOidcProviderCatalog());
+        builder.Services.AddVistaraOidcRouting();
         WebApplication app = builder.Build();
         app.MapVistaraOidcAuthentication();
 
@@ -404,8 +620,8 @@ public sealed class OidcRouteContractTests
         "/api/v1/auth/oidc/entra/callback",
         "/api/v1/auth/oidc/entra/frontchannel-logout",
         "/api/v1/auth/oidc/entra/signed-out",
-        "/api/v1/auth/oidc/{providerId}/sign-out",
-        "/api/v1/auth/oidc/{providerId}/start",
+        "/api/v1/auth/oidc/{providerId:vistaraOidcProviderKey}/sign-out",
+        "/api/v1/auth/oidc/{providerId:vistaraOidcProviderKey}/start",
     ];
 
     private sealed record TestResponse(
@@ -425,11 +641,14 @@ public sealed class OidcRouteContractTests
 
         public string? ReturnTo { get; private set; }
 
+        public bool WasStarted { get; private set; }
+
         public ValueTask<Result<OidcStartResult>> StartAsync(
             string providerId,
             string? returnTo,
             CancellationToken cancellationToken)
         {
+            WasStarted = true;
             ReturnTo = returnTo;
             return ValueTask.FromResult(Start);
         }

@@ -95,6 +95,16 @@ public static class OidcAuthenticationEndpoint
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(login);
 
+        // Routing already refused anything that is not a provider key. The
+        // check is repeated here so a future caller that binds this handler to
+        // an unconstrained route still cannot hand an arbitrary segment to the
+        // registry, the adapter, or the audit sink.
+        if (!OidcRoutes.IsProviderKey(providerId))
+        {
+            WriteNotFound(context);
+            return;
+        }
+
         Result<OidcStartResult> started = await login.StartAsync(
             providerId,
             ReadSingleQueryValue(context, "returnTo"),
@@ -255,6 +265,18 @@ public static class OidcAuthenticationEndpoint
     private static void WriteFailureRedirect(HttpContext context) =>
         Redirect(context, OidcBrowserOutcome.FailureLocation);
 
+    /// <summary>
+    /// The answer to a route segment that cannot name a provider: a plain 404
+    /// with no body and nothing recorded. Echoing the segment, or auditing it,
+    /// would put attacker-chosen bytes into an operator-facing record for a
+    /// request that never reached any Vistara state.
+    /// </summary>
+    private static void WriteNotFound(HttpContext context)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.StatusCode = StatusCodes.Status404NotFound;
+        context.Response.ContentLength = 0;
+    }
 
     private static void Redirect(HttpContext context, string location)
     {

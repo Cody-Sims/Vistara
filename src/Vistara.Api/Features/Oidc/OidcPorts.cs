@@ -131,4 +131,13 @@ public sealed record OidcAuditEvent(
     Guid? DirectoryTenantId = null,
     string? ObjectId = null,
     Guid? TenantId = null,
-    Guid? UserId = null);
+    Guid? UserId = null)
+{
+    /// <summary>
+    /// The provider key as an operator will read it. A value that is not a
+    /// provider key is replaced with a fixed token at construction, so a
+    /// caller cannot put an attacker-chosen route segment into a log line by
+    /// forgetting to check it first.
+    /// </summary>
+    public string ProviderId { get; init; } = OidcRoutes.ForAudit(ProviderId);
+}

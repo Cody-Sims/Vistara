@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Vistara.Auth.Cookies;
 
 namespace Vistara.Api.Features.Oidc;
@@ -24,6 +25,21 @@ namespace Vistara.Api.Features.Oidc;
 /// </summary>
 public static class OidcEndpointMapping
 {
+    /// <summary>
+    /// Registers the provider-key route constraint. Routing has to be able to
+    /// resolve it before any hosted route is mapped, which is why it is a
+    /// service-collection concern rather than something the mapping can do.
+    /// </summary>
+    public static IServiceCollection AddVistaraOidcRouting(
+        this IServiceCollection services)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        services.Configure<RouteOptions>(static options =>
+            options.ConstraintMap[OidcRoutes.ProviderKeyConstraintName] =
+                typeof(OidcProviderKeyRouteConstraint));
+        return services;
+    }
+
     public static IEndpointRouteBuilder MapVistaraOidcAuthentication(
         this IEndpointRouteBuilder endpoints)
     {
@@ -33,6 +49,24 @@ public static class OidcEndpointMapping
             is not { Providers.Count: > 0 })
         {
             return endpoints;
+        }
+
+        // Without the constraint the provider segment would be unbounded, and
+        // routing would hand an arbitrary run of bytes to the sign-in handler.
+        // Failing here names the missing registration; failing later would not.
+        if (!endpoints.ServiceProvider
+                .GetRequiredService<IOptions<RouteOptions>>()
+                .Value
+                .ConstraintMap
+                .TryGetValue(
+                    OidcRoutes.ProviderKeyConstraintName,
+                    out Type? constraint) ||
+            constraint != typeof(OidcProviderKeyRouteConstraint))
+        {
+            throw new InvalidOperationException(
+                $"The '{OidcRoutes.ProviderKeyConstraintName}' route constraint is not "
+                + $"registered. Call '{nameof(AddVistaraOidcRouting)}' before mapping "
+                + "the hosted OpenID Connect routes.");
         }
 
         endpoints.MapGet(

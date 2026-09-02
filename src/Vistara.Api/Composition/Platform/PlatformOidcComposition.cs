@@ -76,6 +76,7 @@ public static class PlatformOidcServiceCollectionExtensions
             return services;
         }
 
+        services.AddVistaraOidcRouting();
         services.TryAddScoped<RelationalOidcLoginRequestStore>();
         services.TryAddScoped<IOidcLoginPort, PlatformOidcLoginAdapter>();
         services.TryAddScoped<IOidcSignOutPort, PlatformOidcSignOutAdapter>();
