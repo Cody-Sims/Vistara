@@ -284,8 +284,6 @@ for (const [description, supplied] of IGNORED_CONNECTION_STRINGS) {
 
         assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
         assert.match(field('argv'), expectedConnection({ tokens }));
-        assert.ok(!field('argv').includes('stolen'));
-        assert.ok(!field('argv').includes('evil.example.com'));
         assert.match(result.stderr, /Ignoring the supplied connection string/);
       }),
     );

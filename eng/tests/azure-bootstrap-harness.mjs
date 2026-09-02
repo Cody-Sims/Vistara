@@ -795,11 +795,24 @@ export function createSandbox(name, options = {}) {
   const stateDirectory = join(root, 'state');
   const runDirectory = join(root, 'run');
   const homeDirectory = join(root, 'home');
+  const bashEnvironment = join(root, 'bash-env');
 
   for (const directory of [binDirectory, stateDirectory, runDirectory, homeDirectory]) {
     mkdirSync(directory, { recursive: true });
   }
 
+  writeFileSync(
+    bashEnvironment,
+    `command() {
+  if [ "\${1:-}" = '-v' ] && [ -n "\${2:-}" ] \\
+    && [ -f "$FAKE_STATE/missing-command-\${2}" ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+`,
+    'utf8',
+  );
   writeFileSync(join(stateDirectory, 'calls.log'), '', 'utf8');
   writeFileSync(join(stateDirectory, 'bodies.log'), '', 'utf8');
 
@@ -818,6 +831,7 @@ export function createSandbox(name, options = {}) {
     stateDirectory,
     runDirectory,
     homeDirectory,
+    bashEnvironment,
     state(file, contents) {
       writeFileSync(join(stateDirectory, file), contents, 'utf8');
       return sandbox;
@@ -831,11 +845,8 @@ export function createSandbox(name, options = {}) {
       return sandbox;
     },
     removeFake(name) {
-      if (name === 'psql' || name === 'docker') {
-        writeFake(binDirectory, name, 'exit 127');
-      } else {
-        rmSync(join(binDirectory, name), { force: true });
-      }
+      writeFileSync(join(stateDirectory, `missing-command-${name}`), '', 'utf8');
+      writeFake(binDirectory, name, 'exit 127');
       return sandbox;
     },
     has(file) {
@@ -912,6 +923,7 @@ export function run(sandbox, script, argumentList, options = {}) {
     timeout: options.timeout ?? 120_000,
     env: {
       PATH: `${sandbox.binDirectory}:/usr/bin:/bin:/usr/sbin:/sbin`,
+      BASH_ENV: sandbox.bashEnvironment,
       HOME: sandbox.homeDirectory,
       FAKE_STATE: sandbox.stateDirectory,
       VISTARA_STATE_DIR: sandbox.runDirectory,
@@ -960,6 +972,7 @@ export function runInteractive(sandbox, script, argumentList, options = {}) {
     timeout: options.timeout ?? 120_000,
     env: {
       PATH: `${sandbox.binDirectory}:/usr/bin:/bin:/usr/sbin:/sbin`,
+      BASH_ENV: sandbox.bashEnvironment,
       HOME: sandbox.homeDirectory,
       FAKE_STATE: sandbox.stateDirectory,
       VISTARA_STATE_DIR: sandbox.runDirectory,

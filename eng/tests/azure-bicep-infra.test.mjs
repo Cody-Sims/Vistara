@@ -270,17 +270,20 @@ test('main.bicep composes without the separately owned Entra module', () => {
 });
 
 test('every main.bicep parameter carries operator documentation', () => {
-  const undocumented = [
-    ...MAIN.matchAll(/(@description\('[^']*'\)\s*)?(?:@[A-Za-z]+\([^)]*\)\s*|@[A-Za-z]+\(\[[^\]]*\]\)\s*)*^param\s+([A-Za-z0-9_]+)/gms),
-  ];
+  const parameterBlocks = MAIN.split('\n\n').filter((block) =>
+    block.split('\n').some((line) => line.startsWith('param ')),
+  );
   for (const name of EXPECTED_PARAMETERS) {
-    const pattern = new RegExp(
-      `@description\\('[^']+'\\)[\\s\\S]{0,400}?^param ${name} `,
-      'm',
+    const block = parameterBlocks.find((candidate) =>
+      candidate.split('\n').some((line) => line.startsWith(`param ${name} `)),
     );
-    assert.match(MAIN, pattern, `parameter ${name} needs a @description`);
+    assert.ok(block, `parameter ${name} must be declared`);
+    assert.ok(
+      block.trimStart().startsWith('@description('),
+      `parameter ${name} needs a @description`,
+    );
   }
-  assert.ok(undocumented.length > 0);
+  assert.equal(parameterBlocks.length, EXPECTED_PARAMETERS.length);
 });
 
 test('container images must be digest pinned', () => {
@@ -1233,10 +1236,16 @@ test('configuration keys carrying an identity are wired to a managed identity', 
       continue;
     }
 
-    const assignment = new RegExp(
-      `name: '${name.replace(/[$]/g, '\\$')}'\\s*\\n\\s*value: identity\\.outputs\\.\\w+ClientId`,
+    const lines = MAIN.split('\n');
+    const nameLine = lines.findIndex(
+      (line) => line.trim() === `name: '${name}'`,
     );
-    assert.match(MAIN, assignment, `${name} must be bound to a user-assigned identity`);
+    assert.notEqual(nameLine, -1, `${name} must be assigned`);
+    assert.match(
+      lines[nameLine + 1]?.trim() ?? '',
+      /^value: identity\.outputs\.[A-Za-z0-9_]+ClientId$/,
+      `${name} must be bound to a user-assigned identity`,
+    );
   }
 });
 

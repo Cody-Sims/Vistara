@@ -273,24 +273,37 @@ test(
     const remote = execFileSync('git', ['-C', REPOSITORY_ROOT, 'remote', 'get-url', 'origin'], {
       encoding: 'utf8',
     }).trim();
-    const match = remote.match(/github\.com[:/]([^/]+)\/(.+?)(?:\.git)?$/);
-    assert.ok(match, `could not read an owner and repository from ${remote}`);
-    const [, owner, repository] = match;
+    const repositoryPath = remote
+      .replace(/^git@github\.com:/, '')
+      .replace(/^https:\/\/github\.com\//, '')
+      .replace(/\.git$/, '');
+    const [owner, repository, extra] = repositoryPath.split('/');
+    assert.match(owner ?? '', /^[A-Za-z0-9_.-]+$/);
+    assert.match(repository ?? '', /^[A-Za-z0-9_.-]+$/);
+    assert.equal(extra, undefined, `could not read an owner and repository from ${remote}`);
+
+    const probeCommand = [
+      'set -euo pipefail',
+      '. "$1"',
+      'if tag=$(vistara_resolve_latest_release_tag "$2" "$3"); then',
+      '  printf \'resolved %s\\n\' "$tag"',
+      'else',
+      '  printf \'unresolved\\n\'',
+      'fi',
+      'curl -fsS --location --proto \'=https\' --proto-redir \'=https\' --max-redirs 5 --max-time 30'
+        + ' --output /dev/null --write-out \'landed %{http_code} %{url_effective}\\n\''
+        + ' "https://github.com/$2/$3/releases/latest"',
+    ].join('\n');
 
     const probe = spawnSync(
       'bash',
       [
         '-c',
-        'set -euo pipefail\n'
-          + `. '${resolve(AZURE_DIR, 'hooks/lib/common.sh')}'\n`
-          + `if tag=$(vistara_resolve_latest_release_tag '${owner}' '${repository}'); then\n`
-          + '  printf \'resolved %s\\n\' "$tag"\n'
-          + 'else\n'
-          + '  printf \'unresolved\\n\'\n'
-          + 'fi\n'
-          + 'curl -fsS --location --proto \'=https\' --proto-redir \'=https\' --max-redirs 5 --max-time 30'
-          + ' --output /dev/null --write-out \'landed %{http_code} %{url_effective}\\n\''
-          + ` 'https://github.com/${owner}/${repository}/releases/latest'\n`,
+        probeCommand,
+        'vistara-release-probe',
+        resolve(AZURE_DIR, 'hooks/lib/common.sh'),
+        owner,
+        repository,
       ],
       { encoding: 'utf8', timeout: 60_000, env: { ...process.env, VISTARA_STATE_DIR: undefined } },
     );
