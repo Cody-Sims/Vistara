@@ -45,6 +45,9 @@ param concurrentRequestsPerReplica int = 50
 @description('Container port that serves HTTP traffic.')
 param targetPort int = 8080
 
+@description('Exact host the ingress serves. Probes send it as an explicit Host header because the platform otherwise probes the replica address, which host filtering rejects. It must be one of Security:Hosts:AllowedHosts.')
+param ingressHost string
+
 @description('Optional custom hostname bound to the ingress.')
 param customDomainName string = ''
 
@@ -66,6 +69,17 @@ var customDomains = empty(customDomainName)
         bindingType: 'SniEnabled'
       }
     ]
+
+// Container Apps probes the replica by address, so the request arrives with a
+// Host header the API's host filtering does not allow and every probe would be
+// answered with 400 before the health endpoint ran. Sending the ingress host
+// explicitly keeps the probe on the same allow-listed host as real traffic.
+var probeHostHeaders = [
+  {
+    name: 'Host'
+    value: ingressHost
+  }
+]
 
 resource api 'Microsoft.App/containerApps@2026-01-01' = {
   name: name
@@ -121,6 +135,7 @@ resource api 'Microsoft.App/containerApps@2026-01-01' = {
                 path: '/health/startup'
                 port: targetPort
                 scheme: 'HTTP'
+                httpHeaders: probeHostHeaders
               }
               initialDelaySeconds: 3
               periodSeconds: 3
@@ -134,6 +149,7 @@ resource api 'Microsoft.App/containerApps@2026-01-01' = {
                 path: '/health/ready'
                 port: targetPort
                 scheme: 'HTTP'
+                httpHeaders: probeHostHeaders
               }
               initialDelaySeconds: 3
               periodSeconds: 5
@@ -150,6 +166,7 @@ resource api 'Microsoft.App/containerApps@2026-01-01' = {
                 path: '/health/live'
                 port: targetPort
                 scheme: 'HTTP'
+                httpHeaders: probeHostHeaders
               }
               periodSeconds: 10
               timeoutSeconds: 1

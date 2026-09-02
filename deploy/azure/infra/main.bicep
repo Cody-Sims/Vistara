@@ -825,6 +825,9 @@ module api 'modules/api.bicep' = if (deployApplications) {
     environmentVariables: apiEnvironmentVariables
     minReplicas: apiMinReplicas
     maxReplicas: apiMaxReplicas
+    // Probes must present a host the API allows, and apiHost is exactly the
+    // host Security__Hosts__AllowedHosts carries for this deployment.
+    ingressHost: apiHost
     customDomainName: customDomainName
     customDomainCertificateId: customDomainCertificateId
   }

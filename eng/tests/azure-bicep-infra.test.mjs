@@ -363,6 +363,37 @@ test('the API declares explicit HTTP probes for all three health routes', () => 
   assert.doesNotMatch(api, /tcpSocket/);
 });
 
+test('every probe presents the ingress host the API allows', () => {
+  // Container Apps probes the replica by address, so without an explicit Host
+  // header host filtering answers 400 and the app never reports healthy.
+  const api = moduleSource('api.bicep');
+  assert.match(api, /^param ingressHost string$/m);
+  assert.match(
+    api,
+    /var probeHostHeaders = \[\s*\{\s*name: 'Host'\s*value: ingressHost\s*\}\s*\]/,
+  );
+  const headers = [...api.matchAll(/httpHeaders: probeHostHeaders/g)];
+  assert.equal(headers.length, 3, 'all three probes need the Host header');
+  for (const path of ['/health/startup', '/health/ready', '/health/live']) {
+    assert.match(
+      api,
+      new RegExp(`path: '${path}'[\\s\\S]{0,120}?httpHeaders: probeHostHeaders`),
+      `the probe on ${path} must carry the Host header`,
+    );
+  }
+
+  // The host handed to the module is the same value the allow list carries.
+  assert.match(MAIN, /^\s*ingressHost: apiHost$/m);
+  assert.match(
+    MAIN,
+    /var apiHost = empty\(customDomainName\) \? apiDefaultFqdn : customDomainName/,
+  );
+  const allowed = /var allowedHosts = ([\s\S]*?)\n\nvar /.exec(MAIN)?.[1];
+  assert.ok(allowed, 'main.bicep must declare allowedHosts');
+  assert.match(allowed, /name: 'Security__Hosts__AllowedHosts__0'\s*\n\s*value: apiDefaultFqdn/);
+  assert.match(allowed, /name: 'Security__Hosts__AllowedHosts__1'\s*\n\s*value: customDomainName/);
+});
+
 test('the API ingress is public HTTPS only and tagged for azd deploy', () => {
   const api = moduleSource('api.bicep');
   assert.match(api, /external: true/);
@@ -882,6 +913,61 @@ test('the pinned bicep compiler builds and lints the template', (t) => {
   const rendered = JSON.stringify(template);
   assert.doesNotMatch(rendered, /listSecrets\(/);
   assert.equal((rendered.match(/listKeys\(/g) ?? []).length, 1);
+
+  // The compiled API module is the artifact ARM deploys: read the probes out of
+  // it so a template that builds but drops the Host header cannot pass.
+  const apiDeployment = template.resources.api.properties;
+  const apiTemplate = apiDeployment.template;
+  const probeHeaders = apiTemplate.variables.probeHostHeaders;
+  assert.deepEqual(probeHeaders, [
+    { name: 'Host', value: "[parameters('ingressHost')]" },
+  ]);
+
+  const containers =
+    apiTemplate.resources[0].properties.template.containers;
+  assert.equal(containers.length, 1);
+  const probes = containers[0].probes;
+  assert.deepEqual(
+    probes.map((probe) => probe.type).sort(),
+    ['Liveness', 'Readiness', 'Startup'],
+  );
+  for (const probe of probes) {
+    assert.equal(
+      probe.httpGet.httpHeaders,
+      "[variables('probeHostHeaders')]",
+      `the compiled ${probe.type} probe must send the ingress host`,
+    );
+  }
+
+  // The host the probes send is byte-for-byte one of the two expressions the
+  // allow list carries, on whichever branch the deployment takes.
+  const defaultHostExpression =
+    "format('{0}.{1}', variables('apiAppName'), "
+    + "reference('containerAppsEnvironment').outputs.defaultDomain.value)";
+  const customHostExpression = "parameters('customDomainName')";
+  // Bicep folds the conditional into the parameter entry itself, so the whole
+  // entry is the expression rather than an object with a `value` member.
+  const ingressHostExpression = apiDeployment.parameters.ingressHost;
+  assert.equal(
+    ingressHostExpression,
+    `[if(empty(${customHostExpression}), createObject('value', `
+      + `${defaultHostExpression}), createObject('value', ${customHostExpression}))]`,
+  );
+
+  const apiEnvironment = apiDeployment.parameters.environmentVariables.value;
+  assert.ok(
+    apiEnvironment.includes(
+      `createObject('name', 'Security__Hosts__AllowedHosts__0', 'value', ${defaultHostExpression})`,
+    ),
+    'the default ingress host must be the first allowed host',
+  );
+  assert.ok(
+    apiEnvironment.includes(
+      `createObject('name', 'Security__Hosts__AllowedHosts__1', 'value', ${customHostExpression})`,
+    ),
+    'the custom domain must be the second allowed host',
+  );
+
 
   for (const module of EXPECTED_MODULES) {
     const lint = spawnSync(BICEP_CLI, ['lint', resolve(MODULES, module)], {
