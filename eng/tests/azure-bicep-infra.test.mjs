@@ -84,12 +84,31 @@ function declaredOutputs(source) {
 
 /**
  * Resolves the azd `${VAR=default}` placeholders the way azd does before the
- * file is handed to ARM, so the template can be parsed as JSON.
+ * file is handed to ARM, so the template can be parsed as JSON. A supplied
+ * environment stands in for the persisted azd environment; a placeholder with
+ * no default and no environment value is what azd refuses to render.
  */
-function renderParameterFile(source) {
-  return source.replace(/\$\{([A-Z0-9_]+)(?:=([^}]*))?\}/g, (_, __, fallback) =>
-    fallback === undefined ? 'placeholder' : fallback,
+function renderParameterFile(source, environment = {}) {
+  return source.replace(
+    /\$\{([A-Z0-9_]+)(?:=([^}]*))?\}/g,
+    (_, name, fallback) => {
+      if (Object.hasOwn(environment, name)) {
+        return environment[name];
+      }
+
+      return fallback === undefined ? 'placeholder' : fallback;
+    },
   );
+}
+
+/** Placeholders azd cannot render without a persisted environment value. */
+function unresolvedPlaceholders(source, environment = {}) {
+  return [...source.matchAll(/\$\{([A-Z0-9_]+)(?:=([^}]*))?\}/g)]
+    .filter(
+      (match) =>
+        match[2] === undefined && !Object.hasOwn(environment, match[1]),
+    )
+    .map((match) => match[1]);
 }
 
 /**
@@ -827,7 +846,149 @@ test('the budget alerts on actual and forecast spend', () => {
   assert.match(budget, /timeGrain: 'Monthly'/);
   assert.match(budget, /thresholdType: 'Actual'/);
   assert.match(budget, /thresholdType: 'Forecasted'/);
-  assert.match(MAIN, /param budgetStartDate string = utcNow\('yyyy-MM-01'\)/);
+});
+
+test('the budget start date is supplied, never taken from the clock', () => {
+  // utcNow() is re-evaluated on every deployment, so a defaulted start date
+  // silently re-bases the budget each month and Cost Management loses the
+  // accrual it was measuring against.
+  assert.doesNotMatch(MAIN, /utcNow/);
+  for (const module of EXPECTED_MODULES) {
+    assert.doesNotMatch(moduleSource(module), /utcNow/);
+  }
+
+  assert.match(
+    MAIN,
+    /@minLength\(10\)\s*\n@maxLength\(10\)\s*\nparam budgetStartDate string$/m,
+    'budgetStartDate must be a required, length-constrained parameter',
+  );
+  assert.doesNotMatch(MAIN, /param budgetStartDate string =/);
+  assert.match(
+    MAIN,
+    /var budgetStartDateMonthStart = dateTimeAdd\(budgetStartDate, 'P0D', 'yyyy-MM-01'\)/,
+  );
+  assert.match(
+    MAIN,
+    /var budgetStartDateChecked = substring\(\s*budgetStartDate,\s*indexOf\(budgetStartDate, budgetStartDateMonthStart\)\s*\)/,
+  );
+  assert.match(MAIN, /startDate: budgetStartDateChecked/);
+});
+
+test('the budget start date is a persisted handoff azd cannot invent', () => {
+  const rendered = JSON.parse(renderParameterFile(PARAMETERS));
+  assert.ok(
+    Object.hasOwn(rendered.parameters, 'budgetStartDate'),
+    'main.parameters.json must supply budgetStartDate',
+  );
+  assert.match(PARAMETERS, /"budgetStartDate":\s*\{\s*"value": "\$\{VISTARA_BUDGET_START_DATE\}"/);
+
+  // No `=default`, so azd has nothing to fall back on: the value must already
+  // be in the environment, which is what makes it survive to the next provision.
+  assert.ok(
+    unresolvedPlaceholders(PARAMETERS).includes('VISTARA_BUDGET_START_DATE'),
+    'VISTARA_BUDGET_START_DATE must have no inline default',
+  );
+  assert.ok(
+    !unresolvedPlaceholders(PARAMETERS, {
+      VISTARA_BUDGET_START_DATE: '2026-09-01',
+    }).includes('VISTARA_BUDGET_START_DATE'),
+    'a persisted environment value must satisfy the placeholder',
+  );
+});
+
+test('two provisions in different months render the same start date', () => {
+  // The persisted environment is written once and read back unchanged, so the
+  // rendered parameter cannot depend on when the provision runs.
+  const persisted = { VISTARA_BUDGET_START_DATE: '2026-09-01' };
+  const realNow = Date.now;
+  const renders = [];
+  for (const instant of [
+    Date.UTC(2026, 8, 14),
+    Date.UTC(2027, 2, 3),
+    Date.UTC(2031, 11, 31),
+  ]) {
+    Date.now = () => instant;
+    try {
+      renders.push(
+        JSON.parse(renderParameterFile(PARAMETERS, persisted)).parameters
+          .budgetStartDate.value,
+      );
+    } finally {
+      Date.now = realNow;
+    }
+  }
+
+  assert.deepEqual(renders, ['2026-09-01', '2026-09-01', '2026-09-01']);
+
+  // A second provision that forgot to persist the value must fail loudly
+  // rather than quietly adopt the current month.
+  assert.deepEqual(unresolvedPlaceholders(PARAMETERS, {}), [
+    'AZURE_ENV_NAME',
+    'AZURE_LOCATION',
+    'VISTARA_API_IMAGE',
+    'VISTARA_WORKER_IMAGE',
+    'VISTARA_MIGRATION_IMAGE',
+    'VISTARA_FIRST_OWNER_OBJECT_ID',
+    'VISTARA_POSTGRES_ADMIN_OBJECT_ID',
+    'VISTARA_POSTGRES_ADMIN_PRINCIPAL_NAME',
+    'VISTARA_BUDGET_START_DATE',
+  ]);
+});
+
+test('only the first day of a month survives the start-date guard', () => {
+  // ARM evaluates the guard at deployment time, so the semantics of the three
+  // functions it is built from are reproduced here and run against the exact
+  // compiled expression's inputs. Anything not ten characters long is already
+  // refused by the parameter constraint and never reaches this point.
+  function armDateTimeAddMonthStart(value) {
+    const parsed = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+    if (!parsed) {
+      throw new Error(`dateTimeAdd cannot parse '${value}'`);
+    }
+
+    const [, year, month, day] = parsed.map(Number);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (
+      date.getUTCFullYear() !== year ||
+      date.getUTCMonth() !== month - 1 ||
+      date.getUTCDate() !== day
+    ) {
+      throw new Error(`dateTimeAdd cannot parse '${value}'`);
+    }
+
+    return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-01`;
+  }
+
+  function guard(value) {
+    const index = value.indexOf(armDateTimeAddMonthStart(value));
+    if (index < 0) {
+      throw new Error('substring index cannot be less than zero');
+    }
+
+    return value.slice(index);
+  }
+
+  for (const accepted of ['2026-09-01', '2026-01-01', '2027-12-01', '2100-02-01']) {
+    assert.equal(guard(accepted), accepted);
+  }
+
+  for (const rejected of [
+    '2026-09-15',
+    '2026-09-30',
+    '2026-13-01',
+    '2026-02-30',
+    '2026-00-01',
+    'not-a-date',
+    '01-09-2026',
+    '2026/09/01',
+  ]) {
+    assert.throws(() => guard(rejected), `'${rejected}' must be rejected`);
+  }
+
+  // The length constraint is the other half of the rule.
+  for (const wrongLength of ['2026-9-1', '2026-09-01T00:00:00Z', '', '2026-09-011']) {
+    assert.notEqual(wrongLength.length, 10, `'${wrongLength}' must not be 10 characters`);
+  }
 });
 
 test('a private registry password only ever travels as a Key Vault reference', () => {
@@ -858,6 +1019,7 @@ test('main.parameters.json renders to JSON that matches the template surface', (
     'firstOwnerObjectId',
     'postgresEntraAdminObjectId',
     'postgresEntraAdminPrincipalName',
+    'budgetStartDate',
   ]) {
     assert.ok(
       supplied.includes(name),
@@ -1134,6 +1296,31 @@ test('the pinned bicep compiler builds and lints the template', (t) => {
     assert.notEqual(parameter.type, 'secureString');
     assert.notEqual(parameter.type, 'secureObject');
   }
+
+  // The compiled artifact is what ARM deploys: the budget start date must
+  // arrive from the caller with no clock-derived default of its own.
+  const startDate = template.parameters.budgetStartDate;
+  assert.equal(startDate.type, 'string');
+  assert.equal(startDate.minLength, 10);
+  assert.equal(startDate.maxLength, 10);
+  assert.ok(
+    !Object.hasOwn(startDate, 'defaultValue'),
+    'budgetStartDate must have no default value',
+  );
+  assert.equal(
+    template.variables.budgetStartDateMonthStart,
+    "[dateTimeAdd(parameters('budgetStartDate'), 'P0D', 'yyyy-MM-01')]",
+  );
+  assert.equal(
+    template.variables.budgetStartDateChecked,
+    "[substring(parameters('budgetStartDate'), "
+      + "indexOf(parameters('budgetStartDate'), variables('budgetStartDateMonthStart')))]",
+  );
+  assert.doesNotMatch(
+    JSON.stringify(template),
+    /utcNow\(/,
+    'no compiled expression may read the deployment clock',
+  );
 
   const rendered = JSON.stringify(template);
   assert.doesNotMatch(rendered, /listSecrets\(/);

@@ -109,8 +109,10 @@ param budgetAmount int = 25
 @description('Email addresses that receive budget alerts.')
 param budgetContactEmails array = []
 
-@description('First day of the month the budget starts tracking. Evaluated once as a parameter default so redeployment stays idempotent.')
-param budgetStartDate string = utcNow('yyyy-MM-01')
+@description('First day of the month the budget tracks, as yyyy-MM-01. Never defaulted from the clock: a start date that moves with the deployment month makes every provision a different budget, so up.sh writes VISTARA_BUDGET_START_DATE into the azd environment once and every later provision reuses it.')
+@minLength(10)
+@maxLength(10)
+param budgetStartDate string
 
 @description('Optional custom hostname for the API ingress. Never required for an evaluation deployment.')
 param customDomainName string = ''
@@ -152,6 +154,19 @@ var storageAccountName = 'stvistara${resourceToken}'
 var keyVaultName = 'kv-vistara-${take(resourceToken, 11)}'
 var postgresServerName = 'psql-vistara-${resourceToken}'
 var budgetName = 'budget-vistara-${environmentSlug}'
+
+// dateTimeAdd renders the first day of whatever month the supplied date falls
+// in, so indexOf returns 0 only when the operator supplied that exact day and
+// -1 otherwise, and substring then fails the deployment. Together with the
+// ten-character length constraint on the parameter this admits exactly
+// yyyy-MM-01 and rejects a mid-month date, an unpadded date, a timestamp, and
+// anything that is not a date at all. The deployment fails rather than silently
+// re-basing a budget that Cost Management has already been accruing against.
+var budgetStartDateMonthStart = dateTimeAdd(budgetStartDate, 'P0D', 'yyyy-MM-01')
+var budgetStartDateChecked = substring(
+  budgetStartDate,
+  indexOf(budgetStartDate, budgetStartDateMonthStart)
+)
 
 var mediaContainerName = 'media'
 var dataProtectionContainerName = 'dataprotection'
@@ -382,7 +397,7 @@ module budget 'modules/budget.bicep' = {
   params: {
     name: budgetName
     amount: budgetAmount
-    startDate: budgetStartDate
+    startDate: budgetStartDateChecked
     contactEmails: budgetContactEmails
   }
 }

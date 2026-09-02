@@ -68,6 +68,9 @@
     "budgetContactEmails": {
       "value": ${VISTARA_BUDGET_CONTACT_EMAILS=[]}
     },
+    "budgetStartDate": {
+      "value": "${VISTARA_BUDGET_START_DATE}"
+    },
     "customDomainName": {
       "value": "${VISTARA_CUSTOM_DOMAIN_NAME=}"
     },
