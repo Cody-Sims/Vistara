@@ -253,9 +253,38 @@ export interface JobStatus {
   readonly actions: JobActions;
 }
 
+/**
+ * One hosted identity provider a visitor may sign in with, as published by
+ * `GET /api/v1/setup`. Only the key, the label, and the same-origin path to
+ * start at are ever published: the directory, the client identifier, and the
+ * authority stay on the server. Sign-in starts by navigating to `startUrl`;
+ * it is never fetched, because the response is a redirect to the provider that
+ * only the browser may follow.
+ */
+export interface SignInProvider {
+  readonly id: string;
+  readonly displayName: string;
+  readonly startUrl: string;
+}
+
 /** Response of `GET /api/v1/setup`; tells the browser whether first run is open. */
 export interface SetupState {
   readonly available: boolean;
+  /**
+   * Optional only so a deployment that publishes no provider list is read as
+   * having none rather than failing the sign-in page.
+   */
+  readonly signInProviders?: readonly SignInProvider[];
+}
+
+/**
+ * Where the browser may end the provider session, answered by relying-party
+ * sign-out after the Vistara session has already been revoked. Absent when the
+ * provider publishes no end-session endpoint, in which case signing out is
+ * already complete.
+ */
+export interface HostedSignOut {
+  readonly endSessionUrl?: string | null;
 }
 
 export interface ProvisionFirstOwnerRequest {

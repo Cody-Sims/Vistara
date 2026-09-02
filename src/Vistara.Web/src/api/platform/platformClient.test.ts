@@ -133,6 +133,74 @@ describe('platform session client', () => {
     ).toBeNull();
   });
 
+  it('signs out of a hosted provider with the session antiforgery token', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ user: currentUser, csrfToken: 'token-5' }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          endSessionUrl: 'https://login.example.test/logout?client_id=vistara',
+        }),
+      );
+    const client = new PlatformApiClient({ fetch });
+
+    await client.login({ login: 'ada@example.test', password: 'pw' });
+    const signedOut = await client.signOutFromProvider('entra');
+
+    expect(fetch.mock.calls[1]![0]).toBe('/api/v1/auth/oidc/entra/sign-out');
+    expect(fetch.mock.calls[1]![1]?.method).toBe('POST');
+    expect(
+      new Headers(fetch.mock.calls[1]![1]?.headers).get('X-Vistara-CSRF'),
+    ).toBe('token-5');
+    expect(signedOut.endSessionUrl).toBe(
+      'https://login.example.test/logout?client_id=vistara',
+    );
+  });
+
+  it('forgets the antiforgery token even when hosted sign-out fails', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ user: currentUser, csrfToken: 'token-6' }),
+      )
+      .mockResolvedValueOnce(problemResponse(503, 'oidc.unavailable'))
+      // The dropped token is read again before the next unsafe request.
+      .mockResolvedValueOnce(problemResponse(401, 'auth.unauthenticated'))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = new PlatformApiClient({ fetch });
+
+    await client.login({ login: 'ada@example.test', password: 'pw' });
+    await expect(client.signOutFromProvider('entra')).rejects.toBeInstanceOf(
+      VistaraApiError,
+    );
+    await client.logout();
+
+    expect(fetch.mock.calls[2]![0]).toBe('/api/v1/me');
+    expect(
+      new Headers(fetch.mock.calls[3]![1]?.headers).get('X-Vistara-CSRF'),
+    ).toBeNull();
+  });
+
+  /** A provider key is a route segment, so it is encoded rather than trusted. */
+  it('encodes the provider key into the sign-out route', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      // The reloaded browser holds the cookie but no token, so the session is
+      // read before the first unsafe request.
+      .mockResolvedValueOnce(jsonResponse(currentUser))
+      .mockResolvedValueOnce(jsonResponse({ endSessionUrl: null }));
+    const client = new PlatformApiClient({ fetch });
+
+    const signedOut = await client.signOutFromProvider('../logout');
+
+    expect(fetch.mock.calls[1]![0]).toBe(
+      '/api/v1/auth/oidc/..%2Flogout/sign-out',
+    );
+    expect(signedOut.endSessionUrl).toBeNull();
+  });
+
   it('reads the deployment capability document', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () =>
       jsonResponse({
@@ -293,6 +361,7 @@ describe('platform tenant administration client', () => {
         'onUnauthorized',
         'retryJob',
         'revokeApiKey',
+        'signOutFromProvider',
         'updatePreferences',
         'updateTenantMember',
       ].sort(),
