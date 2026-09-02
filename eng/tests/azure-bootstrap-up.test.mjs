@@ -738,7 +738,14 @@ test('--what-if previews the deployment and changes nothing', () => {
       .join(' ');
     assert.ok(whatIf.includes('deployApplications=false'));
     assert.ok(whatIf.includes(`apiImage=ghcr.io/cody-sims/vistara-api@${API_DIGEST}`));
-    assert.ok(whatIf.includes('budgetStartDate='), 'the preview needs a budget period too');
+    // The template constrains this to the first day of a month, so an empty
+    // value fails against real Azure exactly where the preview is supposed to
+    // be safe. The shape is what is asserted, not the presence of the word.
+    assert.match(
+      whatIf,
+      /budgetStartDate=\d{4}-\d{2}-01(\s|$)/,
+      'the preview passes a budget period the template will accept',
+    );
 
     // A preview is a question, not a change: it must not select a
     // subscription, create an environment, or record a budget period that a
@@ -804,6 +811,42 @@ test('a subscription in another tenant is refused rather than guessed at', () =>
       mutatingCalls(sandbox).map((call) => call.join(' ')),
       [],
       'a directory lookup that would answer for the wrong tenant stops the run before it changes anything',
+    );
+  });
+});
+
+test('a subscription in the same tenant is switched to, after the confirmation', () => {
+  withSandbox('same-tenant-switch', (sandbox) => {
+    // The tenant guard must not fire on the ordinary case of deploying into a
+    // second subscription of the same directory.
+    sandbox.touch('allow_subscription_switch');
+    const result = run(
+      sandbox,
+      UP_SCRIPT,
+      upArguments(['--subscription', '99999999-9999-9999-9999-999999999999']),
+    );
+    assert.equal(result.status, 0, result.output);
+
+    const calls = sandbox.calls().map((call) => call.join(' '));
+    const switched = calls.findIndex((call) => call.includes('account set'));
+    assert.notEqual(switched, -1, 'the CLI is pointed at the subscription being deployed into');
+    assert.equal(
+      calls[switched].includes('--subscription 99999999-9999-9999-9999-999999999999'),
+      true,
+    );
+
+    // Reads may precede the switch; anything that writes may not.
+    const firstEnvironmentWrite = calls.findIndex((call) =>
+      /^azd (env (new|select|set)|provision|deploy)\b/.test(call),
+    );
+    assert.notEqual(firstEnvironmentWrite, -1);
+    assert.ok(
+      switched < firstEnvironmentWrite,
+      'the CLI is pointed at the right subscription before azd writes anything',
+    );
+    assert.equal(
+      sandbox.environment('eval').AZURE_SUBSCRIPTION_ID,
+      '99999999-9999-9999-9999-999999999999',
     );
   });
 });
