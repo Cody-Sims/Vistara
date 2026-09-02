@@ -511,6 +511,19 @@ test('the firewall opening is removed even when the SQL fails', () => {
   });
 });
 
+test('a firewall rule that may have been created is removed even when the call fails', () => {
+  withSandbox('firewall-create-failure', (sandbox) => {
+    sandbox.touch('firewall_create_fails');
+    const result = run(sandbox, UP_SCRIPT, upArguments());
+    assert.equal(result.status, 70, result.output);
+    assert.ok(
+      sandbox.calls().some((call) => call.join(' ').includes('firewall-rule delete')),
+      'a create that reports failure may still have reached Azure, so the delete is attempted anyway',
+    );
+    assert.equal(sandbox.callsFor('psql').length, 0, 'and nothing connects through it');
+  });
+});
+
 test('the bootstrap SQL creates the three principals with the five-argument function', () => {
   withSandbox('pgaadauth-arity', (sandbox) => {
     const result = run(sandbox, UP_SCRIPT, upArguments());

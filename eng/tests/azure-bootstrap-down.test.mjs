@@ -204,7 +204,11 @@ test('a destructive teardown without a confirmation deletes nothing', () => {
   withSandbox('down-unconfirmed', (sandbox) => {
     const result = run(sandbox, DOWN_SCRIPT, ['--env-name', 'eval', '--delete-data']);
     assert.equal(result.status, 64, result.output);
-    assert.match(result.output, /Type eval to continue|no terminal is attached/);
+    assert.match(
+      result.output,
+      /no terminal is attached; rerun with --yes/,
+      'a destructive teardown never proceeds on an answer it did not get',
+    );
     assert.ok(!sandbox.has('deleted-locks.log'), 'no lock was removed');
     assert.ok(!sandbox.has('down_called'), 'no environment was deleted');
     assert.ok(!sandbox.has('deleted-resources.log'), 'no resource was deleted');
