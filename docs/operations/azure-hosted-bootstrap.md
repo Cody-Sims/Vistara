@@ -58,8 +58,10 @@ a resource-group budget, and role assignments for three managed identities.
 | Cost Management access on the subscription | The resource-group budget is created by `deploy/azure/infra/modules/budget.bicep`; Owner covers this |
 | Microsoft Entra **Application.ReadWrite.OwnedBy** (or Application Administrator) | The application registration, its service principal, and its federated identity credential are created by `deploy/azure/hooks/postprovision-app-registration.sh` |
 
-If you have no directory rights, a directory administrator can create the
-registration once and you supply it — see
+If you have no directory rights, either an administrator grants them or an
+administrator pre-creates the registration and you deploy against it with
+`--skip-app-registration --client-id` — both paths, and what each one can and
+cannot fill in for you, are in
 [§13.6](#136-insufficient-directory-rights-for-the-application-registration-77).
 The preflight probes for this **before** anything is created, so you find out
 in seconds rather than after a provisioning run.
@@ -71,7 +73,9 @@ requested, and both implicit grants are explicitly disabled.
 
 ### 1.2 Tools
 
-`up.sh` refuses to start without these, and the preflight checks versions:
+`up.sh` checks for `az`, `azd`, `curl`, and `openssl` before it does anything at
+all, and the preflight that `azd` runs at the start of each provisioning pass
+re-checks them with version floors and adds Bicep:
 
 | Tool | Minimum | Install |
 |---|---|---|
@@ -80,7 +84,22 @@ requested, and both implicit grants are explicitly disabled.
 | Bicep | 0.36.1 (0.46.1 is the compiler CI validates against) | `az bicep install` |
 | `curl` | any | preinstalled on macOS and most Linux |
 | `openssl` | any | generates the API key pepper |
-| `psql` **or** `docker` | any | the PostgreSQL roles are created by SQL; without `psql` the same file runs in a `postgres:17-alpine` container |
+
+**Install a PostgreSQL client, or Docker, before you start.** The three database
+principals are created by running `deploy/azure/sql/bootstrap-roles.sql`, and
+that step uses `psql` if you have it and otherwise runs the same file inside a
+`postgres:17-alpine` container:
+
+```bash
+brew install libpq        # macOS; or: apt install postgresql-client
+```
+
+Neither is part of the up-front tool check today. The database step runs after
+the platform pass, so a machine with neither is turned away there with exit 69,
+once resources already exist. Nothing is deleted, nothing is half-configured,
+and rerunning the same command after installing one resumes at that step — but
+it is a slower way to find out than installing it now. `--what-if`
+([§5.2](#52-preview-with---what-if)) never reaches that step and needs neither.
 
 `open` or `xdg-open` is optional. Without one, the sign-in URL is printed
 rather than launched, and `up.sh` tells you so at the start instead of at the
@@ -353,7 +372,11 @@ environment, not the recorded budget start date. It runs
 `deployApplications=false`, so it previews the platform pass. It does not
 preview the application pass, and it does not preview the hooks — the Entra
 registration, the pepper, the database roles, and the migration are not ARM
-resources and have no what-if.
+resources and have no what-if. Because it never reaches a hook, it also needs
+none of what they need: no PostgreSQL client, no Docker, and no application
+registration rights — the directory probe runs in the preflight, which a
+preview never triggers. It still needs a first owner, so pass
+`--owner-object-id` if your signed-in object ID cannot be read.
 
 ### 5.3 Upgrading images
 
@@ -680,14 +703,37 @@ subscription explicitly.
 |---|---|
 | `node --test eng/tests/azure-bootstrap-up.test.mjs eng/tests/azure-bootstrap-down.test.mjs eng/tests/azure-bootstrap-contract.test.mjs` | The wrapper's argument handling, prompts, idempotence, exit codes, and teardown behaviour |
 | `node --test eng/tests/azure-bicep-infra.test.mjs` | The template's parameters, identities, role assignments, locks, and configuration surface |
-| `node --test eng/tests/azure-bootstrap-sql.test.mjs` | The bootstrap SQL against a real PostgreSQL server that can refuse it |
 | `node --test eng/tests/azure-graph-registration.test.mjs` | The Entra registration shape, built and linted with the pinned Bicep compiler |
 | `.github/workflows/repository-tooling.yml` | All of the above, on every change under `deploy/azure/**` |
 
-**Not yet done:** a live `up.sh` → sign in → upload → `down.sh` drill against a
-real Azure subscription, with observed cost. That is task `HB-15`. Until it
-reports, treat every timing, cost, and Azure-behaviour claim here as derived
-from the sources cited rather than observed.
+Those run against stand-ins: a faked `az`, `azd`, `psql`, and `docker`. They
+prove what the scripts do, not what Azure does with it.
+
+**Two things are therefore not covered by ordinary CI.**
+
+The bootstrap SQL is checked against a real PostgreSQL server — the one part of
+the bootstrap a stand-in cannot judge, because a grant the Azure administrator
+role cannot make is answered with a warning rather than an error and would
+otherwise pass silently. That check is **opt-in and local**: it needs a running
+Docker daemon, so it is skipped unless you ask for it, including in CI.
+
+```bash
+VISTARA_POSTGRES_SQL_CHECK=1 node --test eng/tests/azure-bootstrap-sql.test.mjs
+```
+
+Run it locally after changing `deploy/azure/sql/bootstrap-roles.sql`; a green CI
+run does not include it.
+
+**Not yet done:** a live deployment drill against a real Azure subscription —
+`up.sh`, sign in, upload, `down.sh` — with observed cost and timings. That drill
+is the verification the Wave 8 plan attaches to its deployment and operator-guide
+work (`CLOUD-07` and `CLOUD-08` in
+[`docs/specification.md`](../specification.md)), and it is the last outstanding
+item in
+[the plan's rollout sequence](../future-plans/hosted-identity-and-azure-bootstrap.md).
+Until it reports, treat every timing, cost, and Azure-behaviour claim here as
+derived from the sources cited in [§14](#14-sources) rather than observed, and
+treat your first run as that drill.
 
 ---
 
@@ -703,7 +749,7 @@ specific code and `up.sh` recovers it. Both scripts draw from one taxonomy;
 |---|---|---|
 | `0` | Success, **or** a declined confirmation that changed nothing | — |
 | `64` | Usage | A bad flag or value, a tenant that does not match the subscription, a first owner that was not confirmed, `--yes` without `--owner-object-id` or `--location`, a prompt with no terminal, an environment name `down.sh` cannot find, or a bare `azd down` blocked by the predown guard |
-| `69` | Missing or too-old tool | `az`, `azd`, `bicep`, `curl`, `openssl`, or neither `psql` nor `docker` |
+| `69` | Missing or too-old tool | `az`, `azd`, `curl`, or `openssl` before anything is created; Bicep at the preflight; neither `psql` nor `docker` at the database step, which is after the platform pass |
 | `70` | Provisioning or teardown failure | An ARM error, an unresolvable Key Vault reference, a failed database bootstrap, a registration that does not match the deployment, or an `azd down` that did not finish |
 | `71` | Migration failure | The migration job execution failed, or did not finish inside `VISTARA_MIGRATION_TIMEOUT_SECONDS` (default 900) |
 | `75` | Health timeout | A probe never answered 200/204 inside `VISTARA_HEALTH_TIMEOUT_SECONDS` (default 300), or `/api/v1/setup` neither advertised Entra nor offered first-owner setup |
@@ -745,29 +791,86 @@ Pass `--release <tag>`, or `--image-namespace` plus the three digests.
 
 ### 13.6 `insufficient directory rights for the application registration` (77)
 
-Ask a directory administrator to create it once, then deploy against it:
+There are two different failures here, at two different points in the run, and
+they have different remedies. The message above is the first one.
+
+**Before anything is created — the preflight cannot read the directory.**
+`up.sh` probes `az ad app list` and refuses the run when the signed-in
+principal cannot read application registrations. No resource group, no API host
+name, no managed identity, and no deployment output exists at this point, so
+nothing can be filled in for you: the commands `up.sh` prints here are a
+**template with placeholders** (`<api fqdn>`, `<appId>`, `<appObjectId>`,
+`<tenantId>`, `<api identity principal id>`), and they are addressed to a
+directory administrator rather than to you. Two ways forward:
+
+1. **Get the rights.** Ask a directory administrator for
+   **Application.ReadWrite.OwnedBy** (or Application Administrator) on your
+   account, then rerun `./deploy/azure/up.sh --env-name vistara-eval` normally.
+   The bootstrap creates the registration, the service principal, and the
+   federated credential itself, with the correct values, because by then it
+   knows them. This is the path that needs no manual Entra work at all.
+2. **Have the registration pre-created, and skip that step.** An administrator
+   creates the application and its service principal:
+
+   ```bash
+   az ad app create --display-name "Vistara vistara-eval" \
+     --sign-in-audience AzureADMyOrg \
+     --enable-id-token-issuance false --enable-access-token-issuance false
+   az ad sp create --id <appId>
+   ```
+
+   Then rerun against it:
+
+   ```bash
+   ./deploy/azure/up.sh --env-name vistara-eval \
+     --skip-app-registration --client-id <appId>
+   ```
+
+   The reply URLs and the federated credential cannot be set correctly yet:
+   both depend on the API host name and the API identity's principal ID, which
+   the deployment has not created. So expect the run to provision the platform
+   and then stop at the verification step with exit 70 and the **exact,
+   filled-in** repair commands for that registration — see
+   [§13.7](#137-federated-credential-issuersubjectaudience-mismatch-70) and
+   [§13.8](#138-the-registered-reply-urls-do-not-match-or-weblogouturl-must-not-be-registered-70).
+   Give those to the administrator, then rerun the same command; the run
+   resumes and nothing was deleted.
+
+**After the platform pass — the directory refuses a write.** If the preflight
+passed but creating the application, its service principal, or its federated
+credential is denied, the failure looks like `creating the application
+registration failed`, `could not create the service principal for <appId>`, or
+`could not create the federated identity credential`, each with the redacted
+Graph error above it. The script does **not** print ready-made `az` commands
+here; what it does have, and what you need, is the deployment's own output,
+because the platform pass succeeded and recorded it. Read the three values and
+hand them to an administrator:
+
+```bash
+azd env get-value SERVICE_API_URI --environment vistara-eval
+azd env get-value API_IDENTITY_PRINCIPAL_ID --environment vistara-eval
+azd env get-value AZURE_TENANT_ID --environment vistara-eval
+```
+
+The registration they build from those values is:
 
 ```bash
 az ad app create --display-name "Vistara vistara-eval" \
   --sign-in-audience AzureADMyOrg \
   --web-redirect-uris \
-    "https://<api-fqdn>/api/v1/auth/oidc/entra/callback" \
-    "https://<api-fqdn>/api/v1/auth/oidc/entra/signed-out" \
+    "<SERVICE_API_URI>/api/v1/auth/oidc/entra/callback" \
+    "<SERVICE_API_URI>/api/v1/auth/oidc/entra/signed-out" \
   --enable-id-token-issuance false --enable-access-token-issuance false
 az ad sp create --id <appId>
 az ad app federated-credential create --id <appObjectId> --parameters \
-  '{"name":"api-managed-identity","issuer":"https://login.microsoftonline.com/<tenantId>/v2.0","subject":"<api identity principal id>","audiences":["api://AzureADTokenExchange"]}'
-
-./deploy/azure/up.sh --env-name vistara-eval --skip-app-registration --client-id <appId>
+  '{"name":"api-managed-identity","issuer":"https://login.microsoftonline.com/<AZURE_TENANT_ID>/v2.0","subject":"<API_IDENTITY_PRINCIPAL_ID>","audiences":["api://AzureADTokenExchange"]}'
 ```
 
-The API host name and the API identity's principal ID only exist after the
-platform pass, which is the chicken-and-egg this flag exists for: run `up.sh`
-once to create them, read `SERVICE_API_URI` and `API_IDENTITY_PRINCIPAL_ID`
-from `azd env get-values`, have the administrator run the commands above, then
-rerun with `--skip-app-registration --client-id`.
-
-`up.sh` prints these exact commands, filled in, when it hits this.
+The federated credential's subject must be the **lowercase** principal ID, and
+`<appObjectId>` is `az ad app show --id <appId> --query id --output tsv`. Then
+rerun with `--skip-app-registration --client-id <appId>`; the verification step
+re-checks every one of those values against the deployment and fails with the
+exact difference if any of them is wrong.
 
 ### 13.7 `federated credential issuer/subject/audience mismatch` (70)
 
@@ -814,9 +917,15 @@ use a network with IPv4 egress for that step.
 
 ### 13.12 `neither psql nor docker is available` (69)
 
+This one arrives **after** the platform pass, because the database step is the
+first thing that needs a PostgreSQL client and it runs there rather than in the
+up-front tool check ([§1.2](#12-tools)). The resources it created are intact
+and nothing was rolled back.
+
 Install a PostgreSQL client (`brew install libpq`, `apt install
-postgresql-client`) or Docker, then rerun. With Docker, the same SQL file runs
-in `postgres:17-alpine` (`VISTARA_PSQL_IMAGE` overrides the image).
+postgresql-client`) or Docker, then rerun the same command; it resumes at the
+database step. With Docker, the same SQL file runs in `postgres:17-alpine`
+(`VISTARA_PSQL_IMAGE` overrides the image).
 
 ### 13.13 `role X is mapped to a different directory object` (70)
 

@@ -76,13 +76,20 @@ node --test eng/tests/azure-bootstrap-up.test.mjs
 node --test eng/tests/azure-bootstrap-down.test.mjs
 node --test eng/tests/azure-bootstrap-contract.test.mjs
 node --test eng/tests/azure-bicep-infra.test.mjs
-node --test eng/tests/azure-bootstrap-sql.test.mjs
 node --test eng/tests/azure-graph-registration.test.mjs
 ```
 
 `azure-graph-registration.test.mjs` builds and lints the Graph Bicep with a
 pinned compiler; set `VISTARA_BICEP_CLI` to a Bicep 0.46.1 binary to run it
 locally.
+
+`sql/bootstrap-roles.sql` is checked against a real PostgreSQL 17 server, which
+needs a running Docker daemon and is therefore **opt-in and local** — CI skips
+it, so run it yourself after changing that file:
+
+```bash
+VISTARA_POSTGRES_SQL_CHECK=1 node --test eng/tests/azure-bootstrap-sql.test.mjs
+```
 
 A live deployment drill against a real Azure subscription has not been run yet;
 see the runbook's validation status section.
