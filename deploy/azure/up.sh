@@ -168,6 +168,10 @@ for digest_value in "$api_digest" "$worker_digest" "$migration_digest"; do
 done
 
 export AZURE_ENV_NAME="$env_name"
+# Every azd read and write below names this environment rather than relying on
+# whichever one is selected, so a preview can read an environment it has not
+# selected and a run cannot write into someone else's.
+export VISTARA_AZD_ENVIRONMENT="$env_name"
 export VISTARA_STATE_DIR="${VISTARA_STATE_DIR:-${SCRIPT_DIR}/.azure/${env_name}/.vistara}"
 
 # ---------------------------------------------------------------------------
@@ -430,10 +434,48 @@ if [ "$what_if" != '1' ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# From here on the run changes things
+# What-if
+#
+# A preview changes nothing: not the operator's selected subscription, not the
+# azd environment, not the recorded budget period. Every value it needs is
+# either already in hand or read back from an environment that already exists.
 # ---------------------------------------------------------------------------
 
 cd "$SCRIPT_DIR"
+
+budget_start_date=$(vistara_env VISTARA_BUDGET_START_DATE)
+if [ -z "$budget_start_date" ]; then
+  budget_start_date=$(date -u +%Y-%m-01)
+fi
+
+if [ "$what_if" = '1' ]; then
+  vistara_step 'Deployment what-if'
+  az deployment sub what-if \
+    --location "$location" \
+    --subscription "$subscription_id" \
+    --template-file "${SCRIPT_DIR}/infra/main.bicep" \
+    --parameters \
+      environmentName="$env_name" \
+      location="$location" \
+      apiImage="$api_image" \
+      workerImage="$worker_image" \
+      migrationImage="$migration_image" \
+      entraTenantId="$tenant_id" \
+      firstOwnerObjectId="$owner_object_id" \
+      postgresEntraAdminObjectId="${signed_in_object_id:-$owner_object_id}" \
+      postgresEntraAdminPrincipalName="${signed_in_name:-$owner_object_id}" \
+      postgresSku="$db_sku" \
+      apiMaxReplicas="$max_replicas" \
+      budgetAmount="$budget_amount" \
+      budgetStartDate="$budget_start_date" \
+      deployApplications=false \
+    || vistara_die "$VISTARA_EXIT_PROVISION" 'what-if failed.'
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# From here on the run changes things
+# ---------------------------------------------------------------------------
 
 # The CLI is pointed at the subscription now, after the confirmation, because
 # the preflight hook refuses a deployment whose active subscription is not the
@@ -486,39 +528,10 @@ fi
 # is written once and then left alone for the life of the environment.
 existing_budget_start=$(vistara_env VISTARA_BUDGET_START_DATE)
 if [ -z "$existing_budget_start" ]; then
-  vistara_azd_env_set VISTARA_BUDGET_START_DATE "$(date -u +%Y-%m-01)"
-  vistara_log "budget period starts $(vistara_env VISTARA_BUDGET_START_DATE)."
+  vistara_azd_env_set VISTARA_BUDGET_START_DATE "$budget_start_date"
+  vistara_log "budget period starts ${budget_start_date}."
 else
   vistara_log "keeping the existing budget start date ${existing_budget_start}."
-fi
-
-# ---------------------------------------------------------------------------
-# What-if
-# ---------------------------------------------------------------------------
-
-if [ "$what_if" = '1' ]; then
-  vistara_step 'Deployment what-if'
-  az deployment sub what-if \
-    --location "$location" \
-    --subscription "$subscription_id" \
-    --template-file "${SCRIPT_DIR}/infra/main.bicep" \
-    --parameters \
-      environmentName="$env_name" \
-      location="$location" \
-      apiImage="$api_image" \
-      workerImage="$worker_image" \
-      migrationImage="$migration_image" \
-      entraTenantId="$tenant_id" \
-      firstOwnerObjectId="$owner_object_id" \
-      postgresEntraAdminObjectId="${signed_in_object_id:-$owner_object_id}" \
-      postgresEntraAdminPrincipalName="${signed_in_name:-$owner_object_id}" \
-      postgresSku="$db_sku" \
-      apiMaxReplicas="$max_replicas" \
-      budgetAmount="$budget_amount" \
-      budgetStartDate="$(vistara_env VISTARA_BUDGET_START_DATE)" \
-      deployApplications=false \
-    || vistara_die "$VISTARA_EXIT_PROVISION" 'what-if failed.'
-  exit 0
 fi
 
 # ---------------------------------------------------------------------------

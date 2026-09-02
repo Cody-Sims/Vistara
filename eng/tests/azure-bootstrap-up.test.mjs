@@ -738,6 +738,17 @@ test('--what-if previews the deployment and changes nothing', () => {
       .join(' ');
     assert.ok(whatIf.includes('deployApplications=false'));
     assert.ok(whatIf.includes(`apiImage=ghcr.io/cody-sims/vistara-api@${API_DIGEST}`));
+    assert.ok(whatIf.includes('budgetStartDate='), 'the preview needs a budget period too');
+
+    // A preview is a question, not a change: it must not select a
+    // subscription, create an environment, or record a budget period that a
+    // later real run would then be stuck with.
+    assert.deepEqual(
+      mutatingCalls(sandbox).map((call) => call.join(' ')),
+      [],
+      'a preview changes nothing at all',
+    );
+    assert.equal(sandbox.read('env-eval.env'), '', 'no environment is written');
   });
 });
 
