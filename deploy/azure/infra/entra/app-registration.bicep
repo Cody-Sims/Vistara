@@ -18,6 +18,18 @@
 // subscription, or tenant. Every entry in the list is derived from `apiFqdn` —
 // nothing external is merged in, and nothing external may be.
 //
+// Sign-out contract: this registration deliberately declares no `web.logoutUrl`.
+// Front-channel sign-out is a cross-site GET that Entra issues from its own
+// origin, and the session cookie is `SameSite=Lax`, so the browser never
+// attaches it — the API's GET compatibility endpoint cannot clear a session it
+// cannot see. Registering a `logoutUrl` would advertise a single-sign-out
+// control that silently fails open, so it is left unset. The supported control
+// is the authenticated, CSRF-protected `POST
+// /api/v1/auth/oidc/{providerId}/sign-out` on the API, which is application
+// behavior and never an Entra redirect URI. That endpoint sends the browser to
+// the Entra `end_session_endpoint`, which returns it to the signed-out route
+// below — the only reason that route has to be a registered reply URL.
+//
 // HB-12 fallback (`--skip-app-registration`): a deployer without directory
 // rights (`Application.ReadWrite.All`, or `Application.ReadWrite.OwnedBy` for a
 // service principal) cannot deploy this module at all — the Graph extension
@@ -31,8 +43,6 @@
 //     --web-redirect-uris "https://<apiFqdn>/api/v1/auth/oidc/entra/callback" \
 //                         "https://<apiFqdn>/api/v1/auth/oidc/entra/signed-out" \
 //     --enable-id-token-issuance false --enable-access-token-issuance false
-//   az ad app update --id <appObjectId> \
-//     --set web.logoutUrl="https://<apiFqdn>/api/v1/auth/oidc/entra/frontchannel-logout"
 //   az ad app federated-credential create --id <appObjectId> --parameters '{
 //     "name": "api-managed-identity",
 //     "issuer": "https://login.microsoftonline.com/<tenantId>/v2.0",
@@ -91,15 +101,14 @@ var normalizedTenantId = toLower(trim(tenantId))
 var scopeDiscriminator = uniqueString(normalizedTenantId, subscription().subscriptionId, resourceGroup().id)
 var effectiveUniqueName = '${normalizedUniqueName}-${scopeDiscriminator}'
 
-// The three hosted routes are frozen: HB-11 serves exactly these paths and
-// HB-12 asserts them against the deployed registration.
+// The two hosted redirect routes are frozen: HB-11 serves exactly these paths
+// and HB-12 asserts them against the deployed registration. No front-channel
+// sign-out route is registered; see the sign-out contract in the header.
 var callbackRoute = '/api/v1/auth/oidc/entra/callback'
-var frontChannelLogoutRoute = '/api/v1/auth/oidc/entra/frontchannel-logout'
 var signedOutRoute = '/api/v1/auth/oidc/entra/signed-out'
 
 var apiBaseUri = 'https://${normalizedApiFqdn}'
 var callbackUri = '${apiBaseUri}${callbackRoute}'
-var frontChannelLogoutUri = '${apiBaseUri}${frontChannelLogoutRoute}'
 var signedOutUri = '${apiBaseUri}${signedOutRoute}'
 
 var federatedCredentialName = 'api-managed-identity'
@@ -143,9 +152,11 @@ resource application 'Microsoft.Graph/applications@v1.0' = {
   }
   web: {
     homePageUrl: apiBaseUri
-    // Front-channel sign-out: Entra calls this route on the user's behalf when
-    // the session ends elsewhere in the directory.
-    logoutUrl: frontChannelLogoutUri
+    // No `logoutUrl`: an Entra-initiated front-channel GET arrives without the
+    // SameSite=Lax session cookie, so registering one would advertise a
+    // sign-out control that cannot work. Sign-out is the authenticated POST on
+    // the API instead.
+    //
     // Entra requires a post-logout redirect target to be a registered reply
     // URL, so the signed-out landing route is registered alongside the
     // authorization-code callback.
@@ -212,9 +223,6 @@ output applicationUniqueName string = effectiveUniqueName
 
 @description('Registered authorization-code reply URL; must equal Platform:Authentication:Oidc:Providers:0:RedirectUri byte for byte.')
 output redirectUri string = callbackUri
-
-@description('Registered front-channel sign-out URL that Entra calls when a directory session ends.')
-output frontChannelLogoutUri string = frontChannelLogoutUri
 
 @description('Registered post-logout reply URL used as post_logout_redirect_uri after RP-initiated sign-out.')
 output postLogoutRedirectUri string = signedOutUri

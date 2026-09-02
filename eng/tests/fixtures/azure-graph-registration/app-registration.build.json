@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "4979871450855873082"
+      "templateHash": "2760242450144879341"
     }
   },
   "parameters": {
@@ -60,11 +60,9 @@
     "scopeDiscriminator": "[uniqueString(variables('normalizedTenantId'), subscription().subscriptionId, resourceGroup().id)]",
     "effectiveUniqueName": "[format('{0}-{1}', variables('normalizedUniqueName'), variables('scopeDiscriminator'))]",
     "callbackRoute": "/api/v1/auth/oidc/entra/callback",
-    "frontChannelLogoutRoute": "/api/v1/auth/oidc/entra/frontchannel-logout",
     "signedOutRoute": "/api/v1/auth/oidc/entra/signed-out",
     "apiBaseUri": "[format('https://{0}', variables('normalizedApiFqdn'))]",
     "callbackUri": "[format('{0}{1}', variables('apiBaseUri'), variables('callbackRoute'))]",
-    "frontChannelLogoutUri": "[format('{0}{1}', variables('apiBaseUri'), variables('frontChannelLogoutRoute'))]",
     "signedOutUri": "[format('{0}{1}', variables('apiBaseUri'), variables('signedOutRoute'))]",
     "federatedCredentialName": "api-managed-identity",
     "federatedCredentialIssuerValue": "[format('https://login.microsoftonline.com/{0}/v2.0', variables('normalizedTenantId'))]",
@@ -107,7 +105,6 @@
         },
         "web": {
           "homePageUrl": "[variables('apiBaseUri')]",
-          "logoutUrl": "[variables('frontChannelLogoutUri')]",
           "redirectUris": [
             "[variables('callbackUri')]",
             "[variables('signedOutUri')]"
@@ -200,13 +197,6 @@
         "description": "Registered authorization-code reply URL; must equal Platform:Authentication:Oidc:Providers:0:RedirectUri byte for byte."
       },
       "value": "[variables('callbackUri')]"
-    },
-    "frontChannelLogoutUri": {
-      "type": "string",
-      "metadata": {
-        "description": "Registered front-channel sign-out URL that Entra calls when a directory session ends."
-      },
-      "value": "[variables('frontChannelLogoutUri')]"
     },
     "postLogoutRedirectUri": {
       "type": "string",

@@ -46,7 +46,6 @@ const FROZEN_OUTPUTS = [
   'servicePrincipalObjectId',
   'applicationUniqueName',
   'redirectUri',
-  'frontChannelLogoutUri',
   'postLogoutRedirectUri',
   'federatedCredentialName',
   'federatedCredentialIssuer',
@@ -438,7 +437,6 @@ test('the module contracts identifiers and reply URLs, never a credential', () =
       ['servicePrincipalObjectId', "[reference('servicePrincipal').id]"],
       ['applicationUniqueName', "[variables('effectiveUniqueName')]"],
       ['redirectUri', "[variables('callbackUri')]"],
-      ['frontChannelLogoutUri', "[variables('frontChannelLogoutUri')]"],
       ['postLogoutRedirectUri', "[variables('signedOutUri')]"],
       ['federatedCredentialName', "[variables('federatedCredentialName')]"],
       ['federatedCredentialIssuer', "[variables('federatedCredentialIssuerValue')]"],
@@ -452,31 +450,83 @@ test('the module contracts identifiers and reply URLs, never a credential', () =
 // Frozen hosted routes.
 // ---------------------------------------------------------------------------
 
-test('the three hosted routes match the frozen route contract', () => {
+test('the two hosted redirect routes match the frozen route contract', () => {
+  assert.deepEqual(Object.keys(HOSTED_ROUTES.routes), ['callback', 'signedOut']);
   assert.equal(evaluateVariable('callbackRoute', DEFAULT_SCOPE), HOSTED_ROUTES.routes.callback.path);
-  assert.equal(evaluateVariable('frontChannelLogoutRoute', DEFAULT_SCOPE), HOSTED_ROUTES.routes.frontChannelLogout.path);
   assert.equal(evaluateVariable('signedOutRoute', DEFAULT_SCOPE), HOSTED_ROUTES.routes.signedOut.path);
 
   assert.equal(HOSTED_ROUTES.routes.callback.path, '/api/v1/auth/oidc/entra/callback');
-  assert.equal(HOSTED_ROUTES.routes.frontChannelLogout.path, '/api/v1/auth/oidc/entra/frontchannel-logout');
   assert.equal(HOSTED_ROUTES.routes.signedOut.path, '/api/v1/auth/oidc/entra/signed-out');
 
   for (const route of Object.values(HOSTED_ROUTES.routes)) {
     assert.equal(route.method, 'GET');
     assert.equal(route.anonymous, true);
+    assert.equal(route.entraRegistration, 'web.redirectUris');
   }
+
+  // No route variable may survive that the registration no longer uses.
+  assert.ok(!('frontChannelLogoutRoute' in TEMPLATE.variables), 'the front-channel route variable must be gone');
+  assert.ok(!('frontChannelLogoutUri' in TEMPLATE.variables), 'the front-channel URI variable must be gone');
 });
 
-test('the callback and signed-out routes are the reply URLs and front-channel logout is the sign-out URL', () => {
+test('the secure RP sign-out control is an authenticated POST on the API, never an Entra redirect URI', () => {
+  const signOut = HOSTED_ROUTES.rpInitiatedSignOut;
+
+  assert.equal(signOut.path, '/api/v1/auth/oidc/{providerId}/sign-out');
+  assert.equal(signOut.method, 'POST');
+  assert.equal(signOut.anonymous, false);
+  assert.equal(signOut.entraRegistration, null);
+
+  // It is application behavior: no property of the registration may name it,
+  // and the signed-out landing route it hands off to stays a reply URL.
+  const concreteSignOutPath = signOut.path.replace('{providerId}', HOSTED_ROUTES.providerId);
+  assert.equal(concreteSignOutPath, '/api/v1/auth/oidc/entra/sign-out');
+  assert.ok(
+    !JSON.stringify(TEMPLATE).includes(concreteSignOutPath),
+    `${concreteSignOutPath} must not appear anywhere in the registration`,
+  );
+
+  const context = scope({ apiFqdn: 'api.example.invalid' });
+  for (const uri of resourceOf('application').properties.web.redirectUris.map((entry) => evaluateExpression(entry, context))) {
+    assert.ok(!uri.endsWith(concreteSignOutPath), `${uri} must not register the POST sign-out endpoint`);
+  }
+  assert.equal(HOSTED_ROUTES.routes.signedOut.entraRegistration, 'web.redirectUris');
+});
+
+test('front-channel logout is not registered anywhere in the module', () => {
+  const web = resourceOf('application').properties.web;
+  const unregistered = HOSTED_ROUTES.unregisteredFrontChannelLogout;
+
+  // The GET compatibility endpoint is inert under SameSite=Lax, so nothing may
+  // advertise it as a working single-sign-out control.
+  assert.ok(!('logoutUrl' in web), 'web.logoutUrl must not be declared');
+  assert.ok(!('frontchannelLogoutUrl' in web), 'no front-channel sign-out URL may be declared');
+  assert.equal(unregistered.entraRegistration, null);
+  assert.ok(unregistered.reason.includes('SameSite=Lax'), 'the fixture must record why the route stays unregistered');
+
+  for (const name of Object.keys(TEMPLATE.outputs)) {
+    assert.doesNotMatch(name, /frontchannel|logouturl/i, `${name} must not contract a front-channel sign-out URL`);
+  }
+
+  walkStrings(TEMPLATE, (value, path) => {
+    assert.doesNotMatch(value, /frontchannel|logoutUrl/i, `front-channel sign-out content at ${path}: ${value}`);
+  });
+  assert.ok(
+    !MODULE_SOURCE.includes('logoutUrl:'),
+    'the module source must not declare web.logoutUrl',
+  );
+});
+
+test('the callback and signed-out routes are the only reply URLs', () => {
   const web = resourceOf('application').properties.web;
 
+  assert.deepEqual(Object.keys(web), ['homePageUrl', 'redirectUris', 'implicitGrantSettings']);
   assert.deepEqual(web.redirectUris, ["[variables('callbackUri')]", "[variables('signedOutUri')]"]);
-  assert.equal(web.logoutUrl, "[variables('frontChannelLogoutUri')]");
+  assert.equal(web.redirectUris.length, 2);
   assert.equal(web.homePageUrl, "[variables('apiBaseUri')]");
 
   assert.equal(HOSTED_ROUTES.routes.callback.entraRegistration, 'web.redirectUris');
   assert.equal(HOSTED_ROUTES.routes.signedOut.entraRegistration, 'web.redirectUris');
-  assert.equal(HOSTED_ROUTES.routes.frontChannelLogout.entraRegistration, 'web.logoutUrl');
 
   // A web-only confidential client: no other platform may hold a reply URL.
   assert.deepEqual(resourceOf('application').properties.publicClient, { redirectUris: [] });
@@ -492,14 +542,10 @@ test('the module owns the whole reply-URL list and every entry is an exact HTTPS
     'https://api.example.invalid/api/v1/auth/oidc/entra/callback',
     'https://api.example.invalid/api/v1/auth/oidc/entra/signed-out',
   ]);
-  assert.equal(
-    evaluateExpression(web.logoutUrl, context),
-    'https://api.example.invalid/api/v1/auth/oidc/entra/frontchannel-logout',
-  );
 
   // The declarative list replaces whatever Entra holds, so nothing outside the
   // module's own derivation may appear in it and no entry may be a wildcard.
-  for (const uri of [...registered, evaluateExpression(web.logoutUrl, context)]) {
+  for (const uri of registered) {
     assert.ok(uri.startsWith('https://api.example.invalid/'), `${uri} must be on the API host`);
     assert.ok(!uri.includes('*'), `${uri} must not contain a wildcard`);
     assert.ok(!uri.includes('http://'), `${uri} must not fall back to plaintext HTTP`);
@@ -743,11 +789,27 @@ test('the module documents the --skip-app-registration fallback that HB-12 depen
     'az ad app federated-credential create',
     'postprovision-verify-fic.sh',
     HOSTED_ROUTES.routes.callback.path,
-    HOSTED_ROUTES.routes.frontChannelLogout.path,
     HOSTED_ROUTES.routes.signedOut.path,
   ]) {
     assert.ok(header.includes(expected), `the module header must document '${expected}'`);
   }
+
+  // The manual fallback must reproduce this registration exactly, so it may not
+  // hand the operator a front-channel sign-out URL the module no longer sets.
+  assert.doesNotMatch(header, /az ad app update/, 'the fallback must not restore a property the module dropped');
+  assert.ok(!header.includes('--set web.logoutUrl'), 'the fallback must not set web.logoutUrl');
+});
+
+test('the module documents why front-channel sign-out is unregistered and what replaces it', () => {
+  const header = MODULE_SOURCE.slice(0, MODULE_SOURCE.indexOf('targetScope'));
+
+  assert.match(header, /Sign-out contract/);
+  assert.match(header, /SameSite=Lax/);
+  assert.ok(
+    header.includes(HOSTED_ROUTES.rpInitiatedSignOut.path),
+    `the header must name the supported control '${HOSTED_ROUTES.rpInitiatedSignOut.path}'`,
+  );
+  assert.match(header, /POST/, 'the header must say the supported control is a POST');
 });
 
 test('the module documents why replacing the reply-URL list is safe', () => {

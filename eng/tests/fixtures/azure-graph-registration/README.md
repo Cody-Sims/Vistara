@@ -6,8 +6,31 @@ verifies `deploy/azure/infra/entra/app-registration.bicep` (HB-09).
 | File | Role |
 |---|---|
 | `microsoft-graph-delegated-permissions.json` | Cited source of truth for the Microsoft Graph app ID and the `openid` / `profile` / `email` delegated permission IDs. The test asserts the Bicep module matches this file, so a wrong GUID fails in one place with its citation next to it. |
-| `hosted-oidc-routes.json` | The frozen callback, front-channel-logout, and signed-out route contract shared by HB-09 (Entra registration), HB-11 (API routes), and HB-12 (`postprovision-verify-fic.sh`). |
+| `hosted-oidc-routes.json` | The frozen callback and signed-out redirect-route contract shared by HB-09 (Entra registration), HB-11 (API routes), and HB-12 (`postprovision-verify-fic.sh`), plus the RP-initiated sign-out contract and the negative front-channel-logout contract described below. |
 | `app-registration.build.json` | `bicep build` output for the module, committed so the generated ARM and Graph type surface can be asserted without a Bicep CLI or network access. |
+
+## Sign-out contract
+
+`hosted-oidc-routes.json` splits sign-out into three separate records because
+only one of them is an Entra redirect URI:
+
+- `routes.signedOut` — the `post_logout_redirect_uri` landing route. Entra
+  requires a post-logout target to be a registered reply URL, so it stays in
+  `web.redirectUris`.
+- `rpInitiatedSignOut` — the authenticated, CSRF-protected `POST
+  /api/v1/auth/oidc/{providerId}/sign-out` on the API. This is the only
+  supported single-sign-out control. It is application behavior and is
+  deliberately *not* an Entra redirect URI or any other registration property.
+- `unregisteredFrontChannelLogout` — a negative contract. The registration
+  declares no `web.logoutUrl` and emits no front-channel output. An
+  Entra-initiated front-channel sign-out is a cross-site GET and the session
+  cookie is `SameSite=Lax`, so the browser never attaches it; the API keeps the
+  GET path only as an inert compatibility endpoint, and registering it would
+  advertise a sign-out control that fails open.
+
+The test enforces all three: `web.logoutUrl` must be absent, no output may be
+named for a front-channel URL, no template string may mention one, and
+`web.redirectUris` must hold exactly the callback and signed-out URLs.
 
 ## Deterministic commands
 
