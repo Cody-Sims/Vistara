@@ -13,6 +13,10 @@ namespace Vistara.Api.Features.Oidc;
 /// URLs a provider drives with no Vistara credential, and the fourth starts a
 /// sign-in for a visitor who has none. Each is registered individually with an
 /// explicit method, so nothing else on the API becomes anonymous with them.
+///
+/// A deployment with no configured provider maps nothing at all. There is no
+/// reply URL registered with anyone, no visitor can start a sign-in, and the
+/// smallest anonymous surface is the one that does not exist.
 /// </summary>
 public static class OidcEndpointMapping
 {
@@ -20,6 +24,12 @@ public static class OidcEndpointMapping
         this IEndpointRouteBuilder endpoints)
     {
         ArgumentNullException.ThrowIfNull(endpoints);
+
+        if (endpoints.ServiceProvider.GetService<IOidcProviderCatalog>()
+            is not { Providers.Count: > 0 })
+        {
+            return endpoints;
+        }
 
         endpoints.MapGet(
                 OidcRoutes.StartPathTemplate,

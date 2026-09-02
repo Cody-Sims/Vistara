@@ -66,6 +66,24 @@ public sealed class OidcRouteContractTests
         Assert.NotNull(endpoint.Metadata.GetMetadata<IAllowAnonymous>());
     }
 
+    /// <summary>
+    /// A deployment with no configured provider has no reply URL registered
+    /// with anyone and no visitor who can start a sign-in, so it maps nothing.
+    /// </summary>
+    [Fact]
+    public void An_unconfigured_deployment_maps_no_hosted_route()
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.Services.AddSingleton<IOidcProviderCatalog, EmptyOidcProviderCatalog>();
+        WebApplication app = builder.Build();
+
+        app.MapVistaraOidcAuthentication();
+
+        Assert.Empty(
+            ((IEndpointRouteBuilder)app).DataSources.SelectMany(
+                source => source.Endpoints));
+    }
+
     [Fact]
     public void The_hosted_surface_maps_no_other_route()
     {
@@ -381,6 +399,7 @@ public sealed class OidcRouteContractTests
     private static RouteEndpoint[] MapRoutes()
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.Services.AddSingleton<IOidcProviderCatalog>(new StubOidcProviderCatalog());
         WebApplication app = builder.Build();
         app.MapVistaraOidcAuthentication();
         return ((IEndpointRouteBuilder)app).DataSources
@@ -399,6 +418,7 @@ public sealed class OidcRouteContractTests
         builder.Services.AddSingleton(login);
         builder.Services.AddSingleton(logout ?? new StubOidcLogoutPort());
         builder.Services.AddSingleton(new CookieAuthOptions());
+        builder.Services.AddSingleton<IOidcProviderCatalog>(new StubOidcProviderCatalog());
         WebApplication app = builder.Build();
         app.MapVistaraOidcAuthentication();
 
@@ -467,6 +487,21 @@ public sealed class OidcRouteContractTests
             OidcCallbackCommand command,
             CancellationToken cancellationToken) =>
             ValueTask.FromResult(Complete);
+    }
+
+    /// <summary>
+    /// The routes only exist for a deployment with a configured provider, so
+    /// the catalog is populated the way a hosted deployment populates it.
+    /// </summary>
+    private sealed class StubOidcProviderCatalog : IOidcProviderCatalog
+    {
+        public IReadOnlyList<OidcProviderCapability> Providers { get; } =
+        [
+            new(
+                OidcRoutes.EntraProviderId,
+                "Microsoft Entra ID",
+                OidcRoutes.StartPath(OidcRoutes.EntraProviderId)),
+        ];
     }
 
     private sealed class StubOidcLogoutPort : IOidcLogoutPort

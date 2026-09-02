@@ -16,9 +16,12 @@ namespace Vistara.Api.Composition.Platform;
 /// configuration, the transport every provider call must use, the client
 /// credential sources, and the adapters behind the browser routes.
 ///
-/// Nothing here is registered conditionally on a runtime flag. The registry is
-/// always present and simply holds no providers when hosted sign-in is not
-/// configured, so the routes exist, answer safely, and publish no capability.
+/// Configuration is bound and validated whether or not hosted sign-in is
+/// switched on, so a broken provider fails the host either way. What is
+/// composed does depend on it: a deployment with no configured provider gets
+/// no sign-in adapters, no login request store, and no routes, which is why
+/// adding the platform to a Compose deployment does not drag the identity
+/// catalog and the browser session graph in behind it.
 /// </summary>
 public static class PlatformOidcServiceCollectionExtensions
 {
@@ -68,10 +71,28 @@ public static class PlatformOidcServiceCollectionExtensions
         services.TryAddSingleton<PlatformOidcProviderRegistry>();
         services.TryAddSingleton<IOidcProviderCatalog>(static provider =>
             provider.GetRequiredService<PlatformOidcProviderRegistry>());
+        if (!HasConfiguredProvider(configuration))
+        {
+            return services;
+        }
+
         services.TryAddScoped<RelationalOidcLoginRequestStore>();
         services.TryAddScoped<IOidcLoginPort, PlatformOidcLoginAdapter>();
         services.TryAddScoped<IOidcLogoutPort, PlatformOidcLogoutAdapter>();
         return services;
+    }
+
+    /// <summary>
+    /// Reads the switch and the provider list straight from configuration,
+    /// because the decision to compose the sign-in graph has to be taken while
+    /// the service collection is still being built. Nothing is validated here;
+    /// a malformed provider still fails through the options validator.
+    /// </summary>
+    private static bool HasConfiguredProvider(IConfiguration configuration)
+    {
+        var configured = new PlatformOidcOptions();
+        configuration.GetSection(PlatformOidcOptions.SectionName).Bind(configured);
+        return configured.Enabled && configured.Providers.Count > 0;
     }
 
     /// <summary>
