@@ -4,6 +4,15 @@ Companion to [Azure free credits](azure-free-credits.md). That guide is the
 linear runbook; this one holds the identity, role-assignment, registry, and
 secret-handling detail it points at, so the runbook stays readable.
 
+> **The hosted bootstrap does all of this for you.**
+> [`./deploy/azure/up.sh`](azure-hosted-bootstrap.md) creates three
+> user-assigned identities, assigns exactly the container- and vault-scoped
+> roles listed here, writes the API key pepper into Key Vault without it ever
+> reaching a command line, and creates the Entra application registration and
+> its federated identity credential. Read this guide when you are doing it by
+> hand, reviewing what the template did, or granting access outside the
+> deployment's own resource group.
+
 Labels follow the same convention: **[Verified]** is quoted or directly
 restated from the linked Microsoft page or read out of this repository's code;
 **[Inferred]** is this guide's own choice or derivation; **[Unverified]** means
@@ -27,10 +36,11 @@ no primary source was confirmed.
 Vistara binds blob access to a **user-assigned** managed identity, and a
 user-assigned identity is a resource of its own: it exists, and can hold role
 assignments, before any container app does. That removes the create-then-grant
-round trip a system-assigned identity forces, and it matches the hosted plan in
-[hosted-identity-and-azure-bootstrap.md](../future-plans/hosted-identity-and-azure-bootstrap.md),
-where the Bicep modules give the API and the worker separate identities with
-least-privilege role assignments.
+round trip a system-assigned identity forces, and it is what
+[`deploy/azure/infra/modules/identity.bicep`](../../deploy/azure/infra/modules/identity.bicep)
+and [`rbac.bicep`](../../deploy/azure/infra/modules/rbac.bicep) do in the
+hosted bootstrap, where the API, the worker, and the migration job each get
+their own identity and least-privilege role assignments.
 
 The sequence across both documents is:
 
@@ -390,8 +400,11 @@ meaningful for a system-assigned identity, which this design does not use.
 ## 5. Private GHCR registry credentials
 
 **[Verified from `.github/workflows/release-images.yml`]** this repository
-publishes `ghcr.io/<namespace>/vistara-api` and
-`ghcr.io/<namespace>/vistara-worker`.
+publishes `ghcr.io/<namespace>/vistara-api`,
+`ghcr.io/<namespace>/vistara-worker`, and
+`ghcr.io/<namespace>/vistara-migrations`. Whatever you do below has to cover
+all three: a private registry that the migration job cannot pull from fails
+before the API is ever deployed.
 
 ### 5.1 Preferred: make the packages public
 

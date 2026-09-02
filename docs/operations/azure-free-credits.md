@@ -12,6 +12,17 @@ detail lives in the companion
 [Azure identity, RBAC, and secrets](azure-identity-and-secrets.md) guide so
 this runbook stays linear.
 
+> **There is now a one-command path.**
+> [`./deploy/azure/up.sh`](../../deploy/azure/README.md) provisions the same
+> shape of deployment from checked-in Bicep, with Entra sign-in, passwordless
+> PostgreSQL, and a guarded teardown — see
+> [Azure hosted bootstrap](azure-hosted-bootstrap.md). Prefer it. This guide
+> remains useful for two things the bootstrap does not do: explaining what the
+> free offers actually give you and how Azure bills these services, and giving
+> you a manual CLI path when you cannot run the bootstrap. Sections that
+> described the absence of Azure-native assets are corrected in
+> [§13](#13-configuration-gaps-that-need-code-changes).
+
 ## How to read this document
 
 Every non-obvious claim is labelled:
@@ -429,15 +440,18 @@ it also breaks `az storage cors add`. The trade-offs are in
 
 ### 5.4 PostgreSQL Flexible Server
 
-> **Read this before creating the server.** **[Verified from the code]**
-> Vistara has **no support for Entra (passwordless) PostgreSQL
-> authentication**: every persistence path calls
-> `options.UseNpgsql(connectionString)` with no `NpgsqlDataSource` password
-> provider, so there is nothing to refresh an expiring access token. Create the
-> server with password authentication left **enabled** (the default). Do **not**
-> pass `--password-auth Disabled`, and do not follow Entra-only guidance — the
-> application will not be able to connect. See
-> [§13](#13-configuration-gaps-that-need-code-changes) for the full detail.
+> **Read this before creating the server.** This manual path uses **password
+> authentication**, because it wires the application up with a connection
+> string and nothing here refreshes an expiring token. Create the server with
+> password authentication left **enabled** (the default) and do **not** pass
+> `--password-auth Disabled`.
+>
+> Vistara itself is no longer limited to passwords: `Persistence:Azure`
+> supplies an Entra access token through an `NpgsqlDataSource` periodic
+> password provider, and the hosted bootstrap uses it to create an
+> Entra-only server with no administrator password at all. If you want that,
+> use [Azure hosted bootstrap](azure-hosted-bootstrap.md) rather than this
+> section. See [§13](#13-configuration-gaps-that-need-code-changes).
 
 ```bash
 az postgres flexible-server create \
@@ -827,16 +841,21 @@ az containerapp job execution list --name "$MIGJOB" --resource-group "$RG" -o ta
 — <https://learn.microsoft.com/en-us/cli/azure/containerapp/job>,
 <https://learn.microsoft.com/en-us/cli/azure/containerapp/job/execution>
 
-**[Inferred]** The migration image is built locally by
-`deploy/containers/migration.Dockerfile`; unlike the API and worker images it
-is **not** published by `.github/workflows/release-images.yml`, so you must
-build and push it to a registry the environment can pull from first. See
-[§13](#13-configuration-gaps-that-need-code-changes).
+**[Verified from `.github/workflows/release-images.yml`]** the migration image
+**is** published: the release workflow pushes
+`ghcr.io/<namespace>/vistara-migrations` alongside the API and worker images,
+each with a provenance attestation. Pull it at the release tag like the other
+two; building `deploy/containers/migration.Dockerfile` yourself is only needed
+for an unreleased commit.
 
 **[Verified from `migration-entrypoint.sh`]** the entrypoint requires
 `ConnectionStrings__Vistara` (or `Persistence__ConnectionString`) and a
 `MIGRATION_PROVIDER` of `Sqlite` or `PostgreSql`, exiting `64` otherwise. Use
 the **`vistara_migrator`** role here and the runtime roles everywhere else.
+Setting `MIGRATION_MANAGED_IDENTITY_CLIENT_ID` switches the same entrypoint to
+Entra mode, where it builds the connection string from discrete, individually
+validated `MIGRATION_POSTGRES_*` variables and refuses any connection string at
+all; that is the mode the hosted bootstrap uses.
 
 ### 8.2 Deploy the API
 
@@ -1105,21 +1124,22 @@ section linked beside it.
 Limitations of the current codebase, not of Azure. Recorded here so the guide
 does not document a capability that does not exist.
 
-1. **No Entra (passwordless) authentication to PostgreSQL.**
-   **[Verified]** every persistence path calls
-   `options.UseNpgsql(connectionString)` directly
-   (`PersistenceServiceCollectionExtensions.cs`, `GalleryComposition.cs`,
-   `WorkerPlatformComposition.cs`,
-   `JobPersistenceServiceCollectionExtensions.cs`,
-   `TenantDbContextFactory.cs`, `VistaraDbContextFactory.cs`) with no
-   `NpgsqlDataSource` password provider. Microsoft's guidance is that ".NET ...
-   can get an access token for the managed identity ... Then you can use the
-   access token as the password"
-   (<https://learn.microsoft.com/en-us/azure/service-connector/how-to-integrate-postgres>),
-   and those tokens expire, so a periodic password provider is required.
-   **Until that exists, Vistara on Azure must use PostgreSQL password
-   authentication** and real secrets in Key Vault — see the warning in
-   [§5.4](#54-postgresql-flexible-server).
+1. **Entra (passwordless) PostgreSQL authentication now exists, but not on this
+   manual path.** **[Verified from
+   `src/Vistara.Persistence/Azure/PersistenceAzureOptions.cs` and
+   `VistaraNpgsqlDataSourceProvider.cs`]** setting
+   `Persistence__Azure__EntraTokenEnabled=true` with a user-assigned
+   `ManagedIdentityClientId` and a token scope builds an `NpgsqlDataSource`
+   with a periodic password provider, so tokens rotate without a process
+   restart, and `deploy/containers/migration-entrypoint.sh` acquires its own
+   token from discrete variables. Microsoft's guidance is that ".NET ... can
+   get an access token for the managed identity ... Then you can use the access
+   token as the password"
+   (<https://learn.microsoft.com/en-us/azure/service-connector/how-to-integrate-postgres>).
+   [`./deploy/azure/up.sh`](azure-hosted-bootstrap.md) uses exactly that and
+   creates a server with `passwordAuth: Disabled`. The imperative path in
+   [§5.4](#54-postgresql-flexible-server) does **not** wire it up, so it still
+   needs password authentication and real secrets in Key Vault.
 2. **No configuration key for `AzureBlobStoreOptions.AllowedEndpointOrigins`.**
    **[Verified]** the adapter supports an endpoint allowlist, but
    `MediaAzureOptions` in `MediaComposition.cs` does not expose it. Only the
@@ -1134,18 +1154,21 @@ does not document a capability that does not exist.
    `UseForwardedHeaders` does not trust `X-Forwarded-For`, so client-IP
    rate-limit partitioning sees the ingress rather than the caller. A
    VNet-integrated environment with a known infrastructure subnet CIDR is the
-   current workaround.
-4. **The migration image is not published.**
-   **[Verified]** `.github/workflows/release-images.yml` pushes only
-   `vistara-api` and `vistara-worker` to GHCR, while `deploy/README.md`
-   requires the migration container to run first. Any registry-based
-   deployment must build and push `deploy/containers/migration.Dockerfile`
-   itself.
-5. **No Azure-native deployment assets in this repository.** There is no
-   Bicep, ARM, `azd`, or Container Apps YAML under `deploy/`; the supported
-   artifacts are Compose topologies. Everything in this guide is imperative
-   CLI, and should be replaced by checked-in infrastructure-as-code before it
-   is used for anything beyond evaluation.
+   current workaround. The hosted bootstrap does not work around it either: it
+   declares `Platform__RateLimits__PartitionMode=SharedIngress` so the raised
+   hosted ceilings are honest about counting one shared bucket.
+4. **The migration image is published.** **[Verified]**
+   `.github/workflows/release-images.yml` builds and pushes `vistara-api`,
+   `vistara-worker`, **and** `vistara-migrations` to GHCR, each with a
+   provenance attestation. Pull `ghcr.io/<namespace>/vistara-migrations` at the
+   release tag rather than building
+   `deploy/containers/migration.Dockerfile` yourself.
+5. **Azure-native deployment assets exist.** `deploy/azure/` holds the `azd`
+   project, the Bicep templates, the provisioning hooks, and the role bootstrap
+   SQL, and `./deploy/azure/up.sh` is the supported entry point — see
+   [Azure hosted bootstrap](azure-hosted-bootstrap.md). Everything in *this*
+   guide remains imperative CLI, which is why it is now the fallback rather
+   than the recommendation.
 
 ---
 
