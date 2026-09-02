@@ -61,7 +61,7 @@ fi
 vistara_require_postgres_client 'creating the database roles'
 
 psql_mode='local'
-if ! vistara_have_command psql; then
+if ! vistara_have_usable_psql; then
   psql_mode='docker'
   vistara_log 'psql is not installed; running the bootstrap SQL through a container instead.'
 fi

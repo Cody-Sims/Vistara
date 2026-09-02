@@ -385,8 +385,16 @@ vistara_confirm_phrase() {
 # Which is why this is asked before anything is created rather than at the step
 # that needs it: finding out after a provisioning pass costs the operator the
 # wait, and leaves them with half a deployment and a tool to go and install.
+vistara_have_usable_psql() {
+  vistara_have_command psql && psql --version >/dev/null 2>&1
+}
+
+vistara_have_usable_docker() {
+  vistara_have_command docker && docker version >/dev/null 2>&1
+}
+
 vistara_have_postgres_client() {
-  vistara_have_command psql || vistara_have_command docker
+  vistara_have_usable_psql || vistara_have_usable_docker
 }
 
 vistara_require_postgres_client() {

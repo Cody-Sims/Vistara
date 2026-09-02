@@ -294,8 +294,8 @@ case "\${1:-}" in
       'secret set')
         secret_file=$(flag_value --file "$@")
         if [ -n "$secret_file" ] && [ -f "$secret_file" ]; then
-          stat -f '%Lp' "$secret_file" >"$FAKE_STATE/secret-file-mode" 2>/dev/null \\
-            || stat -c '%a' "$secret_file" >"$FAKE_STATE/secret-file-mode" 2>/dev/null || true
+          stat -c '%a' "$secret_file" >"$FAKE_STATE/secret-file-mode" 2>/dev/null \\
+            || stat -f '%Lp' "$secret_file" >"$FAKE_STATE/secret-file-mode" 2>/dev/null || true
           cp "$secret_file" "$FAKE_STATE/secret-value"
         fi
         touch "$FAKE_STATE/secret_exists"
@@ -742,11 +742,15 @@ esac
 exit 1
 `;
 
-const FAKE_PSQL = `${LOGGING_PREAMBLE}
+const FAKE_PSQL = `
+if [ "\${1:-}" = '--version' ]; then
+  exit 0
+fi
+${LOGGING_PREAMBLE}
 {
   printf 'PGPASSFILE=%s\\n' "\${PGPASSFILE:-}"
   if [ -n "\${PGPASSFILE:-}" ] && [ -f "\${PGPASSFILE}" ]; then
-    printf 'MODE=%s\\n' "$(stat -f '%Lp' "$PGPASSFILE" 2>/dev/null || stat -c '%a' "$PGPASSFILE" 2>/dev/null)"
+    printf 'MODE=%s\\n' "$(stat -c '%a' "$PGPASSFILE" 2>/dev/null || stat -f '%Lp' "$PGPASSFILE" 2>/dev/null)"
     printf 'CONTENT=%s\\n' "$(cat "$PGPASSFILE")"
   fi
   printf 'PGPASSWORD=%s\\n' "\${PGPASSWORD:-unset}"
@@ -764,7 +768,11 @@ fi
 exit 0
 `;
 
-const FAKE_DOCKER = `${LOGGING_PREAMBLE}
+const FAKE_DOCKER = `
+if [ "\${1:-}" = 'version' ]; then
+  exit 0
+fi
+${LOGGING_PREAMBLE}
 if [ -f "$FAKE_STATE/docker_psql_fails" ]; then
   echo "psql: error: connection to server failed" >&2
   exit 2
@@ -823,7 +831,11 @@ export function createSandbox(name, options = {}) {
       return sandbox;
     },
     removeFake(name) {
-      rmSync(join(binDirectory, name), { force: true });
+      if (name === 'psql' || name === 'docker') {
+        writeFake(binDirectory, name, 'exit 127');
+      } else {
+        rmSync(join(binDirectory, name), { force: true });
+      }
       return sandbox;
     },
     has(file) {

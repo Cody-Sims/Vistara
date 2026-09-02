@@ -44,7 +44,7 @@ set -uo pipefail
   passfile="\${connection##*Passfile=}"
   passfile="\${passfile%%;*}"
   if [ "$passfile" != "$connection" ] && [ -f "$passfile" ]; then
-    printf 'passfile-mode:%s\\n' "$(stat -f '%Lp' "$passfile" 2>/dev/null || stat -c '%a' "$passfile")"
+    printf 'passfile-mode:%s\\n' "$(stat -c '%a' "$passfile" 2>/dev/null || stat -f '%Lp' "$passfile")"
     printf 'passfile:%s\\n' "$(cat "$passfile")"
   fi
 } >> "$FAKE_BUNDLE_LOG"
