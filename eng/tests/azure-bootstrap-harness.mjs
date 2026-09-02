@@ -471,6 +471,7 @@ case "\${1:-}" in
         ;;
       new)
         printf '%s' "\${3:-}" >"$FAKE_STATE/current_env_name"
+        ENVIRONMENT_NAME=\${3:-}
         : >"$(environment_file "\${3:-}")"
         env_set AZURE_ENV_NAME "\${3:-}"
         env_set AZURE_LOCATION "$(flag_value --location "$@")"
@@ -544,9 +545,22 @@ exit 0
 `;
 
 const FAKE_CURL = `${LOGGING_PREAMBLE}
-output_file=$(flag_value -o "$@")
-dump_file=$(flag_value -D "$@")
-write_format=$(flag_value -w "$@")
+# Curl accepts either spelling of each of these, so the stand-in does too.
+either_flag() {
+  local short=$1
+  local long=$2
+  shift 2
+  local value
+  value=$(flag_value "$short" "$@")
+  if [ -z "$value" ]; then
+    value=$(flag_value "$long" "$@")
+  fi
+  printf '%s' "$value"
+}
+
+output_file=$(either_flag -o --output "$@")
+dump_file=$(either_flag -D --dump-header "$@")
+write_format=$(either_flag -w --write-out "$@")
 
 url=''
 for argument in "$@"; do
@@ -591,9 +605,34 @@ case "$url" in
     exit 0
     ;;
   *'/releases/latest')
-    if [ -n "$write_format" ]; then
-      printf '%s' "$url" | sed 's#/releases/latest#/releases/tag/'"$(state_read release_tag v1.4.0)"'#'
+    # GitHub answers this with a redirect. Curl only follows one when it is
+    # told to, so a caller that forgets -L is answered the way the real
+    # command would answer it: the redirect itself, still pointing at the URL
+    # that was asked for.
+    follows_redirects=0
+    for argument in "$@"; do
+      case "$argument" in
+        --location) follows_redirects=1 ;;
+        -[!-]*)
+          case "$argument" in
+            *L*) follows_redirects=1 ;;
+          esac
+          ;;
+      esac
+    done
+
+    final_url=$url
+    status=302
+    if [ "$follows_redirects" = '1' ]; then
+      status=$(state_read release_status 200)
+      final_url=$(state_read release_final_url "$(printf '%s' "$url" | sed 's#/releases/latest#/releases/tag/'"$(state_read release_tag v1.4.0)"'#')")
     fi
+
+    case "$write_format" in
+      *'%{http_code}'*'%{url_effective}'*) printf '%s %s' "$status" "$final_url" ;;
+      *'%{url_effective}'*) printf '%s' "$final_url" ;;
+      *'%{http_code}'*) printf '%s' "$status" ;;
+    esac
     exit 0
     ;;
   *api.ipify.org*)

@@ -350,12 +350,7 @@ if [ -z "$api_digest" ] || [ -z "$worker_digest" ] || [ -z "$migration_digest" ]
     repository_name=$(resolve_repository_name)
     if [ -n "$repository_owner" ] && [ -n "$repository_name" ]; then
       vistara_log 'resolving the latest published release.'
-      latest_url=$(curl -fsS --max-time 30 -o /dev/null -w '%{url_effective}' \
-        "https://github.com/${repository_owner}/${repository_name}/releases/latest" 2>/dev/null || true)
-      case "$latest_url" in
-        */releases/tag/*) release_tag=${latest_url##*/releases/tag/} ;;
-      esac
-      release_tag=$(printf '%s' "$release_tag" | tr -d '\r\n')
+      release_tag=$(vistara_resolve_latest_release_tag "$repository_owner" "$repository_name" || true)
     fi
   fi
   if [ -z "$release_tag" ]; then

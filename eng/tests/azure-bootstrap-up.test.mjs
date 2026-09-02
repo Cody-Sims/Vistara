@@ -7,8 +7,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { execFileSync, spawnSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import {
   ACCESS_TOKEN_MARKER,
+  AZURE_DIR,
+  REPOSITORY_ROOT,
   API_DIGEST,
   APP_CLIENT_ID,
   API_PRINCIPAL_ID,
@@ -35,6 +41,18 @@ function assertOrdered(calls, first, second, message) {
   assert.notEqual(first, -1, `${message}: the earlier call never happened`);
   assert.notEqual(second, -1, `${message}: the later call never happened`);
   assert.ok(first < second, message);
+}
+
+function withoutOption(argumentList, option) {
+  const kept = [];
+  for (let index = 0; index < argumentList.length; index += 1) {
+    if (argumentList[index] === option) {
+      index += 1;
+      continue;
+    }
+    kept.push(argumentList[index]);
+  }
+  return kept;
 }
 
 function withSandbox(name, body, options) {
@@ -147,18 +165,139 @@ test('an unresolvable image digest fails before anything is created', () => {
   });
 });
 
+test('the release lookup follows the redirect, bounded, over HTTPS, and checks where it landed', () => {
+  withSandbox('release-invocation', (sandbox) => {
+    const result = run(sandbox, UP_SCRIPT, withoutOption(upArguments(), '--release'));
+    assert.equal(result.status, 0, result.output);
+
+    const lookup = sandbox
+      .callsFor('curl')
+      .find((call) => call.join(' ').includes('/releases/latest'));
+    assert.ok(lookup, 'the release page is asked for');
+
+    // GitHub answers /releases/latest with a redirect, so a lookup that does
+    // not follow one resolves nothing at all.
+    assert.ok(lookup.includes('--location'), 'the redirect is followed');
+    assert.equal(lookup[lookup.indexOf('--proto') + 1], '=https', 'the request itself is HTTPS only');
+    assert.equal(
+      lookup[lookup.indexOf('--proto-redir') + 1],
+      '=https',
+      'and so is every hop it is redirected to',
+    );
+    assert.match(lookup[lookup.indexOf('--max-redirs') + 1], /^[0-9]+$/, 'the chain is bounded');
+    assert.match(lookup[lookup.indexOf('--max-time') + 1], /^[0-9]+$/, 'and so is the time it may take');
+    assert.ok(
+      lookup.join(' ').includes('%{http_code} %{url_effective}'),
+      'the status and the URL it ended on are both read back',
+    );
+  });
+});
+
+test('a lookup that stops following redirects resolves nothing', () => {
+  // Proves the assertion above is load-bearing: the same script with
+  // --location removed sees the redirect itself, which is not a release.
+  withSandbox('release-no-location', (sandbox) => {
+    const source = readFileSync(resolve(AZURE_DIR, 'hooks/lib/common.sh'), 'utf8');
+    const mutated = source.replace('    --location \\\n', '');
+    assert.notEqual(mutated, source, 'the redirect flag was found and removed');
+
+    const library = resolve(sandbox.root, 'common.sh');
+    writeFileSync(library, mutated, 'utf8');
+    const probe = resolve(sandbox.root, 'probe.sh');
+    writeFileSync(
+      probe,
+      `#!/usr/bin/env bash\nset -euo pipefail\n. '${library}'\n`
+        + 'if tag=$(vistara_resolve_latest_release_tag cody-sims Vistara); then\n'
+        + '  printf \'resolved:%s\\n\' "$tag"\nelse\n  printf \'unresolved\\n\'\nfi\n',
+      'utf8',
+    );
+
+    const result = run(sandbox, probe, []);
+    assert.match(result.output, /unresolved/, 'a redirect that is not followed resolves no tag');
+  });
+});
+
+test('a lookup that lands somewhere other than a release of this repository is refused', () => {
+  const cases = [
+    ['release_status', '404', 'a non-200 answer'],
+    ['release_final_url', 'https://github.com/cody-sims/Vistara/releases', 'a repository with no releases'],
+    ['release_final_url', 'https://evil.example.com/releases/tag/v9.9.9', 'a redirect to another host'],
+    ['release_final_url', 'https://github.com/someone-else/Vistara/releases/tag/v9.9.9', 'another repository'],
+    ['release_tag', '../../../etc/passwd', 'a tag that is not a tag'],
+  ];
+
+  for (const [file, value, description] of cases) {
+    withSandbox(`release-refused-${file}-${value.length}`, (sandbox) => {
+      sandbox.state(file, value);
+      const result = run(sandbox, UP_SCRIPT, withoutOption(upArguments(), '--release'));
+      assert.equal(result.status, 64, `${description}: ${result.output}`);
+      assert.match(result.output, /no release tag could be resolved/);
+      assert.equal(
+        sandbox.callsFor('azd').filter((call) => call[1] === 'provision').length,
+        0,
+        `${description}: nothing is provisioned from an unresolved release`,
+      );
+    });
+  }
+});
+
+test(
+  'the real GitHub release redirect is followed the way the resolver expects',
+  { skip: process.env.VISTARA_NETWORK_CHECK === '1' ? false : 'set VISTARA_NETWORK_CHECK=1 to reach github.com' },
+  () => {
+    // A single unauthenticated GET of a public page, which is what the
+    // resolver does in a real run. It proves the parts a stand-in cannot:
+    // that GitHub still answers /releases/latest with a redirect, that curl
+    // follows it under the flags used here, and that the landing URL has the
+    // shape the resolver insists on.
+    const remote = execFileSync('git', ['-C', REPOSITORY_ROOT, 'remote', 'get-url', 'origin'], {
+      encoding: 'utf8',
+    }).trim();
+    const match = remote.match(/github\.com[:/]([^/]+)\/(.+?)(?:\.git)?$/);
+    assert.ok(match, `could not read an owner and repository from ${remote}`);
+    const [, owner, repository] = match;
+
+    const probe = spawnSync(
+      'bash',
+      [
+        '-c',
+        'set -euo pipefail\n'
+          + `. '${resolve(AZURE_DIR, 'hooks/lib/common.sh')}'\n`
+          + `if tag=$(vistara_resolve_latest_release_tag '${owner}' '${repository}'); then\n`
+          + '  printf \'resolved %s\\n\' "$tag"\n'
+          + 'else\n'
+          + '  printf \'unresolved\\n\'\n'
+          + 'fi\n'
+          + 'curl -fsS --location --proto \'=https\' --proto-redir \'=https\' --max-redirs 5 --max-time 30'
+          + ' --output /dev/null --write-out \'landed %{http_code} %{url_effective}\\n\''
+          + ` 'https://github.com/${owner}/${repository}/releases/latest'\n`,
+      ],
+      { encoding: 'utf8', timeout: 60_000, env: { ...process.env, VISTARA_STATE_DIR: undefined } },
+    );
+
+    assert.equal(probe.status, 0, `${probe.stdout}${probe.stderr}`);
+    const landed = probe.stdout.split('\n').find((line) => line.startsWith('landed '));
+    assert.ok(landed, `no landing line in: ${probe.stdout}`);
+    const [, statusCode, finalUrl] = landed.split(' ');
+    assert.equal(statusCode, '200', 'the redirect chain ends in a 200');
+    assert.ok(
+      finalUrl.startsWith(`https://github.com/${owner}/${repository}/releases`),
+      `the chain stayed on this repository, landed on ${finalUrl}`,
+    );
+
+    const resolved = probe.stdout.split('\n').find((line) => line.startsWith('resolved '));
+    if (finalUrl.includes('/releases/tag/')) {
+      assert.ok(resolved, 'a tagged landing resolves a tag');
+      assert.match(resolved.slice('resolved '.length), /^[A-Za-z0-9][A-Za-z0-9._+-]*$/);
+    } else {
+      assert.match(probe.stdout, /unresolved/, 'a repository with no releases resolves nothing');
+    }
+  },
+);
+
 test('the latest release tag is resolved when none is given', () => {
   withSandbox('release-lookup', (sandbox) => {
-    const withoutRelease = [];
-    const original = upArguments();
-    for (let index = 0; index < original.length; index += 1) {
-      if (original[index] === '--release') {
-        index += 1;
-        continue;
-      }
-      withoutRelease.push(original[index]);
-    }
-    const result = run(sandbox, UP_SCRIPT, withoutRelease);
+    const result = run(sandbox, UP_SCRIPT, withoutOption(upArguments(), '--release'));
     assert.equal(result.status, 0, result.output);
     const lookup = sandbox
       .callsFor('curl')

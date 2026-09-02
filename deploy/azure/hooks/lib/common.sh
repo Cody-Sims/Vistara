@@ -354,6 +354,62 @@ vistara_seconds() {
   date +%s
 }
 
+# Resolves the tag of a repository's latest published release by following the
+# redirect GitHub answers `/releases/latest` with.
+#
+# Everything about that sentence has to be enforced rather than assumed. Curl
+# does not follow a redirect unless it is told to, so without -L the "final"
+# URL is the one that was asked for and the tag would be parsed out of nothing.
+# A redirect chain is attacker-influenced input, so it is bounded, capped in
+# time, and confined to HTTPS on the first hop and on every hop after it — a
+# redirect to http:// or to a file:// URL is refused rather than followed. And
+# the answer is only believed when the final response was a 200 whose URL is a
+# release tag of this exact repository: `/releases/latest` on a repository with
+# no releases answers 200 at `/releases`, which is a successful request that
+# resolves nothing.
+#
+# Prints the tag, or nothing when it cannot be established.
+vistara_resolve_latest_release_tag() {
+  local owner=$1
+  local repository=$2
+  local expected_prefix="https://github.com/${owner}/${repository}/releases/tag/"
+  local response status_code final_url tag
+  local tag_pattern='^[A-Za-z0-9][A-Za-z0-9._+-]*$'
+
+  response=$(curl -fsS \
+    --location \
+    --proto '=https' \
+    --proto-redir '=https' \
+    --max-redirs "${VISTARA_MAX_REDIRECTS:-5}" \
+    --max-time "${VISTARA_HTTP_TIMEOUT_SECONDS:-30}" \
+    --output /dev/null \
+    --write-out '%{http_code} %{url_effective}' \
+    "https://github.com/${owner}/${repository}/releases/latest" 2>/dev/null) || return 1
+  response=$(printf '%s' "$response" | tr -d '\r\n')
+
+  status_code=${response%% *}
+  final_url=${response#* }
+
+  if [ "$status_code" != '200' ]; then
+    return 1
+  fi
+
+  case "$final_url" in
+    "${expected_prefix}"?*) ;;
+    *) return 1 ;;
+  esac
+
+  tag=${final_url#"$expected_prefix"}
+  case "$tag" in
+    */*) return 1 ;;
+  esac
+  if ! [[ $tag =~ $tag_pattern ]]; then
+    return 1
+  fi
+
+  printf '%s' "$tag"
+}
+
 # Opens a URL in the operator's browser. Never fails the run: the URL is always
 # printed as well, so a headless machine loses nothing.
 vistara_open_url() {
