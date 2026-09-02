@@ -23,6 +23,14 @@ vistara_load_env
 
 vistara_step 'Verifying the Entra registration'
 
+# This hook exists to catch a federated credential that was registered with the
+# wrong issuer, and the issuer is built from AZURE_TENANT_ID. Comparing what
+# was registered against what this value produces cannot catch a wrong value:
+# both sides would be wrong in the same way. The check is repeated here rather
+# than inherited from the registration hook, so verification depends on Azure
+# rather than on another step's conclusion.
+vistara_require_tenant_matches_subscription 'the federated credential verification'
+
 tenant_id=$(vistara_require_env AZURE_TENANT_ID)
 api_uri=$(vistara_require_env SERVICE_API_URI)
 api_principal_id=$(vistara_require_env API_IDENTITY_PRINCIPAL_ID)

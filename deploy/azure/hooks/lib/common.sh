@@ -139,6 +139,12 @@ vistara_extract_version() {
 # Values and validation
 # ---------------------------------------------------------------------------
 
+# Directory GUIDs are case-insensitive but are written both ways, so every
+# comparison of one against another is made on a single canonical form.
+vistara_lowercase() {
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
+}
+
 vistara_is_guid() {
   local pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
   [[ ${1:-} =~ $pattern ]]
@@ -372,6 +378,48 @@ vistara_confirm_phrase() {
 
 vistara_seconds() {
   date +%s
+}
+
+# Asserts that the tenant this deployment is configured for is the tenant Azure
+# reports for the subscription it is deployed into.
+#
+# Everything the identity path is built from — the federated credential issuer,
+# the OIDC authority, the directory tenant the first-owner allowlist is keyed
+# on — is derived from one value, AZURE_TENANT_ID. A wrong value is therefore
+# consistent with itself: the issuer built from it matches the issuer
+# registered from it, and a verification that compares the two agrees. The only
+# thing that can contradict it is Azure, so each step that is about to depend
+# on the tenant asks Azure directly rather than trusting the value it was
+# handed, or another step's conclusion about it.
+vistara_require_tenant_matches_subscription() {
+  local context=$1
+  local declared subscription_id observed
+
+  declared=$(vistara_env AZURE_TENANT_ID)
+  subscription_id=$(vistara_env AZURE_SUBSCRIPTION_ID)
+
+  if [ -z "$declared" ]; then
+    vistara_die "$VISTARA_EXIT_USAGE" \
+      "AZURE_TENANT_ID is not set, so ${context} cannot be pinned to a directory."
+  fi
+  if [ -z "$subscription_id" ]; then
+    vistara_die "$VISTARA_EXIT_USAGE" \
+      "AZURE_SUBSCRIPTION_ID is not set, so AZURE_TENANT_ID cannot be checked against the subscription for ${context}."
+  fi
+
+  observed=$(az account show --subscription "$subscription_id" --query tenantId --output tsv 2>/dev/null | tr -d '\r\n' || true)
+  if [ -z "$observed" ]; then
+    vistara_die "$VISTARA_EXIT_PERMISSION" \
+      "could not read the tenantId of subscription ${subscription_id}, so AZURE_TENANT_ID cannot be checked before ${context}. Run: az login"
+  fi
+
+  if [ "$(vistara_lowercase "$declared")" != "$(vistara_lowercase "$observed")" ]; then
+    vistara_error "AZURE_TENANT_ID is ${declared}."
+    vistara_error "The tenantId Azure reports for AZURE_SUBSCRIPTION_ID ${subscription_id} is ${observed}."
+    vistara_error "Every value ${context} depends on is derived from AZURE_TENANT_ID, so a wrong one agrees with itself and only Azure can contradict it."
+    vistara_die "$VISTARA_EXIT_PROVISION" \
+      'AZURE_TENANT_ID does not match the tenant of AZURE_SUBSCRIPTION_ID.'
+  fi
 }
 
 # Resolves the tag of a repository's latest published release by following the

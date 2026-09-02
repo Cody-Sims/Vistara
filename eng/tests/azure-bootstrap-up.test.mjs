@@ -22,6 +22,7 @@ import {
   PEPPER_MARKER,
   SERVICE_API_URI,
   SIGNED_IN_OBJECT_ID,
+  SUBSCRIPTION_ID,
   TENANT_ID,
   UP_SCRIPT,
   WORKER_DIGEST,
@@ -847,6 +848,148 @@ test('a subscription in the same tenant is switched to, after the confirmation',
     assert.equal(
       sandbox.environment('eval').AZURE_SUBSCRIPTION_ID,
       '99999999-9999-9999-9999-999999999999',
+    );
+  });
+});
+
+test('an explicit tenant that is not the subscription tenant is refused before anything is created', () => {
+  withSandbox('tenant-mismatch', (sandbox) => {
+    const result = run(
+      sandbox,
+      UP_SCRIPT,
+      upArguments(['--tenant-id', '12121212-1212-1212-1212-121212121212']),
+    );
+    assert.equal(result.status, 64, result.output);
+    assert.match(result.output, /--tenant-id is 12121212-1212-1212-1212-121212121212/);
+    assert.match(result.output, /--tenant-id does not match the tenant of the subscription/);
+    assert.deepEqual(
+      mutatingCalls(sandbox).map((call) => call.join(' ')),
+      [],
+      'a deployment pinned to the wrong directory never starts',
+    );
+  });
+});
+
+test('an explicit tenant that is not the signed-in tenant is refused', () => {
+  withSandbox('tenant-not-signed-in', (sandbox) => {
+    // The subscription agrees with --tenant-id, but the CLI is signed in
+    // somewhere else, and every az ad lookup answers for where it is signed in.
+    sandbox.touch('allow_subscription_switch');
+    sandbox.state('foreign_tenant_id', '12121212-1212-1212-1212-121212121212');
+    const result = run(
+      sandbox,
+      UP_SCRIPT,
+      upArguments([
+        '--subscription',
+        '99999999-9999-9999-9999-999999999999',
+        '--tenant-id',
+        '12121212-1212-1212-1212-121212121212',
+      ]),
+    );
+    assert.notEqual(result.status, 0, result.output);
+    assert.deepEqual(mutatingCalls(sandbox).map((call) => call.join(' ')), []);
+  });
+});
+
+test('the same tenant written in a different case is the same tenant', () => {
+  withSandbox('tenant-case', (sandbox) => {
+    const result = run(sandbox, UP_SCRIPT, upArguments(['--tenant-id', TENANT_ID.toUpperCase()]));
+    assert.equal(result.status, 0, result.output);
+    assert.equal(
+      sandbox.environment('eval').AZURE_TENANT_ID,
+      TENANT_ID,
+      'and it is recorded in one canonical form',
+    );
+  });
+});
+
+test('a tenant that is wrong everywhere is still caught, because Azure is asked', () => {
+  withSandbox('tenant-self-consistent', (sandbox) => {
+    // The hostile case: every value derived from the tenant agrees with every
+    // other. The environment says one tenant, the registered federated
+    // credential was issued by that same tenant, and the byte comparison the
+    // verification makes would therefore pass. Only Azure disagrees.
+    const wrongTenant = '12121212-1212-1212-1212-121212121212';
+    sandbox.state(
+      'outputs.env',
+      sandbox.read('outputs.env').replace(`AZURE_TENANT_ID=${TENANT_ID}`, `AZURE_TENANT_ID=${wrongTenant}`),
+    );
+    sandbox.touch('app_exists');
+    sandbox.state('fic_issuer', `https://login.microsoftonline.com/${wrongTenant}/v2.0`);
+    sandbox.state('fic_subject', API_PRINCIPAL_ID);
+    sandbox.state('fic_audience', 'api://AzureADTokenExchange');
+
+    const result = run(sandbox, UP_SCRIPT, upArguments());
+    assert.equal(result.status, 70, result.output);
+    assert.match(result.output, /AZURE_TENANT_ID does not match the tenant of AZURE_SUBSCRIPTION_ID/);
+    assert.match(result.output, new RegExp(`AZURE_TENANT_ID is ${wrongTenant}`));
+    assert.match(result.output, new RegExp(`reports for AZURE_SUBSCRIPTION_ID .* is ${TENANT_ID}`));
+
+    assert.ok(
+      !sandbox.calls().some((call) => call[0] === 'az' && call[1] === 'rest'),
+      'no registration is created in the wrong directory',
+    );
+    assert.equal(sandbox.read('provision_count').trim(), '1', 'and the applications are never turned on');
+  });
+});
+
+test('the federated credential verification cannot confirm a wrong tenant against itself', () => {
+  withSandbox('fic-self-comparison', (sandbox) => {
+    // Run the verification hook alone, with a registration that matches the
+    // environment perfectly and a tenant that Azure disagrees with. Every
+    // byte comparison in the hook passes; the run must still fail.
+    const wrongTenant = '12121212-1212-1212-1212-121212121212';
+    const hookEnvironment = {
+      AZURE_ENV_NAME: 'eval',
+      AZURE_SUBSCRIPTION_ID: SUBSCRIPTION_ID,
+      AZURE_TENANT_ID: wrongTenant,
+      SERVICE_API_URI,
+      API_IDENTITY_PRINCIPAL_ID: API_PRINCIPAL_ID,
+      VISTARA_APPLICATION_CLIENT_ID: APP_CLIENT_ID,
+      ENTRA_APPLICATION_OBJECT_ID: '88888888-8888-8888-8888-888888888888',
+    };
+    sandbox.touch('app_exists');
+    sandbox.state('fic_issuer', `https://login.microsoftonline.com/${wrongTenant}/v2.0`);
+    sandbox.state('fic_subject', API_PRINCIPAL_ID);
+    sandbox.state('fic_audience', 'api://AzureADTokenExchange');
+
+    const hook = resolve(AZURE_DIR, 'hooks/postprovision-verify-fic.sh');
+    const rejected = run(sandbox, hook, [], { env: hookEnvironment });
+    assert.equal(rejected.status, 70, rejected.output);
+    assert.match(rejected.output, /AZURE_TENANT_ID does not match/);
+    assert.ok(
+      !rejected.output.includes('issuer mismatch'),
+      'the byte comparison agreed, which is exactly why it cannot be the only check',
+    );
+
+    // The same registration, with the tenant Azure actually reports, passes.
+    sandbox.state('fic_issuer', `https://login.microsoftonline.com/${TENANT_ID}/v2.0`);
+    const accepted = run(sandbox, hook, [], {
+      env: { ...hookEnvironment, AZURE_TENANT_ID: TENANT_ID },
+    });
+    assert.equal(accepted.status, 0, accepted.output);
+  });
+});
+
+test('the registration hook asks Azure about the tenant before it creates anything', () => {
+  withSandbox('registration-tenant-check', (sandbox) => {
+    const wrongTenant = '12121212-1212-1212-1212-121212121212';
+    const hook = resolve(AZURE_DIR, 'hooks/postprovision-app-registration.sh');
+    const result = run(sandbox, hook, [], {
+      env: {
+        AZURE_ENV_NAME: 'eval',
+        AZURE_SUBSCRIPTION_ID: SUBSCRIPTION_ID,
+        AZURE_TENANT_ID: wrongTenant,
+        SERVICE_API_URI,
+        API_IDENTITY_PRINCIPAL_ID: API_PRINCIPAL_ID,
+      },
+    });
+    assert.equal(result.status, 70, result.output);
+    assert.match(result.output, /AZURE_TENANT_ID does not match/);
+    assert.deepEqual(
+      mutatingCalls(sandbox).map((call) => call.join(' ')),
+      [],
+      'nothing is registered in a directory the subscription does not belong to',
     );
   });
 });

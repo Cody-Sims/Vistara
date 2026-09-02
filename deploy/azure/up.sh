@@ -77,6 +77,7 @@ subscription_id=''
 owner_object_id=''
 owner_object_id_explicit=0
 tenant_id=''
+tenant_id_explicit=0
 image_namespace=''
 release_tag=''
 api_digest=''
@@ -105,7 +106,7 @@ while [ "$#" -gt 0 ]; do
     --location) require_value "$1" "${2:-}"; location=$2; shift 2 ;;
     --subscription) require_value "$1" "${2:-}"; subscription_id=$2; shift 2 ;;
     --owner-object-id) require_value "$1" "${2:-}"; owner_object_id=$2; owner_object_id_explicit=1; shift 2 ;;
-    --tenant-id) require_value "$1" "${2:-}"; tenant_id=$2; shift 2 ;;
+    --tenant-id) require_value "$1" "${2:-}"; tenant_id=$2; tenant_id_explicit=1; shift 2 ;;
     --image-namespace) require_value "$1" "${2:-}"; image_namespace=$2; shift 2 ;;
     --release) require_value "$1" "${2:-}"; release_tag=$2; shift 2 ;;
     --api-digest) require_value "$1" "${2:-}"; api_digest=$2; shift 2 ;;
@@ -226,8 +227,42 @@ if [ -n "$subscription_tenant" ] && [ -n "$active_tenant" ] && [ "$subscription_
     "subscription ${subscription_id} belongs to tenant ${subscription_tenant} but the Azure CLI is signed in to ${active_tenant}, so directory lookups would answer for the wrong tenant. Run: az account set --subscription ${subscription_id} (or az login --tenant ${subscription_tenant}) and rerun."
 fi
 
+# An explicit --tenant-id is checked against both tenants rather than believed.
+# It is the root of the whole identity path: the federated credential issuer,
+# the OIDC authority, and the directory tenant the first-owner allowlist is
+# keyed on are all built from it, so a wrong value produces a deployment that
+# agrees with itself at every later step — the registration is created in one
+# directory and the verification confirms it against the same wrong value.
+# Azure is the only thing that can contradict it, and it is asked here, before
+# anything has been created.
+if [ "$tenant_id_explicit" = '1' ]; then
+  vistara_require_guid "$tenant_id" '--tenant-id'
+
+  if [ -z "$subscription_tenant" ] || [ -z "$active_tenant" ]; then
+    vistara_die "$VISTARA_EXIT_PERMISSION" \
+      '--tenant-id was given but the tenant of the subscription could not be read, so it cannot be checked. Run: az login'
+  fi
+
+  if [ "$(vistara_lowercase "$tenant_id")" != "$(vistara_lowercase "$subscription_tenant")" ]; then
+    vistara_error "--tenant-id is ${tenant_id}."
+    vistara_error "The tenantId of subscription ${subscription_id} is ${subscription_tenant}."
+    vistara_die "$VISTARA_EXIT_USAGE" \
+      '--tenant-id does not match the tenant of the subscription being deployed into.'
+  fi
+
+  if [ "$(vistara_lowercase "$tenant_id")" != "$(vistara_lowercase "$active_tenant")" ]; then
+    vistara_error "--tenant-id is ${tenant_id}."
+    vistara_error "The Azure CLI is signed in to tenant ${active_tenant}, which is the directory every az ad lookup answers for."
+    vistara_die "$VISTARA_EXIT_USAGE" \
+      '--tenant-id does not match the tenant the Azure CLI is signed in to.'
+  fi
+fi
+
 tenant_id=${tenant_id:-$subscription_tenant}
 vistara_require_guid "$tenant_id" '--tenant-id'
+# Canonical case, so the value recorded, registered, and compared later is one
+# form rather than three.
+tenant_id=$(vistara_lowercase "$tenant_id")
 
 signed_in_object_id=$(az ad signed-in-user show --query id --output tsv 2>/dev/null | tr -d '\r\n' || true)
 signed_in_name=$(az ad signed-in-user show --query userPrincipalName --output tsv 2>/dev/null | tr -d '\r\n' || true)

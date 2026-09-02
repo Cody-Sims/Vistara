@@ -27,6 +27,12 @@ set -euo pipefail
 
 vistara_load_env
 
+# Asked before anything is created in a directory, and asked of Azure rather
+# than of the value being used: the reply URLs, the issuer, and the credential
+# subject are all derived from AZURE_TENANT_ID, so a wrong tenant would create
+# a registration that is perfectly consistent with the wrong tenant.
+vistara_require_tenant_matches_subscription 'the Entra application registration'
+
 environment_name=$(vistara_require_env AZURE_ENV_NAME)
 tenant_id=$(vistara_require_env AZURE_TENANT_ID)
 api_uri=$(vistara_require_env SERVICE_API_URI)
