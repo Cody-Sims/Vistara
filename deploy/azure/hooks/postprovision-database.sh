@@ -75,6 +75,10 @@ pgpass_file=''
 
 cleanup() {
   local status=$?
+  if [ "${cleanup_done:-0}" = '1' ]; then
+    return "$status"
+  fi
+  cleanup_done=1
   if [ -n "$pgpass_file" ]; then
     vistara_shred "$pgpass_file"
   fi
@@ -89,7 +93,24 @@ cleanup() {
   fi
   return "$status"
 }
-trap cleanup EXIT INT TERM
+
+# A signal handler that only returns lets the script carry on with its
+# credentials shredded and its firewall opening already closed, so the signal
+# paths end the run instead.
+on_interrupt() {
+  cleanup
+  exit 130
+}
+
+on_terminate() {
+  cleanup
+  exit 143
+}
+
+cleanup_done=0
+trap cleanup EXIT
+trap on_interrupt INT
+trap on_terminate TERM
 
 client_ip=$(vistara_env VISTARA_CLIENT_IP)
 if [ -z "$client_ip" ]; then
@@ -105,6 +126,10 @@ if ! [[ $client_ip =~ $ipv4_pattern ]]; then
 fi
 
 vistara_log "allowing ${client_ip} through the PostgreSQL firewall for the duration of this step."
+# Marked before the call, not after: a create that times out or is interrupted
+# can still have reached Azure, and an opening nobody remembers making is one
+# that never gets closed.
+firewall_rule_created=1
 if ! firewall_output=$(az postgres flexible-server firewall-rule create \
   --resource-group "$resource_group" \
   --name "$server_name" \
@@ -116,7 +141,6 @@ if ! firewall_output=$(az postgres flexible-server firewall-rule create \
   vistara_die "$VISTARA_EXIT_PROVISION" \
     "could not open the PostgreSQL firewall for ${client_ip} on ${server_name}."
 fi
-firewall_rule_created=1
 
 # ---------------------------------------------------------------------------
 # Credentials

@@ -38,7 +38,22 @@ cleanup() {
   [ -n "$pepper_file" ] && vistara_shred "$pepper_file"
   return 0
 }
-trap cleanup EXIT INT TERM
+
+# Returning from a signal handler resumes the script, which would carry on
+# against a file it has just destroyed, so the signal paths end the run.
+on_interrupt() {
+  cleanup
+  exit 130
+}
+
+on_terminate() {
+  cleanup
+  exit 143
+}
+
+trap cleanup EXIT
+trap on_interrupt INT
+trap on_terminate TERM
 
 # ---------------------------------------------------------------------------
 # Data-plane access for the operator

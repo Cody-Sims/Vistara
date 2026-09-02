@@ -25,13 +25,21 @@ vistara_step 'Teardown guard'
 
 environment_name=$(vistara_env AZURE_ENV_NAME)
 resource_group=$(vistara_env AZURE_RESOURCE_GROUP)
+subscription_id=$(vistara_env AZURE_SUBSCRIPTION_ID)
 
 if [ -z "$resource_group" ]; then
   vistara_warn 'no resource group is recorded for this environment; nothing to guard.'
   exit 0
 fi
 
-locks=$(az lock list --resource-group "$resource_group" --query '[].id' --output tsv 2>/dev/null || true)
+# Named explicitly, because a guard that reads a different subscription than
+# the teardown writes to would report no locks and wave the teardown through.
+if [ -z "$subscription_id" ]; then
+  vistara_die "$VISTARA_EXIT_USAGE" \
+    "environment ${environment_name:-<unset>} records no subscription, so this guard cannot tell whether ${resource_group} still holds data locks."
+fi
+
+locks=$(az lock list --resource-group "$resource_group" --subscription "$subscription_id" --query '[].id' --output tsv 2>/dev/null || true)
 locks=$(printf '%s' "$locks" | tr -d '\r' | sed '/^$/d')
 
 if [ -n "$locks" ] && [ "${VISTARA_DOWN_CONFIRMED:-0}" != '1' ]; then
@@ -49,6 +57,7 @@ fi
 for resource_type in Microsoft.DBforPostgreSQL/flexibleServers Microsoft.Storage/storageAccounts Microsoft.KeyVault/vaults; do
   retained=$(az resource list \
     --resource-group "$resource_group" \
+    --subscription "$subscription_id" \
     --resource-type "$resource_type" \
     --query '[].id' --output tsv 2>/dev/null || true)
   retained=$(printf '%s' "$retained" | tr -d '\r' | sed '/^$/d')
