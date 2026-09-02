@@ -7,4 +7,8 @@
     <ProjectReference Include="../../../src/Vistara.Api/Vistara.Api.csproj" />
     <ProjectReference Include="../../../src/Vistara.Worker/Vistara.Worker.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Vistara.E2E.HostTests" />
+  </ItemGroup>
 </Project>

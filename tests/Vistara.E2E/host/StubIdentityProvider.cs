@@ -50,14 +50,11 @@ internal static class StubIdentityProvider
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        using X509Certificate2 certificate = CreateLoopbackCertificate();
-        Directory.CreateDirectory(
-            Path.GetDirectoryName(options.CertificatePath)!);
+        using X509Certificate2 certificate = LoopbackTls.CreateCertificate();
         // The API pins this certificate rather than trusting the machine, so
-        // the public part is published where the run can find it.
-        await File.WriteAllBytesAsync(
-            options.CertificatePath,
-            certificate.Export(X509ContentType.Cert));
+        // the public part — and only the public part — is published where the
+        // run can find it.
+        await LoopbackTls.PublishAsync(certificate, options.CertificatePath);
 
         using RSA signingKey = RSA.Create(2048);
         var authorizations = new ConcurrentDictionary<string, PendingAuthorization>(
@@ -346,41 +343,6 @@ internal static class StubIdentityProvider
         </body>
         </html>
         """;
-
-    /// <summary>
-    /// A self-signed certificate for the loopback address, exported and
-    /// reloaded as PKCS#12 so the private key is usable on every platform the
-    /// suite runs on.
-    /// </summary>
-    private static X509Certificate2 CreateLoopbackCertificate()
-    {
-        using RSA key = RSA.Create(2048);
-        var request = new CertificateRequest(
-            "CN=127.0.0.1",
-            key,
-            HashAlgorithmName.SHA256,
-            RSASignaturePadding.Pkcs1);
-        request.CertificateExtensions.Add(
-            new X509BasicConstraintsExtension(false, false, 0, true));
-        request.CertificateExtensions.Add(
-            new X509KeyUsageExtension(
-                X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment,
-                true));
-        request.CertificateExtensions.Add(
-            new X509EnhancedKeyUsageExtension([new Oid("1.3.6.1.5.5.7.3.1")], false));
-        var alternativeNames = new SubjectAlternativeNameBuilder();
-        alternativeNames.AddIpAddress(IPAddress.Loopback);
-        alternativeNames.AddDnsName("localhost");
-        request.CertificateExtensions.Add(alternativeNames.Build());
-
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        using X509Certificate2 generated = request.CreateSelfSigned(
-            now.AddDays(-1),
-            now.AddDays(1));
-        return X509CertificateLoader.LoadPkcs12(
-            generated.Export(X509ContentType.Pfx),
-            password: null);
-    }
 
     private sealed record PendingAuthorization(
         string State,
