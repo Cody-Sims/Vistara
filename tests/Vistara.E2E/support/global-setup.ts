@@ -1,11 +1,13 @@
 import {
   closeSync,
+  existsSync,
   openSync,
   readFileSync,
   rmSync,
   mkdirSync,
   writeFileSync,
 } from 'node:fs';
+import { request as httpsRequest } from 'node:https';
 import { randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import type { FullConfig } from '@playwright/test';
@@ -21,6 +23,15 @@ import {
   webDirectory,
   webDist,
 } from './paths.js';
+import {
+  identityProviderArguments,
+  oidcApiEnvironment,
+  oidcCertificatePath,
+  oidcEnvironment,
+  oidcMediaRoot,
+  oidcRoutes,
+  oidcSeedArguments,
+} from './oidc.js';
 
 const baseUrl = process.env.VISTARA_E2E_BASE_URL ?? 'http://127.0.0.1:5188';
 const pepper = randomBytes(32).toString('base64');
@@ -51,6 +62,9 @@ export default async function globalSetup(_config: FullConfig) {
     '--pepper',
     pepper,
   ]);
+
+  mkdirSync(oidcMediaRoot, { recursive: true });
+  run('dotnet', [hostAssembly, ...oidcSeedArguments()]);
 
   const stdout = openSync(`${artifactsDirectory}/api.stdout.log`, 'a');
   const stderr = openSync(`${artifactsDirectory}/api.stderr.log`, 'a');
@@ -117,9 +131,37 @@ export default async function globalSetup(_config: FullConfig) {
   closeSync(workerStdout);
   closeSync(workerStderr);
 
+  const started: (number | undefined)[] = [api.pid, worker.pid];
   try {
     await waitForApi(baseUrl);
     await waitForProcess(worker.pid);
+
+    // The stub provider writes the certificate the hosted sign-in API is told
+    // to trust, so it has to be listening before that API starts.
+    const identityProvider = spawnHost('identity-provider', [
+      hostAssembly,
+      ...identityProviderArguments(),
+    ]);
+    started.push(identityProvider.pid);
+    await waitForIdentityProvider();
+
+    const oidcApi = spawnHost(
+      'oidc-api',
+      [
+        hostAssembly,
+        'serve',
+        '--urls',
+        oidcEnvironment.baseUrl,
+        '--contentRoot',
+        repositoryRoot,
+        '--webroot',
+        webDist,
+      ],
+      oidcApiEnvironment(),
+    );
+    started.push(oidcApi.pid);
+    await waitForHostedSignIn();
+
     const seeded = JSON.parse(readFileSync(statePath, 'utf8')) as {
       browsers: Record<string, unknown>;
     };
@@ -131,32 +173,128 @@ export default async function globalSetup(_config: FullConfig) {
           apiPid: api.pid,
           workerPid: worker.pid,
           browsers: seeded.browsers,
+          oidc: {
+            ...oidcEnvironment,
+            identityProviderUrl: oidcEnvironment.identityProviderUrl,
+            apiPid: oidcApi.pid,
+            identityProviderPid: identityProvider.pid,
+          },
         },
         null,
         2,
       ),
     );
   } catch (error) {
-    if (api.pid) {
+    for (const pid of started) {
+      if (!pid) {
+        continue;
+      }
+
       try {
-        process.kill(api.pid, 'SIGTERM');
+        process.kill(pid, 'SIGTERM');
       } catch (killError) {
         if ((killError as NodeJS.ErrnoException).code !== 'ESRCH') {
           throw killError;
         }
       }
     }
-    if (worker.pid) {
-      try {
-        process.kill(worker.pid, 'SIGTERM');
-      } catch (killError) {
-        if ((killError as NodeJS.ErrnoException).code !== 'ESRCH') {
-          throw killError;
-        }
-      }
-    }
+
     throw error;
   }
+}
+
+/** Starts one detached host process with its output kept in the artifacts. */
+function spawnHost(
+  name: string,
+  args: readonly string[],
+  environment: Record<string, string> = {},
+) {
+  const stdout = openSync(`${artifactsDirectory}/${name}.stdout.log`, 'a');
+  const stderr = openSync(`${artifactsDirectory}/${name}.stderr.log`, 'a');
+  const child = spawn('dotnet', [...args], {
+    cwd: repositoryRoot,
+    detached: true,
+    env: { ...process.env, ...environment },
+    stdio: ['ignore', stdout, stderr],
+  });
+  child.unref();
+  closeSync(stdout);
+  closeSync(stderr);
+  return child;
+}
+
+/**
+ * Waits for the stub provider to be answering over TLS and to have published
+ * the certificate the API pins. The certificate is self-signed and trusted for
+ * this one probe only.
+ */
+async function waitForIdentityProvider() {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 60; attempt++) {
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        const probe = httpsRequest(
+          `${oidcEnvironment.identityProviderUrl}/health`,
+          { rejectUnauthorized: false },
+          (response) => {
+            response.resume();
+            resolve(response.statusCode ?? 0);
+          },
+        );
+        probe.on('error', reject);
+        probe.end();
+      });
+      if (status !== 200) {
+        throw new Error(`The stub identity provider answered ${status}.`);
+      }
+
+      if (!existsSync(oidcCertificatePath)) {
+        throw new Error('The stub identity provider published no certificate.');
+      }
+
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+
+  throw new Error(
+    `The stub identity provider did not become ready: ${String(lastError)}`,
+  );
+}
+
+/**
+ * Waits for the hosted sign-in API, and only accepts it once the anonymous
+ * setup surface publishes the provider a browser is meant to start at. A
+ * deployment that composed the routes without publishing the provider would
+ * otherwise look healthy while the suite had nothing to click.
+ */
+async function waitForHostedSignIn() {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 60; attempt++) {
+    try {
+      const response = await fetch(`${oidcEnvironment.baseUrl}/api/v1/setup`);
+      const document = (await response.json()) as {
+        signInProviders?: { id?: string; startUrl?: string }[];
+      };
+      const provider = document.signInProviders?.find(
+        (candidate) => candidate.id === oidcEnvironment.providerId,
+      );
+      if (!response.ok || provider?.startUrl !== oidcRoutes.startPath) {
+        throw new Error('Hosted sign-in published no start URL.');
+      }
+
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+
+  throw new Error(
+    `The hosted sign-in API did not become ready: ${String(lastError)}`,
+  );
 }
 
 function run(command: string, args: readonly string[]) {
