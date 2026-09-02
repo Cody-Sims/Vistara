@@ -1,4 +1,7 @@
+using System.Globalization;
+using System.Net.Http;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using Amazon.Runtime;
@@ -14,10 +17,12 @@ using Vistara.Application.Common.Imaging;
 using Vistara.Application.Common.Storage;
 using Vistara.Auth.ApiKeys;
 using Vistara.Auth.Cookies;
+using Vistara.Auth.Oidc;
 using Vistara.Domain.Common;
 using Vistara.Domain.Identity;
 using Vistara.Domain.Tenancy;
 using Vistara.Persistence;
+using Vistara.Persistence.Identity;
 using Vistara.Persistence.Ingest;
 using Vistara.Persistence.Model;
 using Vistara.Persistence.Uploads;
@@ -26,14 +31,36 @@ using Vistara.Worker.Composition.Platform;
 using ApiMedia = Vistara.Api.Composition.Media;
 using WorkerMedia = Vistara.Worker.Composition.Media;
 
+const string commands = "Use 'seed', 'seed-oidc', 'idp', 'serve', or 'worker'.";
+
 if (args.Length == 0)
 {
-    throw new InvalidOperationException("Use 'seed', 'serve', or 'worker'.");
+    throw new InvalidOperationException(commands);
 }
 
 if (string.Equals(args[0], "seed", StringComparison.Ordinal))
 {
     await SeedAsync(ParseArguments(args[1..]));
+    return;
+}
+
+if (string.Equals(args[0], "seed-oidc", StringComparison.Ordinal))
+{
+    await SeedOidcAsync(ParseArguments(args[1..]));
+    return;
+}
+
+if (string.Equals(args[0], "idp", StringComparison.Ordinal))
+{
+    IReadOnlyDictionary<string, string> identityProvider = ParseArguments(args[1..]);
+    await StubIdentityProvider.RunAsync(new StubIdentityProviderOptions(
+        int.Parse(Required(identityProvider, "port"), CultureInfo.InvariantCulture),
+        Guid.ParseExact(Required(identityProvider, "directory-tenant"), "D"),
+        Required(identityProvider, "client-id"),
+        Required(identityProvider, "client-secret"),
+        new Uri(Required(identityProvider, "redirect-uri"), UriKind.Absolute),
+        new Uri(Required(identityProvider, "post-logout-redirect-uri"), UriKind.Absolute),
+        Required(identityProvider, "certificate")));
     return;
 }
 
@@ -57,7 +84,7 @@ if (string.Equals(args[0], "worker", StringComparison.Ordinal))
 
 if (!string.Equals(args[0], "serve", StringComparison.Ordinal))
 {
-    throw new InvalidOperationException("Use 'seed', 'serve', or 'worker'.");
+    throw new InvalidOperationException(commands);
 }
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args[1..]);
@@ -72,6 +99,36 @@ ApiMedia.MediaServiceCollectionExtensions.AddVistaraMedia(
     builder.Services,
     builder.Configuration);
 builder.Services.AddVistaraPlatformSurface();
+
+// The stub identity provider presents a self-signed loopback certificate.
+// Trusting exactly that one certificate is the only transport decision this
+// suite replaces: redirects stay disabled and every other handler setting is
+// the shipped one, so discovery, the key set, and the token exchange still
+// travel over the API's own client.
+if (Environment.GetEnvironmentVariable("VISTARA_E2E_OIDC_CERTIFICATE") is
+    { Length: > 0 } trustedCertificatePath)
+{
+    string trustedCertificate;
+    using (X509Certificate2 pinned =
+        X509CertificateLoader.LoadCertificateFromFile(trustedCertificatePath))
+    {
+        trustedCertificate = pinned.GetCertHashString(HashAlgorithmName.SHA256);
+    }
+
+    builder.Services.AddHttpClient(OidcHttpDefaults.HttpClientName)
+        .ConfigurePrimaryHttpMessageHandler(() =>
+        {
+            SocketsHttpHandler handler = OidcHttpDefaults.CreateHandler();
+            handler.SslOptions.RemoteCertificateValidationCallback =
+                (_, certificate, _, _) =>
+                    certificate is not null &&
+                    string.Equals(
+                        certificate.GetCertHashString(HashAlgorithmName.SHA256),
+                        trustedCertificate,
+                        StringComparison.OrdinalIgnoreCase);
+            return handler;
+        });
+}
 
 WebApplication app = builder.Build();
 app.Services.ValidateVistaraApiPlatformComposition();
@@ -393,6 +450,123 @@ static async Task SeedAsync(IReadOnlyDictionary<string, string> arguments)
             {
                 WriteIndented = true,
             }));
+}
+
+/// <summary>
+/// Seeds the workspace the hosted sign-in suite signs in to.
+///
+/// The tenant, its member, that member's password, and the directory identity
+/// already linked to them are written directly, the way a deployment that has
+/// been running for a while looks. The bootstrap marker is deliberately not
+/// claimed: an existing workspace is not what closes first-owner bootstrap,
+/// and leaving it open is what lets the same run also prove that an
+/// allowlisted directory identity can claim it.
+/// </summary>
+static async Task SeedOidcAsync(IReadOnlyDictionary<string, string> arguments)
+{
+    string databasePath = Required(arguments, "database");
+    string mediaRoot = Required(arguments, "media-root");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    Directory.CreateDirectory(mediaRoot);
+
+    Guid directoryTenantId = Guid.ParseExact(
+        Required(arguments, "directory-tenant"),
+        "D");
+    Guid objectId = Guid.ParseExact(Required(arguments, "object-id"), "D");
+    string provider = Required(arguments, "provider");
+    string login = Required(arguments, "login");
+    string password = Required(arguments, "password");
+    string slug = Required(arguments, "tenant-slug");
+
+    string connectionString = $"Data Source={databasePath}";
+    var databaseOptions = new DbContextOptionsBuilder<VistaraDbContext>()
+        .UseSqlite(connectionString)
+        .Options;
+    DateTimeOffset now = new(2026, 8, 1, 12, 0, 0, TimeSpan.Zero);
+    Guid tenantId = Guid.CreateVersion7(now);
+    Guid userId = Guid.CreateVersion7(now.AddMilliseconds(1));
+
+    await using (var schema = new VistaraDbContext(
+                     databaseOptions,
+                     new FixedTenantScope(tenantId)))
+    {
+        await schema.Database.EnsureCreatedAsync();
+    }
+
+    await using var context = new VistaraDbContext(
+        databaseOptions,
+        new FixedTenantScope(tenantId));
+    context.Tenants.Add(new TenantRow
+    {
+        Id = tenantId,
+        TenantId = tenantId,
+        Slug = slug,
+        Name = "E2E hosted sign-in",
+        Status = TenantStatus.Active.ToString(),
+        CreatedAtUtc = now,
+        UpdatedAtUtc = now,
+        Version = 1,
+    });
+    context.Users.Add(new UserRow
+    {
+        Id = userId,
+        NormalizedEmail = login,
+        DisplayName = "E2E member",
+        Status = UserStatus.Active.ToString(),
+        CreatedAtUtc = now,
+        UpdatedAtUtc = now,
+        Version = 1,
+    });
+
+    // The password exists so one run can show that composing hosted sign-in
+    // leaves local sign-in exactly as it was. It is accepted only by the
+    // throwaway database this suite creates.
+    Guid localIdentityId = Guid.CreateVersion7(now.AddMilliseconds(2));
+    context.LocalIdentities.Add(new LocalIdentityRow
+    {
+        Id = localIdentityId,
+        UserId = userId,
+        NormalizedLogin = login,
+        LinkedAtUtc = now,
+    });
+    context.LocalCredentials.Add(new LocalCredentialRow
+    {
+        LocalIdentityId = localIdentityId,
+        UserId = userId,
+        PasswordHash = new Pbkdf2LocalPasswordHasher(100_000).Hash(password),
+        UpdatedAtUtc = now,
+        Version = 1,
+    });
+
+    // The directory identity is stored under the canonical key hosted sign-in
+    // resolves users by, so the member is found rather than provisioned.
+    context.ExternalIdentities.Add(new ExternalIdentityRow
+    {
+        Id = Guid.CreateVersion7(now.AddMilliseconds(3)),
+        UserId = userId,
+        Issuer = ExternalFirstOwnerCredential.CanonicalIssuer(
+            provider,
+            directoryTenantId),
+        Subject = ExternalFirstOwnerCredential.SubjectFor(objectId),
+        LinkedAtUtc = now,
+    });
+    context.TenantMemberships.Add(new TenantMembershipRow
+    {
+        TenantId = tenantId,
+        UserId = userId,
+        Role = TenantRole.TenantOwner.ToString(),
+        Status = MembershipStatus.Active.ToString(),
+        InvitedAtUtc = now,
+        JoinedAtUtc = now,
+        UpdatedAtUtc = now,
+        Version = 1,
+    });
+    context.QuotaUsage.Add(new QuotaUsageRow
+    {
+        TenantId = tenantId,
+        Version = 1,
+    });
+    await context.SaveChangesAsync();
 }
 
 static async Task<string> IssueApiKeyAsync(
