@@ -492,6 +492,17 @@ export_environment() {
 
 ENVIRONMENT_NAME=$(target_environment "$@")
 
+# azd supports exactly these output formats; a script that asks for another one
+# fails before its action runs, so the stand-in fails too.
+requested_format=$(flag_value --output "$@")
+case "$requested_format" in
+  ''|json|table|none|dotenv) ;;
+  *)
+    echo "ERROR: unsupported format '$requested_format'" >&2
+    exit 1
+    ;;
+esac
+
 case "\${1:-}" in
   version)
     printf 'azd version %s (commit deadbeef)\\n' "$(state_read azd_version 1.32.0)"
@@ -530,7 +541,10 @@ case "\${1:-}" in
         ;;
       get-values)
         file=$(environment_file "$ENVIRONMENT_NAME")
-        [ -f "$file" ] || exit 0
+        if [ ! -f "$file" ]; then
+          echo "ERROR: environment '$ENVIRONMENT_NAME' does not exist" >&2
+          exit 1
+        fi
         while IFS= read -r line; do
           case "$line" in
             *=*) printf '%s="%s"\\n' "\${line%%=*}" "\${line#*=}" ;;

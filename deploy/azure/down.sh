@@ -86,8 +86,11 @@ cd "$SCRIPT_DIR"
 # environment to local state, and everything up to the confirmation below has
 # to be readable without changing anything at all.
 if [ -n "$env_name" ]; then
-  known_environments=$(azd env list --output tsv 2>/dev/null | awk '{ print $1 }' | sed '/^$/d' || true)
-  if ! printf '%s\n' "$known_environments" | grep -qx "$env_name"; then
+  # Reading the environment's values is both the existence check and the only
+  # thing needed from it. Listing environments and matching names would mean
+  # parsing an output format, and `azd env select` would write the default
+  # environment to local state before the operator has agreed to anything.
+  if ! azd env get-values --environment "$env_name" >/dev/null 2>&1; then
     vistara_die "$VISTARA_EXIT_USAGE" "no azd environment named ${env_name}. List them with: azd env list"
   fi
   export AZURE_ENV_NAME="$env_name"
