@@ -88,6 +88,22 @@ if (!string.Equals(args[0], "serve", StringComparison.Ordinal))
 }
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args[1..]);
+
+// The suite is served over TLS on the loopback interface for every browser.
+// The session cookie and the hosted sign-in login handle are both __Host-
+// cookies, and WebKit — unlike Chromium and Gecko — declines to keep a Secure
+// cookie from http://127.0.0.1, so a plain-HTTP harness can only sign in on
+// two of the three engines. The certificate is generated for this process
+// alone; its private key never leaves memory and no trust store is touched.
+LoopbackTls.RequireHttpsUrls(builder.Configuration["urls"]);
+using X509Certificate2 serverCertificate = LoopbackTls.CreateCertificate();
+builder.WebHost.UseLoopbackHttps(serverCertificate);
+if (Environment.GetEnvironmentVariable(
+        LoopbackTls.PublishedCertificateVariable) is { Length: > 0 } publishPath)
+{
+    await LoopbackTls.PublishAsync(serverCertificate, publishPath);
+}
+
 builder.Services.AddDataProtection().UseEphemeralDataProtectionProvider();
 builder.Services.AddSingleton<
     ApiMedia.IMediaRuntimeDependencies,
@@ -108,13 +124,8 @@ builder.Services.AddVistaraPlatformSurface();
 if (Environment.GetEnvironmentVariable("VISTARA_E2E_OIDC_CERTIFICATE") is
     { Length: > 0 } trustedCertificatePath)
 {
-    string trustedCertificate;
-    using (X509Certificate2 pinned =
-        X509CertificateLoader.LoadCertificateFromFile(trustedCertificatePath))
-    {
-        trustedCertificate = pinned.GetCertHashString(HashAlgorithmName.SHA256);
-    }
-
+    string trustedCertificate =
+        LoopbackTls.ReadPublishedThumbprint(trustedCertificatePath);
     builder.Services.AddHttpClient(OidcHttpDefaults.HttpClientName)
         .ConfigurePrimaryHttpMessageHandler(() =>
         {
