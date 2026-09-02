@@ -26,9 +26,25 @@ import {
   UP_SCRIPT,
   WORKER_DIGEST,
   createSandbox,
+  interactiveRunsAvailable,
   run,
+  runInteractive,
   upArguments,
 } from './azure-bootstrap-harness.mjs';
+
+/** Commands that change something in Azure or in the recorded environment. */
+function mutatingCalls(sandbox) {
+  return sandbox.calls().filter((call) => {
+    const joined = call.join(' ');
+    if (call[0] === 'azd') {
+      return /\b(provision|deploy|down|env set|env new|env select)\b/.test(joined);
+    }
+    if (call[0] !== 'az') {
+      return false;
+    }
+    return /\b(create|delete|set|update|purge|register|start|import)\b/.test(joined);
+  });
+}
 
 /** Index of the first call to `tool` whose arguments contain every needle. */
 function indexOfCall(calls, tool, ...needles) {
@@ -727,28 +743,27 @@ test('--what-if previews the deployment and changes nothing', () => {
 
 test('a non-interactive run must name the first owner rather than infer it', () => {
   withSandbox('yes-without-owner', (sandbox) => {
-    const withoutOwner = [];
-    const original = upArguments();
-    for (let index = 0; index < original.length; index += 1) {
-      if (original[index] === '--owner-object-id') {
-        index += 1;
-        continue;
-      }
-      withoutOwner.push(original[index]);
-    }
-    const result = run(sandbox, UP_SCRIPT, withoutOwner);
+    const result = run(sandbox, UP_SCRIPT, withoutOption(upArguments(), '--owner-object-id'));
     assert.equal(result.status, 64, result.output);
     assert.match(result.output, /--yes requires --owner-object-id/);
   });
 });
 
-test('an interactive run refuses to guess when it has no terminal', () => {
+test('an interactive run refuses to guess when it has no terminal, having changed nothing', () => {
   withSandbox('no-terminal', (sandbox) => {
     const interactive = upArguments().filter((argument) => argument !== '--yes');
     const result = run(sandbox, UP_SCRIPT, interactive);
     assert.equal(result.status, 64, result.output);
     assert.match(result.output, /rerun with --yes/);
-    assert.equal(sandbox.callsFor('azd').filter((call) => call[1] === 'provision').length, 0);
+    assert.deepEqual(
+      mutatingCalls(sandbox).map((call) => call.join(' ')),
+      [],
+      'a run that was never agreed to changes nothing, locally or in Azure',
+    );
+    assert.ok(
+      !sandbox.calls().some((call) => call.join(' ').includes('account set')),
+      'not even the subscription the operator has selected in their own shell',
+    );
   });
 });
 
@@ -774,3 +789,49 @@ test('a malformed owner object ID or environment name is refused before any call
     assert.match(result.output, /--env-name must be/);
   });
 });
+
+
+test(
+  'a deployment the operator declines is never started',
+  { skip: interactiveRunsAvailable() ? false : 'script(1) is unavailable' },
+  () => {
+    withSandbox('up-declined', (sandbox) => {
+      const result = runInteractive(
+        sandbox,
+        UP_SCRIPT,
+        upArguments().filter((argument) => argument !== '--yes'),
+      );
+      assert.equal(result.status, 0, result.output);
+      assert.match(result.output, /Create or update this deployment\?/, 'the summary is confirmed first');
+      assert.match(result.output, /Nothing was changed\./);
+      assert.deepEqual(
+        mutatingCalls(sandbox).map((call) => call.join(' ')),
+        [],
+        'a declined deployment creates no environment, sets no value, and provisions nothing',
+      );
+    });
+  },
+);
+
+test(
+  'confirming the deployment but not the first owner starts nothing',
+  { skip: interactiveRunsAvailable() ? false : 'script(1) is unavailable' },
+  () => {
+    withSandbox('up-owner-declined', (sandbox) => {
+      // The pty delivers an empty answer, so the first question is already
+      // declined; the second one is only reachable through --yes, which is
+      // covered by the non-interactive tests. What matters here is that the
+      // owner is asked about separately at all.
+      const source = readFileSync(UP_SCRIPT, 'utf8');
+      assert.match(
+        source,
+        /vistara_confirm "Confirm \$\{owner_object_id\} as the first owner\?"/,
+        'the first owner is confirmed on its own, not folded into the summary',
+      );
+      assert.ok(
+        source.indexOf('as the first owner?') < source.indexOf('azd env select'),
+        'and before the environment is touched',
+      );
+    });
+  },
+);

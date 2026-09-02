@@ -130,6 +130,13 @@ case "\${1:-}" in
           echo "Please run 'az login' to setup account." >&2
           exit 1
         fi
+        requested=$(flag_value --subscription "$@")
+        if [ -n "$requested" ] \
+          && [ "$requested" != "$(state_read subscription_id ${SUBSCRIPTION_ID})" ] \
+          && [ ! -f "$FAKE_STATE/allow_subscription_switch" ]; then
+          echo "The subscription of '$requested' doesn't exist." >&2
+          exit 1
+        fi
         case "$query" in
           id) printf '%s\\n' "$(state_read subscription_id ${SUBSCRIPTION_ID})" ;;
           name) printf 'Scratch Subscription\\n' ;;
@@ -430,16 +437,32 @@ current_environment() {
   state_read current_env_name ''
 }
 
+# --environment NAME names an environment without selecting it, which is how
+# a script reads one before it has been given permission to change anything.
+target_environment() {
+  local previous=''
+  for argument in "$@"; do
+    case "$previous" in
+      --environment|-e)
+        printf '%s' "$argument"
+        return 0
+        ;;
+    esac
+    previous=$argument
+  done
+  current_environment
+}
+
 env_get() {
   local file
-  file=$(environment_file "$(current_environment)")
+  file=$(environment_file "$ENVIRONMENT_NAME")
   [ -f "$file" ] || return 1
   grep "^$1=" "$file" | tail -n 1 | sed "s/^$1=//"
 }
 
 env_set() {
   local file
-  file=$(environment_file "$(current_environment)")
+  file=$(environment_file "$ENVIRONMENT_NAME")
   touch "$file"
   grep -v "^$1=" "$file" >"$file.next" 2>/dev/null || true
   printf '%s=%s\\n' "$1" "$2" >>"$file.next"
@@ -458,7 +481,7 @@ merge_outputs() {
 
 export_environment() {
   local file line
-  file=$(environment_file "$(current_environment)")
+  file=$(environment_file "$ENVIRONMENT_NAME")
   [ -f "$file" ] || return 0
   while IFS= read -r line; do
     case "$line" in
@@ -466,6 +489,8 @@ export_environment() {
     esac
   done <"$file"
 }
+
+ENVIRONMENT_NAME=$(target_environment "$@")
 
 case "\${1:-}" in
   version)
@@ -504,7 +529,7 @@ case "\${1:-}" in
         exit 0
         ;;
       get-values)
-        file=$(environment_file "$(current_environment)")
+        file=$(environment_file "$ENVIRONMENT_NAME")
         [ -f "$file" ] || exit 0
         while IFS= read -r line; do
           case "$line" in
@@ -514,7 +539,11 @@ case "\${1:-}" in
         exit 0
         ;;
       list)
-        printf '%s\\n' "$(current_environment)"
+        for candidate in "$FAKE_STATE"/env-*.env; do
+          [ -f "$candidate" ] || continue
+          candidate=\${candidate##*/env-}
+          printf '%s\\tfalse\\tfalse\\n' "\${candidate%.env}"
+        done
         exit 0
         ;;
     esac
@@ -873,6 +902,58 @@ export function run(sandbox, script, argumentList, options = {}) {
     stderr: result.stderr ?? '',
     output: `${result.stdout ?? ''}${result.stderr ?? ''}`,
   };
+}
+
+/**
+ * Runs a script attached to a real terminal, so the confirmation prompts are
+ * reached instead of refused for want of one. Standard input is closed, which
+ * a prompt reads as an empty answer: the declined path, and the only
+ * interactive answer that can be delivered reliably through a pty.
+ */
+export function runInteractive(sandbox, script, argumentList, options = {}) {
+  const command = ['bash', script, ...argumentList];
+  const quoted = command.map((part) => `'${part.split("'").join(`'\''`)}'`).join(' ');
+  const scriptArguments =
+    process.platform === 'linux'
+      ? ['-qec', quoted, '/dev/null']
+      : ['-q', '/dev/null', ...command];
+
+  const result = spawnSync('script', scriptArguments, {
+    encoding: 'utf8',
+    cwd: options.cwd ?? REPOSITORY_ROOT,
+    // script(1) reads terminal settings from its own standard input, which a
+    // pipe cannot answer; /dev/null can, and the pty it then allocates for the
+    // child is what the prompts need.
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: options.timeout ?? 120_000,
+    env: {
+      PATH: `${sandbox.binDirectory}:/usr/bin:/bin:/usr/sbin:/sbin`,
+      HOME: sandbox.homeDirectory,
+      FAKE_STATE: sandbox.stateDirectory,
+      VISTARA_STATE_DIR: sandbox.runDirectory,
+      VISTARA_AZURE_DIR: AZURE_DIR,
+      LC_ALL: 'C',
+      TERM: 'dumb',
+      ...options.env,
+    },
+  });
+
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`.split('\r').join('');
+  return { status: result.status, output };
+}
+
+export function interactiveRunsAvailable() {
+  try {
+    execFileSync('script', ['-q', '/dev/null', 'true'], { stdio: 'ignore', timeout: 10_000 });
+    return true;
+  } catch {
+    try {
+      execFileSync('script', ['-qec', 'true', '/dev/null'], { stdio: 'ignore', timeout: 10_000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
 }
 
 /** The arguments `up.sh` needs to run without prompting. */

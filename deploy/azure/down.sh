@@ -82,11 +82,16 @@ fi
 
 cd "$SCRIPT_DIR"
 
+# The environment is named, never selected. `azd env select` writes the default
+# environment to local state, and everything up to the confirmation below has
+# to be readable without changing anything at all.
 if [ -n "$env_name" ]; then
-  if ! azd env select "$env_name" >/dev/null 2>&1; then
+  known_environments=$(azd env list --output tsv 2>/dev/null | awk '{ print $1 }' | sed '/^$/d' || true)
+  if ! printf '%s\n' "$known_environments" | grep -qx "$env_name"; then
     vistara_die "$VISTARA_EXIT_USAGE" "no azd environment named ${env_name}. List them with: azd env list"
   fi
   export AZURE_ENV_NAME="$env_name"
+  export VISTARA_AZD_ENVIRONMENT="$env_name"
 fi
 
 export VISTARA_STATE_DIR="${VISTARA_STATE_DIR:-${SCRIPT_DIR}/.azure/${env_name:-default}/.vistara}"
@@ -150,12 +155,18 @@ list_resources() {
 # Role assignments this bootstrap created
 #
 # `up.sh` grants the operator secret access on the vault so it can write the
-# API key pepper. Teardown gives it back in both modes.
+# API key pepper. Teardown gives it back in both modes — but only once the
+# operator has agreed to the teardown: removing an access grant from a
+# deployment that is still running is a change, and a run that is declined
+# makes none.
 # ---------------------------------------------------------------------------
 
 operator_object_id=$(vistara_env VISTARA_OPERATOR_OBJECT_ID)
 operator_scope=$(vistara_env VISTARA_OPERATOR_KEY_VAULT_ROLE_SCOPE)
-if [ -n "$operator_object_id" ] && [ -n "$operator_scope" ]; then
+
+remove_operator_role_assignment() {
+  [ -n "$operator_object_id" ] || return 0
+  [ -n "$operator_scope" ] || return 0
   case "$operator_scope" in
     "/subscriptions/${subscription_id}/resourceGroups/${resource_group}/"*)
       vistara_log "removing the operator '${VISTARA_KEY_VAULT_OPERATOR_ROLE}' assignment on the vault."
@@ -171,7 +182,7 @@ if [ -n "$operator_object_id" ] && [ -n "$operator_scope" ]; then
       vistara_warn "recorded role assignment scope ${operator_scope} is outside ${resource_group}; leaving it alone."
       ;;
   esac
-fi
+}
 
 # ---------------------------------------------------------------------------
 # Retaining teardown (default)
@@ -184,10 +195,25 @@ if [ "$delete_data" != '1' ]; then
   vistara_log '  kept:     PostgreSQL server, media storage account, Key Vault, budget'
   vistara_log ''
 
+  # Read the list first so the operator is agreeing to named resources rather
+  # than to a category.
+  for resource_type in \
+    Microsoft.App/containerApps \
+    Microsoft.App/jobs \
+    Microsoft.App/managedEnvironments \
+    Microsoft.OperationalInsights/workspaces; do
+    resource_ids=$(list_resources "$resource_type")
+    [ -n "$resource_ids" ] || continue
+    printf '%s\n' "$resource_ids" | sed 's/^/  /' >&2
+  done
+  vistara_log ''
+
   if ! vistara_confirm "Delete the compute for ${env_name}?"; then
     vistara_log 'Nothing was changed.'
     exit 0
   fi
+
+  remove_operator_role_assignment
 
   # Ordered so nothing is deleted while something else still depends on it.
   # Each type is deleted with its own command rather than a generic resource
@@ -281,6 +307,8 @@ if ! vistara_confirm_phrase "Delete all data for ${env_name}?" "$env_name"; then
   exit 0
 fi
 
+remove_operator_role_assignment
+
 locks=$(az lock list \
   --resource-group "$resource_group" \
   --subscription "$subscription_id" \
@@ -310,7 +338,7 @@ fi
 export VISTARA_DOWN_CONFIRMED=1
 
 vistara_step 'Deleting the environment'
-if ! azd down --force --purge; then
+if ! azd down --environment "$env_name" --force --purge; then
   vistara_error 'azd down did not finish.'
   vistara_error "Inspect what is left: az resource list --resource-group ${resource_group} --subscription ${subscription_id} --output table"
   vistara_die "$VISTARA_EXIT_PROVISION" 'teardown failed.'

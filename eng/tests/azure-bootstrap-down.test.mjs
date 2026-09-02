@@ -18,8 +18,31 @@ import {
   SUBSCRIPTION_ID,
   VAULT_NAME,
   createSandbox,
+  interactiveRunsAvailable,
   run,
+  runInteractive,
 } from './azure-bootstrap-harness.mjs';
+
+/**
+ * Every recorded command that changes something: a resource, a role
+ * assignment, a lock, the environment, or the deployment. A teardown that the
+ * operator has not agreed to must produce an empty list.
+ */
+function mutatingCalls(sandbox) {
+  return sandbox
+    .calls()
+    .filter((call) => {
+      const joined = call.join(' ');
+      if (call[0] === 'azd') {
+        return /\b(down|env set|env new|env select|provision|deploy)\b/.test(joined);
+      }
+      if (call[0] !== 'az') {
+        return false;
+      }
+      return /\b(create|delete|set|update|purge|register)\b/.test(joined);
+    })
+    .map((call) => call.slice(0, 4).join(' '));
+}
 
 const VAULT_ID =
   `/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}`
@@ -305,6 +328,7 @@ test('a bare azd down is refused while the data locks are in place', () => {
   });
 });
 
+
 test('the budget is read at the scope the template creates it', () => {
   withSandbox('down-budget-scope', (sandbox) => {
     const result = run(sandbox, DOWN_SCRIPT, ['--env-name', 'eval', '--yes']);
@@ -350,5 +374,84 @@ test('the subscription-scoped budget command is never used', () => {
         'az consumption budget show addresses a subscription budget and answers nothing for this one',
       );
     }
+  });
+});
+
+test('a declined teardown changes nothing and says so', { skip: interactiveRunsAvailable() ? false : 'script(1) is unavailable' }, () => {
+  withSandbox('down-declined-retain', (sandbox) => {
+    const result = runInteractive(sandbox, DOWN_SCRIPT, ['--env-name', 'eval']);
+    assert.equal(result.status, 0, result.output);
+    assert.match(result.output, /Nothing was changed\./);
+    assert.deepEqual(mutatingCalls(sandbox), [], 'not one command that changes anything');
+    assert.ok(!sandbox.has('role_assignment_deleted'), 'the operator keeps its access to a deployment that still exists');
+    assert.ok(!sandbox.has('deleted-resources.log'));
+    assert.ok(!sandbox.has('down_called'));
+    assert.equal(sandbox.environment('eval').VISTARA_DEPLOY_APPLICATIONS, 'true', 'the environment is untouched');
+  });
+});
+
+test('a declined data deletion changes nothing and says so', { skip: interactiveRunsAvailable() ? false : 'script(1) is unavailable' }, () => {
+  withSandbox('down-declined-delete', (sandbox) => {
+    const result = runInteractive(sandbox, DOWN_SCRIPT, ['--env-name', 'eval', '--delete-data']);
+    assert.equal(result.status, 0, result.output);
+    assert.match(result.output, /Type eval to continue/, 'the environment name has to be typed');
+    assert.match(result.output, /Nothing was changed\./);
+    assert.deepEqual(mutatingCalls(sandbox), [], 'an answer that was not the environment name deletes nothing');
+    assert.ok(!sandbox.has('deleted-locks.log'), 'the data locks stay on');
+    assert.ok(!sandbox.has('role_assignment_deleted'));
+    assert.equal(sandbox.environment('eval').VISTARA_BUDGET_START_DATE, '2026-09-01');
+  });
+});
+
+test('what the operator is agreeing to is listed before the question', { skip: interactiveRunsAvailable() ? false : 'script(1) is unavailable' }, () => {
+  withSandbox('down-plan-first', (sandbox) => {
+    const result = runInteractive(sandbox, DOWN_SCRIPT, ['--env-name', 'eval']);
+    assert.equal(result.status, 0, result.output);
+    const listed = result.output.indexOf('containerApps/ca-api-eval');
+    const asked = result.output.indexOf('Delete the compute for eval?');
+    assert.notEqual(listed, -1, 'the resources are named');
+    assert.notEqual(asked, -1, 'and then the question is asked');
+    assert.ok(listed < asked, 'named resources, then the question');
+  });
+});
+
+test('an accepted teardown mutates only after the confirmation, in order', () => {
+  withSandbox('down-accepted-order', (sandbox) => {
+    const result = run(sandbox, DOWN_SCRIPT, ['--env-name', 'eval', '--yes']);
+    assert.equal(result.status, 0, result.output);
+
+    assert.deepEqual(mutatingCalls(sandbox), [
+      'az role assignment delete',
+      'az containerapp delete --ids',
+      'az containerapp delete --ids',
+      'az containerapp job delete',
+      'az containerapp env delete',
+      'az monitor log-analytics workspace',
+      'azd env set VISTARA_DEPLOY_APPLICATIONS',
+    ]);
+
+    const calls = sandbox.calls().map((call) => call.join(' '));
+    const firstMutation = calls.findIndex((call) => call.includes('role assignment delete'));
+    const groupProof = calls.findIndex((call) => call.includes('group show'));
+    assert.ok(groupProof !== -1 && groupProof < firstMutation, 'the target is proved before anything is removed');
+    assert.ok(
+      !calls.some((call) => call.startsWith('azd env select')),
+      'reading an environment never selects it',
+    );
+  });
+});
+
+test('an accepted data deletion mutates only after the typed confirmation, in order', () => {
+  withSandbox('down-accepted-delete-order', (sandbox) => {
+    const result = run(sandbox, DOWN_SCRIPT, ['--env-name', 'eval', '--delete-data', '--yes']);
+    assert.equal(result.status, 0, result.output);
+
+    assert.deepEqual(mutatingCalls(sandbox).slice(0, 3), [
+      'az role assignment delete',
+      'az lock delete --ids',
+      'azd down --environment eval',
+    ]);
+    const down = sandbox.calls().find((call) => call[0] === 'azd' && call[1] === 'down');
+    assert.equal(down[down.indexOf('--environment') + 1], 'eval', 'the environment is named, not selected');
   });
 });

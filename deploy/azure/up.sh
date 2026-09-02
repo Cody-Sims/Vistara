@@ -197,22 +197,24 @@ account_json_id=$(printf '%s' "$account_json_id" | tr -d '\r\n')
 
 if [ -z "$subscription_id" ]; then
   subscription_id=$account_json_id
-elif [ "$subscription_id" != "$account_json_id" ]; then
-  vistara_log "switching the Azure CLI to subscription ${subscription_id}."
-  if ! az account set --subscription "$subscription_id" >/dev/null 2>&1; then
-    vistara_die "$VISTARA_EXIT_PERMISSION" "could not select subscription ${subscription_id}. Check: az account list --output table"
-  fi
 fi
 
-subscription_name=$(az account show --query name --output tsv 2>/dev/null | tr -d '\r\n' || true)
-signed_in_tenant=$(az account show --query tenantId --output tsv 2>/dev/null | tr -d '\r\n' || true)
+# Read the subscription by name rather than switching to it. Selecting a
+# subscription changes the operator's CLI for every other shell they have open,
+# and nothing should change until the summary below has been accepted.
+if ! subscription_name=$(az account show --subscription "$subscription_id" --query name --output tsv 2>/dev/null); then
+  vistara_die "$VISTARA_EXIT_PERMISSION" \
+    "subscription ${subscription_id} is not available to this sign-in. Check: az account list --output table"
+fi
+subscription_name=$(printf '%s' "$subscription_name" | tr -d '\r\n')
+signed_in_tenant=$(az account show --subscription "$subscription_id" --query tenantId --output tsv 2>/dev/null | tr -d '\r\n' || true)
 tenant_id=${tenant_id:-$signed_in_tenant}
 vistara_require_guid "$tenant_id" '--tenant-id'
 
 signed_in_object_id=$(az ad signed-in-user show --query id --output tsv 2>/dev/null | tr -d '\r\n' || true)
 signed_in_name=$(az ad signed-in-user show --query userPrincipalName --output tsv 2>/dev/null | tr -d '\r\n' || true)
 if [ -z "$signed_in_name" ]; then
-  signed_in_name=$(az account show --query user.name --output tsv 2>/dev/null | tr -d '\r\n' || true)
+  signed_in_name=$(az account show --subscription "$subscription_id" --query user.name --output tsv 2>/dev/null | tr -d '\r\n' || true)
 fi
 
 if [ -z "$owner_object_id" ]; then
@@ -414,10 +416,20 @@ if [ "$what_if" != '1' ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# azd environment
+# From here on the run changes things
 # ---------------------------------------------------------------------------
 
 cd "$SCRIPT_DIR"
+
+# The CLI is pointed at the subscription now, after the confirmation, because
+# the preflight hook refuses a deployment whose active subscription is not the
+# one the environment provisions into.
+if [ "$subscription_id" != "$account_json_id" ]; then
+  vistara_log "switching the Azure CLI to subscription ${subscription_id}."
+  if ! az account set --subscription "$subscription_id" >/dev/null 2>&1; then
+    vistara_die "$VISTARA_EXIT_PERMISSION" "could not select subscription ${subscription_id}. Check: az account list --output table"
+  fi
+fi
 
 if azd env select "$env_name" >/dev/null 2>&1; then
   vistara_log "using the existing azd environment ${env_name}."

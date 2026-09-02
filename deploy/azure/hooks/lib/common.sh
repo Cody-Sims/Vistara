@@ -187,7 +187,11 @@ vistara_env() {
     return 0
   fi
   if vistara_have_command azd; then
-    value=$(azd env get-value "$name" 2>/dev/null || true)
+    if [ -n "${VISTARA_AZD_ENVIRONMENT:-}" ]; then
+      value=$(azd env get-value "$name" --environment "$VISTARA_AZD_ENVIRONMENT" 2>/dev/null || true)
+    else
+      value=$(azd env get-value "$name" 2>/dev/null || true)
+    fi
     value=$(printf '%s' "$value" | tr -d '\r\n')
     case "$value" in
       ERROR*|*'not found'*) value='' ;;
@@ -196,6 +200,18 @@ vistara_env() {
     return 0
   fi
   printf ''
+}
+
+# Reads the selected environment, or the one named by VISTARA_AZD_ENVIRONMENT.
+# Naming it explicitly is how a script reads an environment without selecting
+# it: selection is a change to local state, and a run that may still be
+# declined should not be making changes of any kind.
+vistara_azd_env_values() {
+  if [ -n "${VISTARA_AZD_ENVIRONMENT:-}" ]; then
+    azd env get-values --environment "$VISTARA_AZD_ENVIRONMENT" 2>/dev/null || true
+  else
+    azd env get-values 2>/dev/null || true
+  fi
 }
 
 # Loads every value from the selected `azd` environment into this process.
@@ -224,14 +240,18 @@ vistara_load_env() {
       export "${key}=${value}"
     fi
   done <<EOF
-$(azd env get-values 2>/dev/null || true)
+$(vistara_azd_env_values)
 EOF
 }
 
 vistara_azd_env_set() {
   local name=$1
   local value=$2
-  azd env set "$name" "$value" >/dev/null
+  if [ -n "${VISTARA_AZD_ENVIRONMENT:-}" ]; then
+    azd env set "$name" "$value" --environment "$VISTARA_AZD_ENVIRONMENT" >/dev/null
+  else
+    azd env set "$name" "$value" >/dev/null
+  fi
   export "${name}=${value}"
 }
 
@@ -240,7 +260,7 @@ vistara_azd_env_set() {
 # teardown that has already deleted the resources.
 vistara_azd_env_clear() {
   local name=$1
-  if ! azd env set "$name" '' >/dev/null 2>&1; then
+  if ! vistara_azd_env_set "$name" '' >/dev/null 2>&1; then
     vistara_warn "could not clear ${name} in the azd environment; clear it with: azd env set ${name} \"\""
     return 0
   fi
