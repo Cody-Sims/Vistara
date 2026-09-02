@@ -228,6 +228,7 @@ public sealed class ApiHealthWiringTests
                 options.ConnectionString = connectionString;
             });
             services.AddVistaraMedia(configuration);
+            services.AddSingleton(HealthEvaluationOptions.Unbounded);
             services.AddVistaraApiHealth();
             await using ServiceProvider provider = services.BuildServiceProvider();
             await using AsyncServiceScope scope = provider.CreateAsyncScope();
