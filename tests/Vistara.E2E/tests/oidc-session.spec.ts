@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { signInWithPassword } from '../support/session.js';
 import { readRuntimeState } from '../support/state.js';
 
 const runtime = readRuntimeState();
@@ -13,13 +14,6 @@ const hostedFailure = 'Signing in with your identity provider did not finish.';
 const signedOutLocation = new RegExp(
   `^${oidc.baseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/login(\\?.*)?$`,
 );
-
-/**
- * The stub identity provider presents a self-signed certificate for the
- * loopback address. It is trusted for this suite only, which is the same
- * decision the API makes when it pins that one certificate.
- */
-test.use({ ignoreHTTPSErrors: true });
 
 /**
  * Hosted sign-in as a visitor actually experiences it: leaving Vistara for
@@ -180,10 +174,7 @@ test.describe('hosted sign-in', () => {
   test('signs the same member in with their Vistara password', async ({
     page,
   }) => {
-    await page.goto(`${oidc.baseUrl}/login`);
-    await page.getByLabel('Email address or user name').fill(oidc.login);
-    await page.getByLabel('Password').fill(oidc.password);
-    await page.getByRole('button', { name: 'Sign in' }).click();
+    await signInWithPassword(page, oidc.baseUrl, oidc);
 
     await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
     expect(

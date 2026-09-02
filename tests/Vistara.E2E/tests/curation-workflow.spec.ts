@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { expect, test } from '@playwright/test';
 import { fixturePath } from '../support/paths.js';
+import { signInWithPassword } from '../support/session.js';
 import { readRuntimeState } from '../support/state.js';
 
 const runtime = readRuntimeState();
@@ -38,10 +39,7 @@ test.describe('cookie session curation', () => {
       }
     });
 
-    await page.goto(`${runtime.baseUrl}/login`);
-    await page.getByLabel('Email address or user name').fill(seeded.login);
-    await page.getByLabel('Password').fill(seeded.password);
-    await page.getByRole('button', { name: 'Sign in' }).click();
+    await signInWithPassword(page, runtime.baseUrl, seeded);
     await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
 
     const title = `curate-${browserName}.png`;
