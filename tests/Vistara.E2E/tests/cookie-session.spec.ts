@@ -74,9 +74,12 @@ test.describe('cookie session mutations', () => {
     const albumName = `Cookie ${browserName}`;
     await page.getByLabel('Album name').fill(albumName);
     await page.getByRole('button', { name: 'Create album' }).click();
-    await expect(albumsRegion.getByRole('status')).toHaveText(
-      `${albumName} was created.`,
-    );
+    // Creating an album refetches the list, and the region announces that
+    // through a live status of its own, so the notice is asked for by the name
+    // it announces rather than by being the region's only status.
+    await expect(
+      albumsRegion.getByRole('status').filter({ hasText: albumName }),
+    ).toHaveText(`${albumName} was created.`);
     await expect
       .poll(() => mutations.find((call) => call.path === '/api/v1/albums'))
       .toMatchObject({ method: 'POST', status: 201 });

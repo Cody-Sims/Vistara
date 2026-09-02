@@ -173,9 +173,12 @@ test.describe('cookie session curation', () => {
     const trashed = page.getByRole('article', { name: title });
     await expect(trashed).toBeVisible();
     await trashed.getByRole('button', { name: 'Undo deletion' }).click();
-    await expect(trashRegion.getByRole('status')).toHaveText(
-      'Restore queued for 1 item.',
-    );
+    // The region announces its own loading through a live status of its
+    // own, so the notice is asked for by what it says rather than by being
+    // the region's only status.
+    await expect(
+      trashRegion.getByRole('status').filter({ hasText: 'Restore queued' }),
+    ).toHaveText('Restore queued for 1 item.');
 
     // The restore is a job, so the library is read again until the image is
     // back where the walk started.

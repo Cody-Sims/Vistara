@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { signInWithPassword } from '../support/session.js';
+import { openSignInPage, signInWithPassword } from '../support/session.js';
 import { readRuntimeState } from '../support/state.js';
 
 const runtime = readRuntimeState();
@@ -165,7 +165,11 @@ test.describe('hosted sign-in', () => {
     // The workspace now has an owner, so the same identity signing in again is
     // an ordinary member rather than a second bootstrap.
     await signOutFromAccountMenu(page);
-    await page.goto(`${oidc.baseUrl}/login`);
+    // Signing out of a hosted session lands on the sign-in page by way of the
+    // provider, and the last hop of that chain is still settling. Navigating
+    // into an in-flight navigation interrupts it rather than waits for it.
+    await page.waitForLoadState('networkidle');
+    await openSignInPage(page, oidc.baseUrl);
     await consentAs(page, { objectId: oidc.allowedOwnerObjectId });
     await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
   });
