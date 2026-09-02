@@ -376,6 +376,33 @@ vistara_confirm_phrase() {
   [ "$reply" = "$expected" ]
 }
 
+# The three managed-identity PostgreSQL roles are created by connecting to the
+# server and calling a function on it. Azure exposes no other route to that —
+# no ARM resource, no CLI command — so a machine with neither a PostgreSQL
+# client nor a container runtime cannot finish a deployment, however much of it
+# has already been created.
+#
+# Which is why this is asked before anything is created rather than at the step
+# that needs it: finding out after a provisioning pass costs the operator the
+# wait, and leaves them with half a deployment and a tool to go and install.
+vistara_have_postgres_client() {
+  vistara_have_command psql || vistara_have_command docker
+}
+
+vistara_require_postgres_client() {
+  local context=$1
+  if vistara_have_postgres_client; then
+    return 0
+  fi
+  vistara_error 'neither psql nor docker is available.'
+  vistara_error "${context} has to connect to PostgreSQL to create the three managed-identity roles, and Azure offers no server-side way to do it instead."
+  vistara_error 'Install one of these and rerun:'
+  vistara_error '  macOS   brew install libpq && brew link --force libpq'
+  vistara_error '  Debian  sudo apt-get install postgresql-client'
+  vistara_error '  Docker  any container runtime; the bootstrap runs psql in a container instead'
+  vistara_die "$VISTARA_EXIT_MISSING_TOOL" 'a PostgreSQL client is required.'
+}
+
 vistara_seconds() {
   date +%s
 }

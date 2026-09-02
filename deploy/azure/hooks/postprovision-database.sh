@@ -55,15 +55,15 @@ fi
 # A client that can speak to PostgreSQL
 # ---------------------------------------------------------------------------
 
-psql_mode=''
-if vistara_have_command psql; then
-  psql_mode='local'
-elif vistara_have_command docker; then
+# The preflight already refused a run that could not get here, so this is the
+# defensive half of that check: it costs nothing and it is what makes the step
+# correct on its own, however it was reached.
+vistara_require_postgres_client 'creating the database roles'
+
+psql_mode='local'
+if ! vistara_have_command psql; then
   psql_mode='docker'
   vistara_log 'psql is not installed; running the bootstrap SQL through a container instead.'
-else
-  vistara_die "$VISTARA_EXIT_MISSING_TOOL" \
-    'neither psql nor docker is available. Install the PostgreSQL client (brew install libpq, apt install postgresql-client) or Docker, then rerun up.sh.'
 fi
 
 # ---------------------------------------------------------------------------

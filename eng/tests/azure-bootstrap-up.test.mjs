@@ -18,14 +18,17 @@ import {
   API_DIGEST,
   APP_CLIENT_ID,
   API_PRINCIPAL_ID,
+  MIGRATE_PRINCIPAL_ID,
   MIGRATION_DIGEST,
   PEPPER_MARKER,
+  POSTGRES_HOST,
   SERVICE_API_URI,
   SIGNED_IN_OBJECT_ID,
   SUBSCRIPTION_ID,
   TENANT_ID,
   UP_SCRIPT,
   WORKER_DIGEST,
+  WORKER_PRINCIPAL_ID,
   createSandbox,
   interactiveRunsAvailable,
   run,
@@ -700,6 +703,107 @@ test('the bootstrap SQL creates the three principals with the five-argument func
     assert.ok(invocation.includes('--set=migrator_role=vistara_migrator'));
     assert.ok(invocation.includes(`--set=api_object_id=${API_PRINCIPAL_ID}`));
     assert.ok(invocation.includes('sslmode=verify-full'), 'the operator connection verifies the server');
+  });
+});
+
+test('a machine that cannot reach PostgreSQL is turned away before anything is created', () => {
+  withSandbox('no-postgres-client', (sandbox) => {
+    sandbox.removeFake('psql');
+    sandbox.removeFake('docker');
+    const result = run(sandbox, UP_SCRIPT, upArguments());
+
+    assert.equal(result.status, 69, result.output);
+    assert.match(result.output, /neither psql nor docker is available/);
+    assert.match(result.output, /brew install libpq/, 'and how to get one');
+    assert.match(result.output, /apt-get install postgresql-client/);
+    assert.deepEqual(
+      mutatingCalls(sandbox).map((call) => call.join(' ')),
+      [],
+      'the operator is not left with half a deployment and a tool to go and install',
+    );
+    assert.equal(
+      sandbox.callsFor('azd').filter((call) => call[1] === 'provision').length,
+      0,
+      'nothing is provisioned',
+    );
+  });
+});
+
+test('the preflight hook turns the same run away, however it was started', () => {
+  withSandbox('no-postgres-client-hook', (sandbox) => {
+    // `azd provision` and `azd up` reach the hook without the wrapper.
+    sandbox.removeFake('psql');
+    sandbox.removeFake('docker');
+    const hook = resolve(AZURE_DIR, 'hooks/preprovision-preflight.sh');
+    const result = run(sandbox, hook, [], {
+      env: {
+        AZURE_ENV_NAME: 'eval',
+        AZURE_LOCATION: 'eastus',
+        AZURE_SUBSCRIPTION_ID: SUBSCRIPTION_ID,
+        VISTARA_API_IMAGE: `ghcr.io/cody-sims/vistara-api@${API_DIGEST}`,
+        VISTARA_WORKER_IMAGE: `ghcr.io/cody-sims/vistara-worker@${WORKER_DIGEST}`,
+        VISTARA_MIGRATION_IMAGE: `ghcr.io/cody-sims/vistara-migrations@${MIGRATION_DIGEST}`,
+        VISTARA_FIRST_OWNER_OBJECT_ID: SIGNED_IN_OBJECT_ID,
+        VISTARA_POSTGRES_ADMIN_OBJECT_ID: SIGNED_IN_OBJECT_ID,
+        VISTARA_POSTGRES_ADMIN_PRINCIPAL_NAME: 'operator@example.com',
+        VISTARA_BUDGET_START_DATE: '2026-09-01',
+      },
+    });
+    assert.equal(result.status, 69, result.output);
+    assert.match(result.output, /neither psql nor docker is available/);
+  });
+});
+
+test('either client on its own is enough', () => {
+  withSandbox('psql-only', (sandbox) => {
+    sandbox.removeFake('docker');
+    const result = run(sandbox, UP_SCRIPT, upArguments());
+    assert.equal(result.status, 0, result.output);
+    assert.equal(sandbox.callsFor('psql').length, 1, 'the local client did the work');
+  });
+
+  withSandbox('docker-only', (sandbox) => {
+    sandbox.removeFake('psql');
+    const result = run(sandbox, UP_SCRIPT, upArguments());
+    assert.equal(result.status, 0, result.output);
+    assert.equal(sandbox.callsFor('docker').length, 1, 'the container did the work');
+  });
+});
+
+test('a preview needs no PostgreSQL client, because it reads and stops', () => {
+  withSandbox('preview-no-client', (sandbox) => {
+    sandbox.removeFake('psql');
+    sandbox.removeFake('docker');
+    const result = run(sandbox, UP_SCRIPT, upArguments(['--what-if']));
+
+    assert.equal(result.status, 0, result.output);
+    assert.ok(
+      sandbox.calls().some((call) => call[0] === 'az' && call[1] === 'deployment'),
+      'the preview still runs',
+    );
+    assert.deepEqual(mutatingCalls(sandbox).map((call) => call.join(' ')), []);
+  });
+});
+
+test('an environment whose roles already exist does not need a client to redeploy', () => {
+  withSandbox('recorded-roles-no-client', (sandbox) => {
+    // The database step skips itself when its recorded signature still
+    // matches, so requiring a client for that run would refuse a rerun that
+    // never needed one.
+    const signature = [POSTGRES_HOST, API_PRINCIPAL_ID, WORKER_PRINCIPAL_ID, MIGRATE_PRINCIPAL_ID].join('|');
+    sandbox.state('current_env_name', 'eval');
+    sandbox.state(
+      'env-eval.env',
+      `AZURE_ENV_NAME=eval
+VISTARA_DATABASE_BOOTSTRAP_STATE=${signature}
+`,
+    );
+    sandbox.removeFake('psql');
+    sandbox.removeFake('docker');
+
+    const result = run(sandbox, UP_SCRIPT, upArguments());
+    assert.equal(result.status, 0, result.output);
+    assert.match(result.output, /already in place/, 'and the step really did skip');
   });
 });
 

@@ -64,6 +64,14 @@ fi
 
 vistara_log "az ${az_version}, azd ${azd_version}, bicep ${bicep_version}"
 
+# Repeated here rather than left to `up.sh`, because `azd provision` and
+# `azd up` reach this hook without going through the wrapper. An environment
+# whose roles are already recorded as created does not need one: that step
+# skips itself.
+if [ -z "$(vistara_env VISTARA_DATABASE_BOOTSTRAP_STATE)" ]; then
+  vistara_require_postgres_client 'provisioning'
+fi
+
 # ---------------------------------------------------------------------------
 # Sign-in and subscription
 # ---------------------------------------------------------------------------

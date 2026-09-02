@@ -195,6 +195,15 @@ if [ "${VISTARA_NO_OPEN:-0}" != '1' ] \
   export VISTARA_NO_OPEN=1
 fi
 
+# A PostgreSQL client is needed to finish a deployment, so it is required
+# before one is offered — ahead of the confirmation, and therefore ahead of
+# anything this run creates. Two runs do not need it: a preview, which only
+# reads, and a rerun of an environment whose roles are already recorded as
+# created, which skips the step that would use it.
+if [ "$what_if" != '1' ] && [ -z "$(vistara_env VISTARA_DATABASE_BOOTSTRAP_STATE)" ]; then
+  vistara_require_postgres_client 'the deployment'
+fi
+
 if ! account_json_id=$(az account show --query id --output tsv 2>/dev/null); then
   vistara_die "$VISTARA_EXIT_PERMISSION" 'the Azure CLI is not signed in. Run: az login'
 fi
