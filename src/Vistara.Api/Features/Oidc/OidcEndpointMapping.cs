@@ -17,6 +17,10 @@ namespace Vistara.Api.Features.Oidc;
 /// A deployment with no configured provider maps nothing at all. There is no
 /// reply URL registered with anyone, no visitor can start a sign-in, and the
 /// smallest anonymous surface is the one that does not exist.
+///
+/// Relying-party initiated sign-out is mapped alongside them but is not one of
+/// them: it is a POST, it is authenticated by the browser session it revokes,
+/// and it is covered by the antiforgery policy.
 /// </summary>
 public static class OidcEndpointMapping
 {
@@ -50,14 +54,23 @@ public static class OidcEndpointMapping
                         OidcRoutes.EntraProviderId,
                         cancellationToken))
             .AllowAnonymous();
+        endpoints.MapPost(
+                OidcRoutes.SignOutPathTemplate,
+                (HttpContext context, string providerId, CancellationToken cancellationToken) =>
+                    OidcAuthenticationEndpoint.SignOutAsync(
+                        context,
+                        context.RequestServices.GetRequiredService<IOidcSignOutPort>(),
+                        Cookies(context),
+                        providerId,
+                        cancellationToken));
+
+        // Deliberately not anonymous-listed and deliberately inert: see
+        // OidcAuthenticationEndpoint.FrontChannelLogoutAsync. It answers an
+        // unauthenticated cross-site GET, so it must be reachable without a
+        // credential, but it changes nothing.
         endpoints.MapGet(
                 OidcRoutes.FrontChannelLogoutPath,
-                (HttpContext context, CancellationToken cancellationToken) =>
-                    OidcAuthenticationEndpoint.FrontChannelLogoutAsync(
-                        context,
-                        context.RequestServices.GetRequiredService<IOidcLogoutPort>(),
-                        Cookies(context),
-                        cancellationToken))
+                OidcAuthenticationEndpoint.FrontChannelLogoutAsync)
             .AllowAnonymous();
         endpoints.MapGet(
                 OidcRoutes.SignedOutPath,

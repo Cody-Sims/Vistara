@@ -567,12 +567,87 @@ public sealed class OidcSignInRuntimeTests
     }
 
     /// <summary>
-    /// Front-channel sign-out arrives as an unauthenticated cross-site GET, so
-    /// it can only revoke. Repeating it is a no-op and it never reports whether
-    /// a session existed.
+    /// Entra drives front-channel sign-out as a cross-site GET inside an
+    /// iframe. The Vistara session cookie is SameSite=Lax, so it is not
+    /// attached to that request and the endpoint has neither a session to
+    /// revoke nor a way to learn which one to revoke. It must therefore leave
+    /// every session exactly as it found it.
     /// </summary>
     [Fact]
-    public async Task Front_channel_logout_revokes_the_session_and_repeats_safely()
+    public async Task Front_channel_logout_leaves_every_session_alone()
+    {
+        await using OidcSignInHost host = await OidcSignInHost.CreateAsync();
+        Guid tenantId = await host.ProvisionLocalOwnerAsync();
+        Guid userId = await host.ReadOwnerUserIdAsync(tenantId);
+        await host.LinkDirectoryIdentityAsync(tenantId, userId, MemberObjectId);
+        string session = Assert.IsType<string>(
+            (await host.SignInAsync(MemberObjectId))
+                .CookieValue(CookieAuthOptions.ProductionCookieName));
+        int liveBefore = await host.CountLiveSessionsAsync();
+
+        TestResponse response = await host.FrontChannelLogoutAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(string.Empty, response.Body);
+        Assert.Empty(response.SetCookies);
+        Assert.Equal(liveBefore, await host.CountLiveSessionsAsync());
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await host.GetCurrentUserAsync(session)).StatusCode);
+    }
+
+    /// <summary>
+    /// The obvious way to make an iframe sign-out "work" is to accept a
+    /// session identifier from the query string. That would be an
+    /// unauthenticated revocation oracle for any session an attacker can
+    /// name, so nothing in the request may influence any state.
+    /// </summary>
+    [Fact]
+    public async Task Front_channel_logout_cannot_revoke_a_named_session()
+    {
+        await using OidcSignInHost host = await OidcSignInHost.CreateAsync();
+        Guid tenantId = await host.ProvisionLocalOwnerAsync();
+        Guid userId = await host.ReadOwnerUserIdAsync(tenantId);
+        await host.LinkDirectoryIdentityAsync(tenantId, userId, MemberObjectId);
+        string session = Assert.IsType<string>(
+            (await host.SignInAsync(MemberObjectId))
+                .CookieValue(CookieAuthOptions.ProductionCookieName));
+        int liveBefore = await host.CountLiveSessionsAsync();
+
+        foreach (string query in new[]
+        {
+            $"?sid={Uri.EscapeDataString(session)}",
+            $"?session={Uri.EscapeDataString(session)}",
+            $"?token={Uri.EscapeDataString(session)}",
+            "?sid=00000000-0000-0000-0000-000000000000&iss=https%3A%2F%2Fattacker.example",
+        })
+        {
+            TestResponse response = await host.FrontChannelLogoutAsync(query);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(string.Empty, response.Body);
+            Assert.Empty(response.SetCookies);
+        }
+
+        Assert.Equal(liveBefore, await host.CountLiveSessionsAsync());
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await host.GetCurrentUserAsync(session)).StatusCode);
+        Assert.DoesNotContain(
+            "sign",
+            string.Join("\n", host.AuditRecords.Where(
+                record => record.Contains("logout", StringComparison.OrdinalIgnoreCase))),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Revocation lives where the session cookie actually arrives: a same-site
+    /// POST covered by the antiforgery policy. It revokes first and only then
+    /// reports where the provider session can be ended, and that URL is built
+    /// from discovered metadata and the registered reply URL alone.
+    /// </summary>
+    [Fact]
+    public async Task Relying_party_sign_out_revokes_then_points_at_the_provider()
     {
         await using OidcSignInHost host = await OidcSignInHost.CreateAsync();
         Guid tenantId = await host.ProvisionLocalOwnerAsync();
@@ -582,17 +657,73 @@ public sealed class OidcSignInRuntimeTests
             (await host.SignInAsync(MemberObjectId))
                 .CookieValue(CookieAuthOptions.ProductionCookieName));
 
-        TestResponse first = await host.FrontChannelLogoutAsync(session);
-        TestResponse second = await host.FrontChannelLogoutAsync(session);
-        TestResponse anonymous = await host.FrontChannelLogoutAsync(null);
+        TestResponse response = await host.SignOutAsync(session);
 
-        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, anonymous.StatusCode);
-        Assert.Equal(string.Empty, first.Body);
-        Assert.Equal(string.Empty, second.Body);
-        Assert.Equal(string.Empty, anonymous.Body);
-        Assert.True(first.ClearsCookie(CookieAuthOptions.ProductionCookieName));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(response.ClearsCookie(CookieAuthOptions.ProductionCookieName));
+        Assert.Equal(
+            HttpStatusCode.Unauthorized,
+            (await host.GetCurrentUserAsync(session)).StatusCode);
+
+        string endSessionUrl = Assert.IsType<string>(
+            response.Json().GetProperty("endSessionUrl").GetString());
+        var parsed = new Uri(endSessionUrl);
+        Assert.Equal(host.IdentityProvider.Authority.Host, parsed.Host);
+        Assert.Contains(
+            Uri.EscapeDataString(
+                $"https://{OidcSignInHost.ApplicationHost}/api/v1/auth/oidc/entra/signed-out"),
+            parsed.Query,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(session, endSessionUrl, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Sign-out acts on the session the caller presents, so an anonymous or
+    /// forged cross-site POST has nothing to act on and learns nothing.
+    /// </summary>
+    [Fact]
+    public async Task Relying_party_sign_out_refuses_a_caller_with_no_session()
+    {
+        await using OidcSignInHost host = await OidcSignInHost.CreateAsync();
+        Guid tenantId = await host.ProvisionLocalOwnerAsync();
+        Guid userId = await host.ReadOwnerUserIdAsync(tenantId);
+        await host.LinkDirectoryIdentityAsync(tenantId, userId, MemberObjectId);
+        string session = Assert.IsType<string>(
+            (await host.SignInAsync(MemberObjectId))
+                .CookieValue(CookieAuthOptions.ProductionCookieName));
+        int liveBefore = await host.CountLiveSessionsAsync();
+
+        TestResponse anonymous = await host.SendAsync(
+            "POST",
+            "/api/v1/auth/oidc/entra/sign-out");
+        TestResponse forged = await host.SignOutAsync(session, csrfToken: "not-the-token");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, forged.StatusCode);
+        Assert.Equal(liveBefore, await host.CountLiveSessionsAsync());
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await host.GetCurrentUserAsync(session)).StatusCode);
+    }
+
+    /// <summary>
+    /// Local password sign-out is unchanged and remains the revocation path a
+    /// deployment without hosted sign-in relies on.
+    /// </summary>
+    [Fact]
+    public async Task Local_logout_still_revokes_the_session()
+    {
+        await using OidcSignInHost host = await OidcSignInHost.CreateAsync();
+        await host.ProvisionLocalOwnerAsync();
+        string session = await host.LoginLocallyAsync("local-owner@example.test");
+
+        TestResponse response = await host.SendAsync(
+            "POST",
+            "/api/v1/auth/logout",
+            sessionCookie: session);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.True(response.ClearsCookie(CookieAuthOptions.ProductionCookieName));
         Assert.Equal(
             HttpStatusCode.Unauthorized,
             (await host.GetCurrentUserAsync(session)).StatusCode);

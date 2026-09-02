@@ -96,3 +96,12 @@ public sealed record UserPreferencesResponse(
     [property: JsonPropertyName("locale")] string? Locale,
     [property: JsonPropertyName("timeZone")] string? TimeZone,
     [property: JsonPropertyName("version")] long Version);
+
+/// <summary>
+/// Where the browser may end the provider session after Vistara has already
+/// revoked its own. Null when the provider publishes no end-session endpoint
+/// or the deployment registered no post-logout reply URL, in which case the
+/// local sign-out is simply complete.
+/// </summary>
+public sealed record SignOutResponse(
+    [property: JsonPropertyName("endSessionUrl")] string? EndSessionUrl);

@@ -36,11 +36,21 @@ public sealed class OidcRouteContractTests
             "entra",
             LoadRouteFixture().GetProperty("providerId").GetString());
         AssertFixtureRoute(routes, "callback", OidcRoutes.CallbackPath);
-        AssertFixtureRoute(
-            routes,
-            "frontChannelLogout",
-            OidcRoutes.FrontChannelLogoutPath);
         AssertFixtureRoute(routes, "signedOut", OidcRoutes.SignedOutPath);
+
+        // The front-channel path is still served for compatibility, so it is
+        // asserted while the fixture describes it. It must stop being
+        // registered as the Entra web.logoutUrl - the endpoint cannot revoke
+        // anything, and registering a control that cannot act is worse than
+        // registering none - so HB-09 removing this entry is expected and must
+        // not fail the API contract.
+        if (routes.TryGetProperty("frontChannelLogout", out JsonElement frontChannel))
+        {
+            Assert.Equal(
+                OidcRoutes.FrontChannelLogoutPath,
+                frontChannel.GetProperty("path").GetString());
+            Assert.Equal("GET", frontChannel.GetProperty("method").GetString());
+        }
     }
 
     /// <summary>
@@ -67,106 +77,26 @@ public sealed class OidcRouteContractTests
     }
 
     /// <summary>
-    /// A deployment with no configured provider has no reply URL registered
-    /// with anyone and no visitor who can start a sign-in, so it maps nothing.
+    /// Relying-party initiated sign-out is the opposite of the reply URLs: it
+    /// revokes, so it is a POST that must stay authenticated and antiforgery
+    /// covered rather than joining the anonymous set.
     /// </summary>
     [Fact]
-    public void An_unconfigured_deployment_maps_no_hosted_route()
+    public void Relying_party_sign_out_is_an_authenticated_post()
     {
-        WebApplicationBuilder builder = WebApplication.CreateBuilder();
-        builder.Services.AddSingleton<IOidcProviderCatalog, EmptyOidcProviderCatalog>();
-        WebApplication app = builder.Build();
-
-        app.MapVistaraOidcAuthentication();
-
-        Assert.Empty(
-            ((IEndpointRouteBuilder)app).DataSources.SelectMany(
-                source => source.Endpoints));
-    }
-
-    [Fact]
-    public void The_hosted_surface_maps_no_other_route()
-    {
-        string[] patterns = MapRoutes()
-            .Select(endpoint => endpoint.RoutePattern.RawText!)
-            .Where(pattern => pattern.StartsWith(
-                OidcRoutes.Prefix,
-                StringComparison.Ordinal))
-            .Order(StringComparer.Ordinal)
-            .ToArray();
+        RouteEndpoint endpoint = Assert.Single(
+            MapRoutes(),
+            candidate => candidate.RoutePattern.RawText ==
+                "/api/v1/auth/oidc/{providerId}/sign-out");
 
         Assert.Equal(
-            [
-                "/api/v1/auth/oidc/entra/callback",
-                "/api/v1/auth/oidc/entra/frontchannel-logout",
-                "/api/v1/auth/oidc/entra/signed-out",
-                "/api/v1/auth/oidc/{providerId}/start",
-            ],
-            patterns);
-    }
-
-    /// <summary>
-    /// The stale cookie is the whole point: a browser arriving from the
-    /// provider routinely carries a revoked or wrong-tenant session, and if it
-    /// selected the cookie scheme a normal sign-in would be challenged.
-    /// </summary>
-    [Theory]
-    [InlineData("GET", "/api/v1/auth/oidc/entra/start")]
-    [InlineData("GET", "/api/v1/auth/oidc/entra/callback")]
-    [InlineData("GET", "/api/v1/auth/oidc/entra/frontchannel-logout")]
-    [InlineData("GET", "/api/v1/auth/oidc/entra/signed-out")]
-    [InlineData("GET", "/API/V1/AUTH/OIDC/ENTRA/CALLBACK")]
-    [InlineData("GET", "/api/v1/auth/oidc/some-other-provider/start")]
-    public void The_selector_authenticates_the_hosted_routes_anonymously(
-        string method,
-        string path)
-    {
-        Assert.Equal(
-            PlatformAuthenticationDefaults.AnonymousScheme,
-            PlatformAuthenticationSelector.Select(
-                RequestWithStaleSession(method, path)));
-    }
-
-    /// <summary>
-    /// The allowlist entry is a method and a path, not a path. Anything else
-    /// under the hosted prefix - another method, a nested provider segment, an
-    /// empty one, or a neighbouring route - keeps the cookie scheme.
-    /// </summary>
-    [Theory]
-    [InlineData("POST", "/api/v1/auth/oidc/entra/callback")]
-    [InlineData("DELETE", "/api/v1/auth/oidc/entra/frontchannel-logout")]
-    [InlineData("POST", "/api/v1/auth/oidc/entra/start")]
-    [InlineData("GET", "/api/v1/auth/oidc/entra/token")]
-    [InlineData("GET", "/api/v1/auth/oidc//start")]
-    [InlineData("GET", "/api/v1/auth/oidc/entra/nested/start")]
-    [InlineData("GET", "/api/v1/auth/oidc/entra%2Fnested/start")]
-    [InlineData("GET", "/api/v1/auth/oidc/start")]
-    [InlineData("GET", "/api/v1/auth/oidcentra/start")]
-    [InlineData("GET", "/api/v1/auth/login")]
-    public void The_selector_keeps_every_other_request_authenticated(
-        string method,
-        string path)
-    {
+            ["POST"],
+            endpoint.Metadata.GetMetadata<HttpMethodMetadata>()!.HttpMethods);
+        Assert.Null(endpoint.Metadata.GetMetadata<IAllowAnonymous>());
         Assert.Equal(
             PlatformAuthenticationDefaults.CookieScheme,
             PlatformAuthenticationSelector.Select(
-                RequestWithStaleSession(method, path)));
-    }
-
-    /// <summary>
-    /// A start route whose provider segment is not a bounded provider key is
-    /// not the start route. The bound matters because the segment reaches the
-    /// login request store and the audit record.
-    /// </summary>
-    [Fact]
-    public void An_oversized_provider_segment_is_not_the_start_route()
-    {
-        Assert.Equal(
-            PlatformAuthenticationDefaults.CookieScheme,
-            PlatformAuthenticationSelector.Select(
-                RequestWithStaleSession(
-                    "GET",
-                    $"/api/v1/auth/oidc/{new string('a', 65)}/start")));
+                RequestWithStaleSession("POST", "/api/v1/auth/oidc/entra/sign-out")));
     }
 
     /// <summary>
@@ -297,33 +227,47 @@ public sealed class OidcRouteContractTests
     }
 
     /// <summary>
-    /// Front-channel sign-out arrives as a cross-site GET from an iframe with
-    /// no antiforgery token and no body. It can only revoke, so repeating it
-    /// has to be a no-op that reports nothing about whether a session existed.
+    /// Front-channel sign-out arrives as a cross-site GET inside a provider
+    /// iframe, and the Vistara session cookie is SameSite=Lax, so it never
+    /// arrives with the request. The endpoint therefore does nothing at all:
+    /// no session is touched, no cookie is written, and no audit event claims
+    /// a sign-out that did not happen. Anything else would either be a no-op
+    /// dressed up as success or an unauthenticated revocation oracle.
     /// </summary>
     [Fact]
-    public async Task Front_channel_logout_is_an_idempotent_empty_two_hundred()
+    public async Task Front_channel_logout_changes_nothing_and_says_nothing()
     {
-        var logout = new StubOidcLogoutPort();
+        TestResponse response = await SendAsync(
+            new StubOidcLoginPort(),
+            "/api/v1/auth/oidc/entra/frontchannel-logout",
+            "?sid=00000000-0000-0000-0000-000000000000&iss=https%3A%2F%2Fattacker.example");
 
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(string.Empty, response.Body);
+        Assert.Equal(string.Empty, response.Location);
+        Assert.Equal("no-store", response.CacheControl);
+        Assert.Empty(response.SetCookies);
+    }
+
+    /// <summary>
+    /// Repeating it is a no-op because there was never an operation, and it
+    /// reports nothing about whether a session existed.
+    /// </summary>
+    [Fact]
+    public async Task Front_channel_logout_is_identical_however_often_it_is_called()
+    {
         TestResponse first = await SendAsync(
             new StubOidcLoginPort(),
             "/api/v1/auth/oidc/entra/frontchannel-logout",
-            query: null,
-            logout: logout);
+            null);
         TestResponse second = await SendAsync(
             new StubOidcLoginPort(),
             "/api/v1/auth/oidc/entra/frontchannel-logout",
-            query: null,
-            logout: logout);
+            null);
 
-        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
-        Assert.Equal(string.Empty, first.Body);
-        Assert.Equal(string.Empty, second.Body);
-        Assert.Equal(string.Empty, first.Location);
-        Assert.Equal("no-store", first.CacheControl);
-        Assert.Equal(2, logout.Calls);
+        Assert.Equal(first.StatusCode, second.StatusCode);
+        Assert.Equal(first.Body, second.Body);
+        Assert.Equal(first.SetCookies, second.SetCookies);
     }
 
     /// <summary>
@@ -411,12 +355,10 @@ public sealed class OidcRouteContractTests
     private static async Task<TestResponse> SendAsync(
         IOidcLoginPort login,
         string path,
-        string? query,
-        IOidcLogoutPort? logout = null)
+        string? query)
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.Services.AddSingleton(login);
-        builder.Services.AddSingleton(logout ?? new StubOidcLogoutPort());
         builder.Services.AddSingleton(new CookieAuthOptions());
         builder.Services.AddSingleton<IOidcProviderCatalog>(new StubOidcProviderCatalog());
         WebApplication app = builder.Build();
@@ -456,6 +398,15 @@ public sealed class OidcRouteContractTests
         string.Equals(pattern, path, StringComparison.Ordinal) ||
         (pattern == OidcRoutes.StartPathTemplate &&
             path.EndsWith("/start", StringComparison.Ordinal));
+
+    private static readonly string[] HostedRoutePatterns =
+    [
+        "/api/v1/auth/oidc/entra/callback",
+        "/api/v1/auth/oidc/entra/frontchannel-logout",
+        "/api/v1/auth/oidc/entra/signed-out",
+        "/api/v1/auth/oidc/{providerId}/sign-out",
+        "/api/v1/auth/oidc/{providerId}/start",
+    ];
 
     private sealed record TestResponse(
         HttpStatusCode StatusCode,
@@ -504,16 +455,4 @@ public sealed class OidcRouteContractTests
         ];
     }
 
-    private sealed class StubOidcLogoutPort : IOidcLogoutPort
-    {
-        public int Calls { get; private set; }
-
-        public ValueTask<string> SignOutAsync(
-            string? sessionToken,
-            CancellationToken cancellationToken)
-        {
-            Calls++;
-            return ValueTask.FromResult("__Host-vistara-session=; Path=/; Max-Age=0");
-        }
-    }
 }

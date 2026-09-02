@@ -1,8 +1,11 @@
 using System.Globalization;
+using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Primitives;
 using Microsoft.Net.Http.Headers;
+using Vistara.Api.Features;
 using Vistara.Auth.Cookies;
+using Vistara.Contracts.Identity;
 using Vistara.Domain.Common;
 
 namespace Vistara.Api.Features.Oidc;
@@ -150,32 +153,87 @@ public static class OidcAuthenticationEndpoint
     }
 
     /// <summary>
-    /// Provider-initiated front-channel sign-out. Entra issues this as a plain
-    /// GET from an iframe with no antiforgery token and no request body, so the
-    /// endpoint can only ever revoke: it never grants, never redirects, and
-    /// never reports whether a session existed. Repeating it is a no-op, which
-    /// is what makes it safe to answer an unauthenticated cross-site GET.
+    /// The provider-initiated front-channel sign-out reply URL.
+    ///
+    /// This endpoint deliberately does nothing. Entra drives it as a plain GET
+    /// inside a third-party iframe, and the Vistara session cookie is
+    /// <c>SameSite=Lax</c>, so the request arrives with no session cookie at
+    /// all: there is nothing here to revoke and no way to learn whose session
+    /// to revoke. Anything that looked like revocation would either be a
+    /// no-op dressed up as success, or - if it accepted a session identifier
+    /// from the query string - an unauthenticated revocation oracle. Neither
+    /// is acceptable, and loosening <c>SameSite</c> to make the cookie arrive
+    /// would reintroduce the cross-site request forgery exposure the cookie
+    /// policy exists to prevent.
+    ///
+    /// It therefore answers <c>200</c> with no body, sets no cookie, touches
+    /// no session, and records no audit event, so it cannot report a sign-out
+    /// that did not happen. Revocation is
+    /// <c>POST /api/v1/auth/logout</c> and the relying-party initiated
+    /// <c>POST /api/v1/auth/oidc/{providerId}/sign-out</c>, both of which are
+    /// same-site, carry the session cookie, and are covered by the antiforgery
+    /// policy.
+    ///
+    /// The route is kept only so an already-deployed registration does not
+    /// break. It must not be registered as the Entra <c>web.logoutUrl</c>:
+    /// registering a control that cannot act is worse than registering none.
     /// </summary>
-    public static async Task FrontChannelLogoutAsync(
-        HttpContext context,
-        IOidcLogoutPort logout,
-        CookieAuthOptions cookies,
-        CancellationToken cancellationToken)
+    public static Task FrontChannelLogoutAsync(HttpContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        ArgumentNullException.ThrowIfNull(logout);
-        ArgumentNullException.ThrowIfNull(cookies);
-
-        string deletionHeader = await logout.SignOutAsync(
-            ReadSessionToken(context, cookies),
-            cancellationToken);
-        context.Response.Headers.Append(HeaderNames.SetCookie, deletionHeader);
-        context.Response.Headers.Append(
-            HeaderNames.SetCookie,
-            OidcHandleCookie.DeletionHeader);
         context.Response.Headers.CacheControl = "no-store";
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentLength = 0;
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Relying-party initiated sign-out: revoke the Vistara session first, then
+    /// tell the caller where the provider session can be ended.
+    ///
+    /// It is a POST from the application itself, so unlike the front-channel
+    /// reply URL it actually receives the session cookie and is covered by the
+    /// antiforgery policy. The end-session URL is built from discovered
+    /// provider metadata and the reply URL the operator registered; nothing
+    /// from this request contributes to it.
+    /// </summary>
+    public static async Task SignOutAsync(
+        HttpContext context,
+        IOidcSignOutPort signOut,
+        CookieAuthOptions cookies,
+        string providerId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(signOut);
+        ArgumentNullException.ThrowIfNull(cookies);
+
+        if (ReadSessionToken(context, cookies) is not { } sessionToken)
+        {
+            // Sign-out acts on the session the caller presents. With none
+            // presented there is nothing to act on, and answering anyway would
+            // turn this into an anonymous endpoint that reports provider
+            // configuration.
+            await ApiProblemWriter.WriteAsync(
+                context,
+                StatusCodes.Status401Unauthorized,
+                "auth.unauthenticated",
+                "A browser session is required to sign out.",
+                cancellationToken);
+            return;
+        }
+
+        OidcSignOutResult result = await signOut.SignOutAsync(
+            providerId,
+            sessionToken,
+            cancellationToken);
+        context.Response.Headers.Append(HeaderNames.SetCookie, result.SetCookieHeader);
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.ContentType = "application/json; charset=utf-8";
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        await context.Response.WriteAsync(
+            JsonSerializer.Serialize(new SignOutResponse(result.EndSessionUrl)),
+            cancellationToken);
     }
 
     /// <summary>
@@ -196,6 +254,7 @@ public static class OidcAuthenticationEndpoint
 
     private static void WriteFailureRedirect(HttpContext context) =>
         Redirect(context, OidcBrowserOutcome.FailureLocation);
+
 
     private static void Redirect(HttpContext context, string location)
     {
@@ -231,13 +290,15 @@ public static class OidcAuthenticationEndpoint
 }
 
 /// <summary>
-/// Revokes the existing Vistara browser session and returns the cookie
-/// deletion header. Front-channel sign-out must work with no credential of its
-/// own, so the port takes the raw session token the request carried.
+/// Revokes the Vistara browser session for a relying-party initiated sign-out
+/// and reports where the provider session may be ended. The caller has already
+/// proved it holds the session by presenting the cookie, so the port takes the
+/// raw token rather than an ambient principal.
 /// </summary>
-public interface IOidcLogoutPort
+public interface IOidcSignOutPort
 {
-    ValueTask<string> SignOutAsync(
-        string? sessionToken,
+    ValueTask<OidcSignOutResult> SignOutAsync(
+        string providerId,
+        string sessionToken,
         CancellationToken cancellationToken);
 }

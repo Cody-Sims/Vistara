@@ -132,17 +132,62 @@ internal sealed class PlatformOidcAuditSink(ILogger<PlatformOidcAuditSink> logge
 }
 
 /// <summary>
-/// Revokes the Vistara browser session for provider-initiated sign-out. The
-/// existing browser session port owns revocation, so front-channel logout
-/// cannot drift from the local logout route.
+/// Relying-party initiated sign-out.
+///
+/// Revocation goes through the existing browser session port, so hosted
+/// sign-out cannot drift from the local logout route, and it happens first:
+/// the Vistara session is gone before the caller is told anything about the
+/// provider. The end-session URL is assembled from discovered metadata and the
+/// post-logout reply URL the operator registered and that startup validated -
+/// no part of the request contributes to it, so this cannot become a redirect
+/// the caller chose.
 /// </summary>
-internal sealed class PlatformOidcLogoutAdapter(IBrowserSessionPort sessions) :
-    IOidcLogoutPort
+internal sealed class PlatformOidcSignOutAdapter(
+    IBrowserSessionPort sessions,
+    PlatformOidcProviderRegistry registry,
+    IOidcAuditSink audit) : IOidcSignOutPort
 {
-    public ValueTask<string> SignOutAsync(
-        string? sessionToken,
-        CancellationToken cancellationToken) =>
-        sessions.LogoutAsync(sessionToken, cancellationToken);
+    private const string SignOutStage = "sign-out";
+
+    public async ValueTask<OidcSignOutResult> SignOutAsync(
+        string providerId,
+        string sessionToken,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionToken);
+        string setCookieHeader = await sessions.LogoutAsync(sessionToken, cancellationToken);
+        audit.Record(new OidcAuditEvent(providerId, SignOutStage, "session_revoked"));
+
+        PlatformOidcProvider? provider = registry.Find(providerId);
+        if (provider?.Options.PostLogoutRedirectUri is not { } postLogoutRedirectUri)
+        {
+            return new OidcSignOutResult(setCookieHeader, null);
+        }
+
+        // A provider that cannot be reached does not hold the sign-out up. The
+        // session is already revoked, and the caller simply has nowhere else
+        // to be sent.
+        Result<OidcProviderMetadata> discovered =
+            await provider.Metadata.GetAsync(cancellationToken);
+        if (!discovered.TryGetValue(out OidcProviderMetadata? metadata) ||
+            metadata.EndSessionEndpoint is not { } endSessionEndpoint)
+        {
+            audit.Record(new OidcAuditEvent(
+                providerId,
+                SignOutStage,
+                "end_session_endpoint_unavailable"));
+            return new OidcSignOutResult(setCookieHeader, null);
+        }
+
+        var endSessionUrl = new UriBuilder(endSessionEndpoint)
+        {
+            Query = string.Join(
+                '&',
+                $"post_logout_redirect_uri={Uri.EscapeDataString(postLogoutRedirectUri.AbsoluteUri)}",
+                $"client_id={Uri.EscapeDataString(provider.Options.ClientId)}"),
+        };
+        return new OidcSignOutResult(setCookieHeader, endSessionUrl.Uri.AbsoluteUri);
+    }
 }
 
 /// <summary>

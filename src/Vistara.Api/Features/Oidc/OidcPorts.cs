@@ -27,6 +27,14 @@ public sealed record OidcStartResult(Uri AuthorizationUri, string HandleCookieVa
 public sealed record OidcSignInResult(string SetCookieHeader, string ReturnTo);
 
 /// <summary>
+/// The result of a relying-party initiated sign-out. The Vistara session has
+/// already been revoked when this is returned; <see cref="EndSessionUrl"/> is
+/// where the browser may go to end the provider session as well, and is null
+/// when the provider publishes no end-session endpoint or none was configured.
+/// </summary>
+public sealed record OidcSignOutResult(string SetCookieHeader, string? EndSessionUrl);
+
+/// <summary>
 /// The callback parameters exactly as the browser presented them. Every member
 /// is untrusted input, so the port validates each one before it is used.
 /// </summary>

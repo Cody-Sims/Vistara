@@ -22,12 +22,22 @@ public static class OidcRoutes
 
     public const string Prefix = "/api/v1/auth/oidc";
 
+    private const string ProviderParameter = $"{{{ProviderRouteParameter}}}";
+
     /// <summary>
     /// The sign-in entry point. It is parameterized because it is Vistara's
     /// own route and is never registered with a provider; the reply URLs below
     /// are not.
     /// </summary>
-    public const string StartPathTemplate = $"{Prefix}/{{{ProviderRouteParameter}}}/start";
+    public const string StartPathTemplate = $"{Prefix}/{ProviderParameter}/start";
+
+    /// <summary>
+    /// Relying-party initiated sign-out. It is a POST because it revokes the
+    /// browser session, which means it is same-site, carries the session
+    /// cookie, and is covered by the antiforgery policy - none of which is
+    /// true of the front-channel reply URL.
+    /// </summary>
+    public const string SignOutPathTemplate = $"{Prefix}/{ProviderParameter}/sign-out";
 
     public const string CallbackPath = $"{Prefix}/{EntraProviderId}/callback";
 
@@ -54,6 +64,9 @@ public static class OidcRoutes
 
     public static string StartPath(string providerId) =>
         $"{Prefix}/{providerId}{StartSuffix}";
+
+    public static string SignOutPath(string providerId) =>
+        $"{Prefix}/{providerId}/sign-out";
 
     /// <summary>
     /// Matches <c>/api/v1/auth/oidc/{providerId}/start</c> for exactly one
@@ -110,3 +123,4 @@ public static class OidcRoutes
 
 /// <summary>One route of the hosted OIDC contract, method and path together.</summary>
 public sealed record OidcRoute(string Method, string Path);
+

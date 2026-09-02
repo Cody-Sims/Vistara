@@ -78,7 +78,7 @@ public static class PlatformOidcServiceCollectionExtensions
 
         services.TryAddScoped<RelationalOidcLoginRequestStore>();
         services.TryAddScoped<IOidcLoginPort, PlatformOidcLoginAdapter>();
-        services.TryAddScoped<IOidcLogoutPort, PlatformOidcLogoutAdapter>();
+        services.TryAddScoped<IOidcSignOutPort, PlatformOidcSignOutAdapter>();
         return services;
     }
 
@@ -154,7 +154,7 @@ public static class PlatformOidcServiceCollectionExtensions
 
         using IServiceScope scope = services.CreateScope();
         _ = scope.ServiceProvider.GetRequiredService<IOidcLoginPort>();
-        _ = scope.ServiceProvider.GetRequiredService<IOidcLogoutPort>();
+        _ = scope.ServiceProvider.GetRequiredService<IOidcSignOutPort>();
         _ = scope.ServiceProvider.GetRequiredService<RelationalOidcLoginRequestStore>();
         return services;
     }

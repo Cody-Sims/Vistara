@@ -397,6 +397,19 @@ internal sealed class OidcSignInHost : IAsyncDisposable
         return tenantId;
     }
 
+    /// <summary>Counts browser sessions that have not been revoked.</summary>
+    internal async Task<int> CountLiveSessionsAsync()
+    {
+        await using var connection = new SqliteConnection(ConnectionString);
+        await connection.OpenAsync(CancellationToken.None);
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT COUNT(*) FROM cookie_sessions WHERE revoked_at_utc IS NULL";
+        return Convert.ToInt32(
+            await command.ExecuteScalarAsync(CancellationToken.None),
+            System.Globalization.CultureInfo.InvariantCulture);
+    }
+
     internal async Task<int> CountLoginRequestsAsync()
     {
         await using AsyncServiceScope scope = _app.Services.CreateAsyncScope();
@@ -424,11 +437,41 @@ internal sealed class OidcSignInHost : IAsyncDisposable
     internal Task<TestResponse> DescribeSetupAsync() =>
         SendAsync(HttpMethods.Get, "/api/v1/setup");
 
-    internal Task<TestResponse> FrontChannelLogoutAsync(string? sessionCookie) =>
+    /// <summary>
+    /// The provider iframe request. It is deliberately sent without a session
+    /// cookie because a SameSite=Lax cookie is never attached to a cross-site
+    /// iframe GET, which is the whole reason the endpoint cannot revoke.
+    /// </summary>
+    internal Task<TestResponse> FrontChannelLogoutAsync(string? query = null) =>
         SendAsync(
             HttpMethods.Get,
             "/api/v1/auth/oidc/entra/frontchannel-logout",
-            sessionCookie: sessionCookie);
+            query);
+
+    /// <summary>
+    /// Relying-party initiated sign-out, sent the way the application sends
+    /// it: same-site POST, session cookie, antiforgery token.
+    /// </summary>
+    internal async Task<TestResponse> SignOutAsync(
+        string sessionCookie,
+        string? csrfToken = null,
+        string providerId = "entra")
+    {
+        csrfToken ??= (await GetCurrentUserAsync(sessionCookie))
+            .Json()
+            .GetProperty("csrfToken")
+            .GetString();
+        return await SendAsync(
+            HttpMethods.Post,
+            OidcRoutes.SignOutPath(providerId),
+            sessionCookie: sessionCookie,
+            headers: csrfToken is null
+                ? null
+                : new Dictionary<string, string>
+                {
+                    [CookieAuthOptions.DefaultAntiforgeryHeaderName] = csrfToken,
+                });
+    }
 
     internal Task<TestResponse> GetCurrentUserAsync(string sessionCookie) =>
         SendAsync(HttpMethods.Get, "/api/v1/me", sessionCookie: sessionCookie);
@@ -439,7 +482,8 @@ internal sealed class OidcSignInHost : IAsyncDisposable
         string? query = null,
         string? sessionCookie = null,
         string? handleCookie = null,
-        string? body = null)
+        string? body = null,
+        IReadOnlyDictionary<string, string>? headers = null)
     {
         await using AsyncServiceScope scope = _app.Services.CreateAsyncScope();
         var context = new DefaultHttpContext { RequestServices = scope.ServiceProvider };
@@ -449,6 +493,13 @@ internal sealed class OidcSignInHost : IAsyncDisposable
         context.Request.Path = path;
         context.Request.QueryString = new QueryString(query ?? string.Empty);
         context.Connection.RemoteIpAddress = IPAddress.Parse("198.51.100.10");
+        if (headers is not null)
+        {
+            foreach ((string name, string value) in headers)
+            {
+                context.Request.Headers[name] = value;
+            }
+        }
 
         var cookies = new List<string>();
         if (sessionCookie is not null)
@@ -613,21 +664,38 @@ internal sealed record TestResponse(
                 value.Contains("Max-Age=0", StringComparison.Ordinal)));
 }
 
-/// <summary>Captures the log the OIDC audit sink writes.</summary>
+/// <summary>Captures what the application logs, with the category it came from.</summary>
 internal sealed class RecordedLogProvider : ILoggerProvider
 {
-    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _messages = new();
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(string Category, string Message)>
+        _entries = new();
 
-    internal IReadOnlyList<string> Messages => [.. _messages];
+    internal IReadOnlyList<string> Messages =>
+        [.. _entries.Select(entry => entry.Message)];
 
-    public ILogger CreateLogger(string categoryName) => new QueueLogger(_messages);
+    /// <summary>
+    /// Only the records Vistara itself wrote. The hosting and routing
+    /// diagnostics the framework emits for every request are not
+    /// operator-facing Vistara records and are not this repository's to
+    /// change.
+    /// </summary>
+    internal IReadOnlyList<string> VistaraMessages =>
+    [
+        .. _entries
+            .Where(entry => entry.Category.StartsWith("Vistara.", StringComparison.Ordinal))
+            .Select(entry => entry.Message),
+    ];
+
+    public ILogger CreateLogger(string categoryName) =>
+        new QueueLogger(categoryName, _entries);
 
     public void Dispose()
     {
     }
 
     private sealed class QueueLogger(
-        System.Collections.Concurrent.ConcurrentQueue<string> messages) : ILogger
+        string category,
+        System.Collections.Concurrent.ConcurrentQueue<(string, string)> entries) : ILogger
     {
         public IDisposable? BeginScope<TState>(TState state)
             where TState : notnull => null;
@@ -640,7 +708,7 @@ internal sealed class RecordedLogProvider : ILoggerProvider
             TState state,
             Exception? exception,
             Func<TState, Exception?, string> formatter) =>
-            messages.Enqueue(formatter(state, exception));
+            entries.Enqueue((category, formatter(state, exception)));
     }
 }
 

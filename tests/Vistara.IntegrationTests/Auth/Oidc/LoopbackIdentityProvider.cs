@@ -324,6 +324,7 @@ internal sealed class LoopbackIdentityProvider : IAsyncDisposable
           "authorization_endpoint": "{{Origin}}/{{DirectoryTenantId:D}}/oauth2/v2.0/authorize",
           "token_endpoint": "{{Origin}}/{{DirectoryTenantId:D}}/oauth2/v2.0/token",
           "jwks_uri": "{{Origin}}/{{DirectoryTenantId:D}}/discovery/v2.0/keys",
+          "end_session_endpoint": "{{Origin}}/{{DirectoryTenantId:D}}/oauth2/v2.0/logout",
           "response_types_supported": ["code"],
           "subject_types_supported": ["pairwise"],
           "id_token_signing_alg_values_supported": ["RS256"]
