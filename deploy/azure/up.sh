@@ -227,34 +227,33 @@ if [ -n "$subscription_tenant" ] && [ -n "$active_tenant" ] && [ "$subscription_
     "subscription ${subscription_id} belongs to tenant ${subscription_tenant} but the Azure CLI is signed in to ${active_tenant}, so directory lookups would answer for the wrong tenant. Run: az account set --subscription ${subscription_id} (or az login --tenant ${subscription_tenant}) and rerun."
 fi
 
-# An explicit --tenant-id is checked against both tenants rather than believed.
-# It is the root of the whole identity path: the federated credential issuer,
-# the OIDC authority, and the directory tenant the first-owner allowlist is
-# keyed on are all built from it, so a wrong value produces a deployment that
-# agrees with itself at every later step — the registration is created in one
-# directory and the verification confirms it against the same wrong value.
-# Azure is the only thing that can contradict it, and it is asked here, before
-# anything has been created.
+# An explicit --tenant-id is checked rather than believed. It is the root of the
+# whole identity path: the federated credential issuer, the OIDC authority, and
+# the directory tenant the first-owner allowlist is keyed on are all built from
+# it, so a wrong value produces a deployment that agrees with itself at every
+# later step — the registration is created in one directory and the
+# verification confirms it against the same wrong value. Azure is the only
+# thing that can contradict it, and it is asked here, before anything has been
+# created.
+#
+# One comparison, against the subscription's tenant, because the guard above
+# has already established that the subscription's tenant and the signed-in
+# tenant are the same value. Comparing against both would read as two
+# independent checks while the second could never fail, which would make it
+# look as though deleting the guard above cost nothing.
 if [ "$tenant_id_explicit" = '1' ]; then
   vistara_require_guid "$tenant_id" '--tenant-id'
 
-  if [ -z "$subscription_tenant" ] || [ -z "$active_tenant" ]; then
+  if [ -z "$subscription_tenant" ]; then
     vistara_die "$VISTARA_EXIT_PERMISSION" \
       '--tenant-id was given but the tenant of the subscription could not be read, so it cannot be checked. Run: az login'
   fi
 
   if [ "$(vistara_lowercase "$tenant_id")" != "$(vistara_lowercase "$subscription_tenant")" ]; then
     vistara_error "--tenant-id is ${tenant_id}."
-    vistara_error "The tenantId of subscription ${subscription_id} is ${subscription_tenant}."
+    vistara_error "The tenantId of subscription ${subscription_id} is ${subscription_tenant}, which is also the directory every az ad lookup answers for."
     vistara_die "$VISTARA_EXIT_USAGE" \
       '--tenant-id does not match the tenant of the subscription being deployed into.'
-  fi
-
-  if [ "$(vistara_lowercase "$tenant_id")" != "$(vistara_lowercase "$active_tenant")" ]; then
-    vistara_error "--tenant-id is ${tenant_id}."
-    vistara_error "The Azure CLI is signed in to tenant ${active_tenant}, which is the directory every az ad lookup answers for."
-    vistara_die "$VISTARA_EXIT_USAGE" \
-      '--tenant-id does not match the tenant the Azure CLI is signed in to.'
   fi
 fi
 

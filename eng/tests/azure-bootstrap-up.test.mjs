@@ -806,8 +806,16 @@ test('a subscription in another tenant is refused rather than guessed at', () =>
       upArguments(['--subscription', '99999999-9999-9999-9999-999999999999']),
     );
     assert.equal(result.status, 64, result.output);
-    assert.match(result.output, /belongs to tenant 12121212/, 'the two tenants are named');
-    assert.match(result.output, /az account set --subscription 99999999/, 'and the fix is spelled out');
+    assert.ok(
+      result.output.includes(
+        'error: subscription 99999999-9999-9999-9999-999999999999 belongs to tenant'
+          + ' 12121212-1212-1212-1212-121212121212 but the Azure CLI is signed in to'
+          + ` ${TENANT_ID}, so directory lookups would answer for the wrong tenant.`
+          + ' Run: az account set --subscription 99999999-9999-9999-9999-999999999999'
+          + ' (or az login --tenant 12121212-1212-1212-1212-121212121212) and rerun.',
+      ),
+      `the subscription guard is the one that refused, and says so:\n${result.output}`,
+    );
     assert.deepEqual(
       mutatingCalls(sandbox).map((call) => call.join(' ')),
       [],
@@ -860,8 +868,21 @@ test('an explicit tenant that is not the subscription tenant is refused before a
       upArguments(['--tenant-id', '12121212-1212-1212-1212-121212121212']),
     );
     assert.equal(result.status, 64, result.output);
-    assert.match(result.output, /--tenant-id is 12121212-1212-1212-1212-121212121212/);
-    assert.match(result.output, /--tenant-id does not match the tenant of the subscription/);
+    assert.ok(
+      result.output.includes('--tenant-id is 12121212-1212-1212-1212-121212121212.')
+        && result.output.includes(
+          `The tenantId of subscription ${SUBSCRIPTION_ID} is ${TENANT_ID},`
+            + ' which is also the directory every az ad lookup answers for.',
+        )
+        && result.output.includes(
+          'error: --tenant-id does not match the tenant of the subscription being deployed into.',
+        ),
+      `the explicit-tenant guard is the one that refused, and names both values:\n${result.output}`,
+    );
+    assert.ok(
+      !result.output.includes('belongs to tenant'),
+      'the subscription and the signed-in tenant agree, so that guard has nothing to say',
+    );
     assert.deepEqual(
       mutatingCalls(sandbox).map((call) => call.join(' ')),
       [],
@@ -870,10 +891,12 @@ test('an explicit tenant that is not the subscription tenant is refused before a
   });
 });
 
-test('an explicit tenant that is not the signed-in tenant is refused', () => {
+test('naming the foreign tenant explicitly does not talk the subscription guard round', () => {
   withSandbox('tenant-not-signed-in', (sandbox) => {
-    // The subscription agrees with --tenant-id, but the CLI is signed in
-    // somewhere else, and every az ad lookup answers for where it is signed in.
+    // --tenant-id agrees with the subscription, so the explicit-tenant check
+    // has nothing to object to; the CLI is signed in somewhere else, and every
+    // az ad lookup answers for where it is signed in. Only the subscription
+    // guard can catch this, which is what makes it the load-bearing one here.
     sandbox.touch('allow_subscription_switch');
     sandbox.state('foreign_tenant_id', '12121212-1212-1212-1212-121212121212');
     const result = run(
@@ -886,7 +909,19 @@ test('an explicit tenant that is not the signed-in tenant is refused', () => {
         '12121212-1212-1212-1212-121212121212',
       ]),
     );
-    assert.notEqual(result.status, 0, result.output);
+    assert.equal(result.status, 64, result.output);
+    assert.ok(
+      result.output.includes(
+        'error: subscription 99999999-9999-9999-9999-999999999999 belongs to tenant'
+          + ' 12121212-1212-1212-1212-121212121212 but the Azure CLI is signed in to'
+          + ` ${TENANT_ID},`,
+      ),
+      `the subscription guard refuses, not the explicit-tenant one:\n${result.output}`,
+    );
+    assert.ok(
+      !result.output.includes('--tenant-id does not match'),
+      'the explicit tenant matches the subscription, so that check has nothing to say',
+    );
     assert.deepEqual(mutatingCalls(sandbox).map((call) => call.join(' ')), []);
   });
 });
