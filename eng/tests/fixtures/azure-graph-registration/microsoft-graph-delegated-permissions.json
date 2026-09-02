@@ -1,0 +1,36 @@
+{
+  "$comment": "Checked-in source of truth for the Microsoft Graph identifiers referenced by deploy/azure/infra/entra/app-registration.bicep. Update this file first, then the module; eng/tests/azure-graph-registration.test.mjs asserts the module matches.",
+  "retrievedOn": "2026-08-31",
+  "sources": [
+    {
+      "what": "Microsoft Graph first-party application ID",
+      "url": "https://learn.microsoft.com/troubleshoot/entra/entra-id/governance/verify-first-party-apps-sign-in"
+    },
+    {
+      "what": "Delegated permission (OAuth2 scope) IDs for openid, profile, and email",
+      "url": "https://learn.microsoft.com/graph/permissions-reference"
+    },
+    {
+      "what": "Live verification command",
+      "command": "az ad sp show --id 00000003-0000-0000-c000-000000000000 --query \"oauth2PermissionScopes[?value=='openid'||value=='profile'||value=='email'].{value:value,id:id}\" -o json"
+    }
+  ],
+  "resourceAppId": "00000003-0000-0000-c000-000000000000",
+  "delegatedPermissions": {
+    "openid": {
+      "id": "37f7f235-527c-4136-accd-4a02d197296e",
+      "adminConsentRequired": false,
+      "why": "Mandatory for OpenID Connect; yields the sub, oid, and tid claims the first-owner allowlist keys on."
+    },
+    "profile": {
+      "id": "14dad69e-099b-42c9-810b-d002981feec1",
+      "adminConsentRequired": false,
+      "why": "Yields name and preferred_username for the account display surface."
+    },
+    "email": {
+      "id": "64a6cdd6-aab1-4aaf-94b8-3cc8405e90d0",
+      "adminConsentRequired": false,
+      "why": "Yields the email claim when the directory has one. Treated as mutable and never used for authorization."
+    }
+  }
+}

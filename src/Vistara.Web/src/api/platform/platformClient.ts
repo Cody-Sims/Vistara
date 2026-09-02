@@ -13,6 +13,7 @@ import type {
   CreateApiKeyRequest,
   CreatedApiKey,
   CurrentUser,
+  HostedSignOut,
   InviteTenantMemberRequest,
   JobCollection,
   JobQuery,
@@ -118,6 +119,28 @@ export class PlatformApiClient {
   public async logout(): Promise<void> {
     try {
       await this.#request<void>('POST', '/api/v1/auth/logout');
+    } finally {
+      this.#credentials.clear();
+    }
+  }
+
+  /**
+   * Relying-party initiated sign-out. The Vistara session is revoked first,
+   * and the answer only says where the provider session may be ended; sending
+   * the browser there is the caller's decision, and nothing about it is read
+   * from this client.
+   *
+   * There is deliberately no counterpart for starting sign-in: the start route
+   * answers a redirect to the provider that only a browser navigation may
+   * follow, so fetching it would either be refused or would strip the flow of
+   * the top-level navigation it depends on.
+   */
+  public async signOutFromProvider(providerId: string): Promise<HostedSignOut> {
+    try {
+      return await this.#request<HostedSignOut>(
+        'POST',
+        `/api/v1/auth/oidc/${segment(providerId)}/sign-out`,
+      );
     } finally {
       this.#credentials.clear();
     }

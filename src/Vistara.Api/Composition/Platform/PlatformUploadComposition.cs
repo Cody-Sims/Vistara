@@ -101,6 +101,7 @@ public static class PlatformUploadServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
 
+        services.ValidateVistaraApiOidcComposition();
         using IServiceScope scope = services.CreateScope();
         _ = scope.ServiceProvider.GetRequiredService<IUploadAuthorizationPort>();
         _ = scope.ServiceProvider.GetRequiredService<IUploadApplicationPort>();

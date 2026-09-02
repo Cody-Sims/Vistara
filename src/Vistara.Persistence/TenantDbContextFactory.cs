@@ -1,27 +1,24 @@
 using Microsoft.EntityFrameworkCore;
+using Vistara.Persistence.Azure;
 
 namespace Vistara.Persistence;
 
-public sealed class TenantDbContextFactory(VistaraPersistenceOptions options)
+public sealed class TenantDbContextFactory(
+    VistaraPersistenceOptions options,
+    VistaraNpgsqlDataSourceProvider? dataSources = null)
 {
     private readonly VistaraPersistenceOptions _options =
         options ?? throw new ArgumentNullException(nameof(options));
 
+    private readonly VistaraNpgsqlDataSourceProvider? _dataSources = dataSources;
+
     public VistaraDbContext Create(Guid tenantId)
     {
         var builder = new DbContextOptionsBuilder<VistaraDbContext>();
-        switch (_options.Provider)
-        {
-            case VistaraDatabaseProvider.Sqlite:
-                builder.UseSqlite(_options.ConnectionString);
-                break;
-            case VistaraDatabaseProvider.PostgreSql:
-                builder.UseNpgsql(_options.ConnectionString);
-                break;
-            default:
-                throw new InvalidOperationException(
-                    "The configured persistence provider is not supported.");
-        }
+        builder.UseVistaraDatabase(
+            _dataSources,
+            _options.Provider,
+            _options.ConnectionString);
 
         return new VistaraDbContext(
             builder.Options,

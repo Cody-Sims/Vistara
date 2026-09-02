@@ -36,6 +36,26 @@ public static class PlatformServiceCollectionExtensions
             ServiceDescriptor.Singleton<
                 IValidateOptions<PlatformOptions>,
                 PlatformOptionsValidator>());
+
+        // The persisted rate-limit ceiling is bound and bounded here rather
+        // than compiled in, because the same limit is a per-client budget on a
+        // Compose host and a deployment-wide ceiling behind a shared ingress.
+        // The declared partition is checked against the security composition,
+        // whose framework limiter counts the same peer, so a deployment that
+        // raised one ceiling and not the other fails the host instead of
+        // failing at the first request.
+        services.AddOptions<PlatformRateLimitOptions>().ValidateOnStart();
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IConfigureOptions<PlatformRateLimitOptions>>(
+                new PlatformRateLimitOptionsSetup(configuration)));
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<
+                IValidateOptions<PlatformRateLimitOptions>,
+                PlatformRateLimitOptionsValidator>());
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<
+                IValidateOptions<PlatformRateLimitOptions>,
+                PlatformRateLimitCouplingValidator>());
         services.AddAuthentication(options =>
             {
                 options.DefaultAuthenticateScheme =
@@ -140,6 +160,7 @@ public static class PlatformServiceCollectionExtensions
                 provider.GetRequiredService<IJwtTenantMembershipProvider>(),
                 provider.GetRequiredService<IJwtRevocationStore>(),
                 provider.GetRequiredService<IClock>()));
+        services.AddVistaraApiOidc(configuration);
         services.AddVistaraApiUploads();
         return services;
     }

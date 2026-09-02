@@ -1,0 +1,237 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.46.1.21595",
+      "templateHash": "2760242450144879341"
+    }
+  },
+  "parameters": {
+    "uniqueName": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 100,
+      "metadata": {
+        "description": "Environment-derived base for the Graph alternate key, expected shape vistara-<environmentName>. A deterministic tenant, subscription, and resource-group discriminator is appended so the key cannot collide with another deployment in the same directory."
+      }
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "metadata": {
+        "description": "Human readable name shown on the Entra consent and sign-in screens."
+      }
+    },
+    "apiFqdn": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 253,
+      "metadata": {
+        "description": "Public HTTPS host of the API container app, without scheme or trailing slash. The registered reply URLs must match the runtime Platform:Authentication:Oidc values byte for byte."
+      }
+    },
+    "apiIdentityPrincipalId": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "metadata": {
+        "description": "Object (principal) ID of the API user-assigned managed identity. Becomes the federated identity credential subject, which Entra matches against the managed identity token sub claim."
+      }
+    },
+    "tenantId": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "metadata": {
+        "description": "Entra tenant ID that issues the managed identity token used for the client assertion."
+      }
+    }
+  },
+  "variables": {
+    "normalizedUniqueName": "[toLower(trim(parameters('uniqueName')))]",
+    "normalizedDisplayName": "[trim(parameters('displayName'))]",
+    "normalizedApiFqdn": "[toLower(trim(parameters('apiFqdn')))]",
+    "normalizedApiIdentityPrincipalId": "[toLower(trim(parameters('apiIdentityPrincipalId')))]",
+    "normalizedTenantId": "[toLower(trim(parameters('tenantId')))]",
+    "scopeDiscriminator": "[uniqueString(variables('normalizedTenantId'), subscription().subscriptionId, resourceGroup().id)]",
+    "effectiveUniqueName": "[format('{0}-{1}', variables('normalizedUniqueName'), variables('scopeDiscriminator'))]",
+    "callbackRoute": "/api/v1/auth/oidc/entra/callback",
+    "signedOutRoute": "/api/v1/auth/oidc/entra/signed-out",
+    "apiBaseUri": "[format('https://{0}', variables('normalizedApiFqdn'))]",
+    "callbackUri": "[format('{0}{1}', variables('apiBaseUri'), variables('callbackRoute'))]",
+    "signedOutUri": "[format('{0}{1}', variables('apiBaseUri'), variables('signedOutRoute'))]",
+    "federatedCredentialName": "api-managed-identity",
+    "federatedCredentialIssuerValue": "[format('https://login.microsoftonline.com/{0}/v2.0', variables('normalizedTenantId'))]",
+    "federatedCredentialAudienceValue": "api://AzureADTokenExchange",
+    "microsoftGraphAppId": "00000003-0000-0000-c000-000000000000",
+    "openIdScopeId": "37f7f235-527c-4136-accd-4a02d197296e",
+    "profileScopeId": "14dad69e-099b-42c9-810b-d002981feec1",
+    "emailScopeId": "64a6cdd6-aab1-4aaf-94b8-3cc8405e90d0"
+  },
+  "imports": {
+    "microsoftGraphV1": {
+      "provider": "MicrosoftGraph",
+      "version": "1.0.0"
+    }
+  },
+  "resources": {
+    "application": {
+      "import": "microsoftGraphV1",
+      "type": "Microsoft.Graph/applications@v1.0",
+      "properties": {
+        "uniqueName": "[variables('effectiveUniqueName')]",
+        "displayName": "[variables('normalizedDisplayName')]",
+        "description": "Vistara hosted API interactive sign-in. Single tenant, authorization code with PKCE, secretless managed-identity client assertion.",
+        "signInAudience": "AzureADMyOrg",
+        "groupMembershipClaims": "None",
+        "isDeviceOnlyAuthSupported": false,
+        "isFallbackPublicClient": false,
+        "keyCredentials": [],
+        "passwordCredentials": [],
+        "optionalClaims": {
+          "accessToken": [],
+          "idToken": [],
+          "saml2Token": []
+        },
+        "publicClient": {
+          "redirectUris": []
+        },
+        "spa": {
+          "redirectUris": []
+        },
+        "web": {
+          "homePageUrl": "[variables('apiBaseUri')]",
+          "redirectUris": [
+            "[variables('callbackUri')]",
+            "[variables('signedOutUri')]"
+          ],
+          "implicitGrantSettings": {
+            "enableAccessTokenIssuance": false,
+            "enableIdTokenIssuance": false
+          }
+        },
+        "requiredResourceAccess": [
+          {
+            "resourceAppId": "[variables('microsoftGraphAppId')]",
+            "resourceAccess": [
+              {
+                "id": "[variables('openIdScopeId')]",
+                "type": "Scope"
+              },
+              {
+                "id": "[variables('profileScopeId')]",
+                "type": "Scope"
+              },
+              {
+                "id": "[variables('emailScopeId')]",
+                "type": "Scope"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "apiManagedIdentityCredential": {
+      "import": "microsoftGraphV1",
+      "type": "Microsoft.Graph/applications/federatedIdentityCredentials@v1.0",
+      "properties": {
+        "name": "[format('{0}/{1}', reference('application').uniqueName, variables('federatedCredentialName'))]",
+        "description": "Trusts the Vistara API user-assigned managed identity to present client assertions for this application.",
+        "issuer": "[variables('federatedCredentialIssuerValue')]",
+        "subject": "[variables('normalizedApiIdentityPrincipalId')]",
+        "audiences": [
+          "[variables('federatedCredentialAudienceValue')]"
+        ]
+      },
+      "dependsOn": [
+        "application"
+      ]
+    },
+    "servicePrincipal": {
+      "import": "microsoftGraphV1",
+      "type": "Microsoft.Graph/servicePrincipals@v1.0",
+      "properties": {
+        "appId": "[reference('application').appId]"
+      },
+      "dependsOn": [
+        "application"
+      ]
+    }
+  },
+  "outputs": {
+    "applicationClientId": {
+      "type": "string",
+      "metadata": {
+        "description": "Application (client) ID; the OIDC client_id and the expected id_token aud."
+      },
+      "value": "[reference('application').appId]"
+    },
+    "applicationObjectId": {
+      "type": "string",
+      "metadata": {
+        "description": "Application object ID; the target of az ad app federated-credential list."
+      },
+      "value": "[reference('application').id]"
+    },
+    "servicePrincipalObjectId": {
+      "type": "string",
+      "metadata": {
+        "description": "Service principal object ID in this tenant; the target of directory role and consent operations."
+      },
+      "value": "[reference('servicePrincipal').id]"
+    },
+    "applicationUniqueName": {
+      "type": "string",
+      "metadata": {
+        "description": "Graph alternate key actually deployed, including the tenant, subscription, and resource-group discriminator."
+      },
+      "value": "[variables('effectiveUniqueName')]"
+    },
+    "redirectUri": {
+      "type": "string",
+      "metadata": {
+        "description": "Registered authorization-code reply URL; must equal Platform:Authentication:Oidc:Providers:0:RedirectUri byte for byte."
+      },
+      "value": "[variables('callbackUri')]"
+    },
+    "postLogoutRedirectUri": {
+      "type": "string",
+      "metadata": {
+        "description": "Registered post-logout reply URL used as post_logout_redirect_uri after RP-initiated sign-out."
+      },
+      "value": "[variables('signedOutUri')]"
+    },
+    "federatedCredentialName": {
+      "type": "string",
+      "metadata": {
+        "description": "Federated identity credential name, for az ad app federated-credential list."
+      },
+      "value": "[variables('federatedCredentialName')]"
+    },
+    "federatedCredentialIssuer": {
+      "type": "string",
+      "metadata": {
+        "description": "Expected federated identity credential issuer, for the postprovision byte-compare."
+      },
+      "value": "[variables('federatedCredentialIssuerValue')]"
+    },
+    "federatedCredentialSubject": {
+      "type": "string",
+      "metadata": {
+        "description": "Expected federated identity credential subject, for the postprovision byte-compare."
+      },
+      "value": "[variables('normalizedApiIdentityPrincipalId')]"
+    },
+    "federatedCredentialAudience": {
+      "type": "string",
+      "metadata": {
+        "description": "Expected federated identity credential audience, for the postprovision byte-compare."
+      },
+      "value": "[variables('federatedCredentialAudienceValue')]"
+    }
+  }
+}

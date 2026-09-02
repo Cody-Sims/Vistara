@@ -9,8 +9,13 @@ export default async function globalTeardown(_config: FullConfig) {
   }
 
   const state = readRuntimeState();
-  for (const pid of [state.apiPid, state.workerPid]) {
-    if (!Number.isInteger(pid) || pid <= 0) {
+  for (const pid of [
+    state.apiPid,
+    state.workerPid,
+    state.oidc?.apiPid,
+    state.oidc?.identityProviderPid,
+  ]) {
+    if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
       continue;
     }
 

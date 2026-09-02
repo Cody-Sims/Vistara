@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { expect, test } from '@playwright/test';
 import { fixturePath } from '../support/paths.js';
+import { signInWithPassword } from '../support/session.js';
 import { readRuntimeState } from '../support/state.js';
 
 const runtime = readRuntimeState();
@@ -47,12 +48,7 @@ test.describe('cookie session mutations', () => {
       }
     });
 
-    await page.goto(`${runtime.baseUrl}/login`);
-    await page
-      .getByLabel('Email address or user name')
-      .fill(seeded.login);
-    await page.getByLabel('Password').fill(seeded.password);
-    await page.getByRole('button', { name: 'Sign in' }).click();
+    await signInWithPassword(page, runtime.baseUrl, seeded);
     await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
 
     await page.goto(`${runtime.baseUrl}/uploads`);
@@ -78,9 +74,12 @@ test.describe('cookie session mutations', () => {
     const albumName = `Cookie ${browserName}`;
     await page.getByLabel('Album name').fill(albumName);
     await page.getByRole('button', { name: 'Create album' }).click();
-    await expect(albumsRegion.getByRole('status')).toHaveText(
-      `${albumName} was created.`,
-    );
+    // Creating an album refetches the list, and the region announces that
+    // through a live status of its own, so the notice is asked for by the name
+    // it announces rather than by being the region's only status.
+    await expect(
+      albumsRegion.getByRole('status').filter({ hasText: albumName }),
+    ).toHaveText(`${albumName} was created.`);
     await expect
       .poll(() => mutations.find((call) => call.path === '/api/v1/albums'))
       .toMatchObject({ method: 'POST', status: 201 });

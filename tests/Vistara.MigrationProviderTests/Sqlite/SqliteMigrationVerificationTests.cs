@@ -32,6 +32,8 @@ public sealed class SqliteMigrationVerificationTests
         "20260831000511_AddPlatformBootstrap";
     private const string UserPreferencesMigration =
         "20260831002835_AddUserPreferences";
+    private const string OidcLoginRequestsMigration =
+        "20260901000000_AddOidcLoginRequests";
 
     private static readonly string[] ExpectedMigrations =
     [
@@ -45,6 +47,7 @@ public sealed class SqliteMigrationVerificationTests
         LocalCredentialsMigration,
         PlatformBootstrapMigration,
         UserPreferencesMigration,
+        OidcLoginRequestsMigration,
     ];
 
     private static readonly string[] ExpectedTables =
@@ -73,6 +76,7 @@ public sealed class SqliteMigrationVerificationTests
         "jobs",
         "local_credentials",
         "local_identities",
+        "oidc_login_requests",
         "outbox_messages",
         "outbox_sequences",
         "platform_bootstrap",
@@ -188,6 +192,10 @@ public sealed class SqliteMigrationVerificationTests
             script,
             StringComparison.Ordinal);
         Assert.Contains(
+            OidcLoginRequestsMigration,
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "CREATE TEMP TABLE legacy_upload_job_decisions",
             script,
             StringComparison.Ordinal);
@@ -210,7 +218,7 @@ public sealed class SqliteMigrationVerificationTests
         IMigrator migrator = context.GetService<IMigrator>();
 
         string rollback = migrator.GenerateScript(
-            UserPreferencesMigration,
+            OidcLoginRequestsMigration,
             Migration.InitialDatabase);
         foreach (string table in ExpectedTables)
         {
@@ -224,6 +232,67 @@ public sealed class SqliteMigrationVerificationTests
         Assert.Empty(await ReadApplicationTablesAsync(connection));
         await migrator.MigrateAsync();
         Assert.Equal(ExpectedTables, await ReadApplicationTablesAsync(connection));
+    }
+
+    /// <summary>
+    /// The OIDC login request migration must roll back on its own, so an
+    /// operator can revert the hosted sign-in slice without unwinding the whole
+    /// identity schema underneath it.
+    /// </summary>
+    [Fact]
+    public async Task Oidc_login_request_migration_rolls_back_independently()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using VistaraDbContext context = CreateContext(connection);
+        IMigrator migrator = context.GetService<IMigrator>();
+
+        await migrator.MigrateAsync();
+        Assert.Contains(
+            "oidc_login_requests",
+            await ReadApplicationTablesAsync(connection));
+
+        await migrator.MigrateAsync(UserPreferencesMigration);
+        string[] rolledBack = await ReadApplicationTablesAsync(connection);
+        Assert.DoesNotContain("oidc_login_requests", rolledBack);
+        Assert.Contains("user_preferences", rolledBack);
+
+        await migrator.MigrateAsync();
+        Assert.Equal(ExpectedTables, await ReadApplicationTablesAsync(connection));
+    }
+
+    /// <summary>
+    /// The table is written before any tenant scope exists, so it must carry no
+    /// tenant column and no tenant-scoped index that would imply one.
+    /// </summary>
+    [Fact]
+    public async Task Oidc_login_requests_has_the_specified_columns_and_no_tenant()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using VistaraDbContext context = CreateContext(connection);
+        await context.Database.MigrateAsync();
+
+        (string Name, string Type, bool NotNull, bool PrimaryKey)[] columns =
+            await ReadColumnsAsync(connection, "oidc_login_requests");
+
+        Assert.Equal(
+            [
+                ("code_verifier", "TEXT", true, false),
+                ("consumed_at_utc", "TEXT", false, false),
+                ("created_at_utc", "TEXT", true, false),
+                ("expires_at_utc", "TEXT", true, false),
+                ("handle_digest", "BLOB", true, false),
+                ("nonce_digest", "BLOB", true, false),
+                ("provider_id", "TEXT", true, false),
+                ("redirect_uri", "TEXT", true, false),
+                ("return_to", "TEXT", true, false),
+                ("state_digest", "BLOB", true, true),
+            ],
+            columns);
+        Assert.Equal(
+            ["ix_oidc_login_requests_expires_at_utc"],
+            await ReadIndexesAsync(connection, "oidc_login_requests"));
     }
 
     private static VistaraDbContext CreateContext(DbConnection connection)
@@ -260,6 +329,56 @@ public sealed class SqliteMigrationVerificationTests
         }
 
         return tables.ToArray();
+    }
+
+    private static async Task<(string Name, string Type, bool NotNull, bool PrimaryKey)[]>
+        ReadColumnsAsync(SqliteConnection connection, string table)
+    {
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT name, type, "notnull", pk
+            FROM pragma_table_info($table)
+            ORDER BY name;
+            """;
+        command.Parameters.AddWithValue("$table", table);
+
+        var columns = new List<(string, string, bool, bool)>();
+        await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            columns.Add((
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetInt32(2) == 1,
+                reader.GetInt32(3) == 1));
+        }
+
+        return columns.ToArray();
+    }
+
+    private static async Task<string[]> ReadIndexesAsync(
+        SqliteConnection connection,
+        string table)
+    {
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'index' AND tbl_name = $table AND sql IS NOT NULL
+            ORDER BY name;
+            """;
+        command.Parameters.AddWithValue("$table", table);
+
+        var indexes = new List<string>();
+        await using SqliteDataReader reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            indexes.Add(reader.GetString(0));
+        }
+
+        return indexes.ToArray();
     }
 
     private static int Count(string value, string token)

@@ -1,10 +1,11 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { VistaraApiError } from '../../api/generated/client';
-import type { CurrentUser } from '../../api/platform';
+import type { CurrentUser, SetupState } from '../../api/platform';
 import { PlatformApiClient, VistaraThrottledError } from '../../api/platform';
+import { hostedProviderKey } from './hostedSignIn';
 import { LoginPage } from './LoginPage';
 import { safeDestination } from './safeDestination';
 import { SessionProvider } from './SessionProvider';
@@ -23,7 +24,7 @@ function apiError(status: number) {
 interface Options {
   readonly login?: () => Promise<{ user: CurrentUser; csrfToken: string }>;
   readonly getSession?: () => Promise<CurrentUser>;
-  readonly getSetupState?: () => Promise<{ available: boolean }>;
+  readonly getSetupState?: () => Promise<SetupState>;
   readonly entry?: string;
 }
 
@@ -57,7 +58,7 @@ function renderLogin(options: Options = {}) {
     </SessionProvider>,
   );
 
-  return client;
+  return Object.assign(client, { router });
 }
 
 describe('sign-in page', () => {
@@ -248,6 +249,126 @@ describe('first-run discovery', () => {
     ).not.toBeInTheDocument();
   });
 });
+
+/**
+ * A published provider is one more way in, never a replacement for the local
+ * one: a deployment that turns hosted sign-in on must still let an operator
+ * sign in with a password and reach first-run setup.
+ */
+describe('hosted sign-in', () => {
+  const entra = {
+    id: 'entra',
+    displayName: 'Microsoft Entra ID',
+    startUrl: '/api/v1/auth/oidc/entra/start',
+  };
+
+  beforeEach(() => {
+    sessionStorage.clear();
+  });
+
+  it('offers the published provider beside the password form', async () => {
+    renderLogin({
+      getSetupState: async () => ({
+        available: false,
+        signInProviders: [entra],
+      }),
+      entry: '/login?returnTo=%2Falbums',
+    });
+
+    const control = await screen.findByRole('link', {
+      name: 'Sign in with Microsoft Entra ID',
+    });
+    expect(control).toHaveAttribute(
+      'href',
+      '/api/v1/auth/oidc/entra/start?returnTo=%2Falbums',
+    );
+    expect(screen.getByLabelText('Password')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
+  });
+
+  it('offers nothing hosted when the deployment publishes no provider', async () => {
+    renderLogin({ getSetupState: async () => ({ available: false }) });
+
+    await screen.findByLabelText('Password');
+    expect(screen.queryByRole('link', { name: /sign in with/i })).toBeNull();
+  });
+
+  /**
+   * The provider list arrives over the network, so a start URL that would
+   * leave this origin is dropped rather than rendered as a control.
+   */
+  it('never renders a start URL that leaves this origin', async () => {
+    renderLogin({
+      getSetupState: async () => ({
+        available: false,
+        signInProviders: [
+          { ...entra, startUrl: 'https://attacker.example/start' },
+        ],
+      }),
+    });
+
+    await screen.findByLabelText('Password');
+    expect(screen.queryByRole('link', { name: /sign in with/i })).toBeNull();
+  });
+
+  it('records the provider and reports the wait before leaving', async () => {
+    const user = userEvent.setup();
+    renderLogin({
+      getSetupState: async () => ({
+        available: false,
+        signInProviders: [entra],
+      }),
+    });
+
+    const control = await screen.findByRole('link', {
+      name: 'Sign in with Microsoft Entra ID',
+    });
+    // jsdom cannot navigate, and the assertions are about what this page did
+    // before the browser would have left.
+    document.addEventListener('click', preventNavigation);
+    try {
+      await user.click(control);
+    } finally {
+      document.removeEventListener('click', preventNavigation);
+    }
+
+    expect(sessionStorage.getItem(hostedProviderKey)).toBe('entra');
+    expect(control).toHaveAttribute('aria-busy', 'true');
+    expect(
+      screen.getByText('Taking you to Microsoft Entra ID…'),
+    ).toBeInTheDocument();
+    expect(JSON.stringify(sessionStorage)).not.toContain('token');
+  });
+
+  /**
+   * The redirect carries one opaque code and no detail. It is announced,
+   * focused for a keyboard visitor, and then taken out of the address bar so a
+   * reload does not repeat a failure that already happened.
+   */
+  it('announces a failed hosted sign-in once and clears the code', async () => {
+    const client = renderLogin({
+      getSetupState: async () => ({
+        available: false,
+        signInProviders: [entra],
+      }),
+      entry: '/login?returnTo=%2Falbums&error=oidc_sign_in_failed',
+    });
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(
+      'Signing in with your identity provider did not finish.',
+    );
+    await waitFor(() => expect(alert).toHaveFocus());
+    await waitFor(() =>
+      expect(client.router.state.location.search).toBe('?returnTo=%2Falbums'),
+    );
+    expect(screen.getByLabelText('Password')).toBeInTheDocument();
+  });
+});
+
+function preventNavigation(event: Event) {
+  event.preventDefault();
+}
 
 describe('credential handling', () => {
   it('sends the password once and never again on later requests', async () => {

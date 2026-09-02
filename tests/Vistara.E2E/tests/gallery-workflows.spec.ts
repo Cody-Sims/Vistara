@@ -9,7 +9,6 @@ test.describe('integrated gallery workflows', () => {
   test('uploads, browses, organizes, shares, restores, and preserves navigation state', {
     tag: '@smoke',
   }, async ({
-    browser,
     browserName,
     page,
     request,
@@ -125,9 +124,12 @@ test.describe('integrated gallery workflows', () => {
     const albumName = `Summer ${browserName}`;
     await page.getByLabel('Album name').fill(albumName);
     await page.getByRole('button', { name: 'Create album' }).click();
-    await expect(albumsRegion.getByRole('status')).toHaveText(
-      `${albumName} was created.`,
-    );
+    // Creating an album refetches the list, and the region announces that
+    // through a live status of its own, so the notice is asked for by the name
+    // it announces rather than by being the region's only status.
+    await expect(
+      albumsRegion.getByRole('status').filter({ hasText: albumName }),
+    ).toHaveText(`${albumName} was created.`);
     await expect(page.getByText(albumName, { exact: true })).toBeVisible();
 
     await page.getByRole('link', { name: 'Tags' }).click();
@@ -135,9 +137,12 @@ test.describe('integrated gallery workflows', () => {
     const tagName = `Coast ${browserName}`;
     await page.getByLabel('New tag name').fill(tagName);
     await page.getByRole('button', { name: 'Create tag' }).click();
-    await expect(tagsRegion.getByRole('status')).toHaveText(
-      `${tagName} was created.`,
-    );
+    // The region announces its own loading through a live status of its
+    // own, so the notice is asked for by what it says rather than by being
+    // the region's only status.
+    await expect(
+      tagsRegion.getByRole('status').filter({ hasText: tagName }),
+    ).toHaveText(`${tagName} was created.`);
 
     await page.getByRole('link', { name: 'Favorites' }).click();
     await expect(page.getByText(primaryTitle, { exact: true })).toBeVisible();
@@ -191,8 +196,9 @@ test.describe('integrated gallery workflows', () => {
     const shareUrl = await page.getByLabel('New share link').inputValue();
     await expect(page.getByRole('article', { name: shareName })).toBeVisible();
 
-    const publicContext = await browser.newContext();
-    const publicPage = await publicContext.newPage();
+    // The API key is scoped to `page`, so another page in this context is an
+    // anonymous recipient without requiring a second traced browser context.
+    const publicPage = await page.context().newPage();
     await publicPage.goto(shareUrl);
     await expect(publicPage.getByRole('heading', { name: shareName })).toBeVisible();
     await expect(publicPage.getByText(uploadedTitle, { exact: true })).toBeVisible();
@@ -210,7 +216,7 @@ test.describe('integrated gallery workflows', () => {
     expect(delivered.status()).toBe(200);
     expect(delivered.headers()['cache-control']).toBe('private,no-store');
     expect((await delivered.body()).length).toBeGreaterThan(0);
-    await publicContext.close();
+    await publicPage.close();
 
     await page.getByRole('button', { name: 'Close without copying' }).click();
     await page
@@ -218,9 +224,12 @@ test.describe('integrated gallery workflows', () => {
       .getByRole('button', { name: 'Revoke' })
       .click();
     await page.getByRole('button', { name: 'Confirm revocation' }).click();
-    await expect(sharesRegion.getByRole('status')).toHaveText(
-      `“${shareName}” was revoked.`,
-    );
+    // The region announces its own loading through a live status of its
+    // own, so the notice is asked for by what it says rather than by being
+    // the region's only status.
+    await expect(
+      sharesRegion.getByRole('status').filter({ hasText: shareName }),
+    ).toHaveText(`“${shareName}” was revoked.`);
 
     await page.getByRole('link', { name: 'Trash' }).click();
     const trashRegion = page.getByRole('region', { name: 'Trash' });
@@ -230,9 +239,12 @@ test.describe('integrated gallery workflows', () => {
       .getByRole('article', { name: trashTitle })
       .getByRole('button', { name: 'Undo deletion' })
       .click();
-    await expect(trashRegion.getByRole('status')).toHaveText(
-      'Restore queued for 1 item.',
-    );
+    // The region announces its own loading through a live status of its
+    // own, so the notice is asked for by what it says rather than by being
+    // the region's only status.
+    await expect(
+      trashRegion.getByRole('status').filter({ hasText: 'Restore queued' }),
+    ).toHaveText('Restore queued for 1 item.');
     await expect(page.getByRole('article', { name: trashTitle })).toHaveCount(0);
   });
 });

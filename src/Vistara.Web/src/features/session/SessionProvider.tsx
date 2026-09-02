@@ -11,10 +11,17 @@ import { VistaraApiError } from '../../api/generated/client';
 import { onSessionExpired } from '../../api/sessionExpiry';
 import type {
   CurrentUser,
+  HostedSignOut,
   LoginRequest,
   LoginResponse,
 } from '../../api/platform';
 import { clearAccountScopedData } from './accountData';
+import {
+  forgetHostedProvider,
+  navigateToProviderSignOut,
+  providerSignOutUrl,
+  readHostedProvider,
+} from './hostedSignIn';
 import {
   activeMembership,
   canAdminister,
@@ -32,6 +39,12 @@ export interface SessionClient {
   getSession(): Promise<CurrentUser>;
   login(request: LoginRequest): Promise<LoginResponse>;
   logout(): Promise<void>;
+  /**
+   * Revokes the session of a browser that signed in with a hosted provider and
+   * answers where the provider session may be ended. Optional so a deployment
+   * or a preview without hosted sign-in simply signs out locally.
+   */
+  signOutFromProvider?(providerId: string): Promise<HostedSignOut>;
   /** Optional notification that a request needing a session was refused. */
   onUnauthorized?(listener: () => void): () => void;
 }
@@ -45,6 +58,12 @@ interface SessionProviderProps {
    * Defaults to the shared account-scoped cleanup.
    */
   readonly onSessionEnd?: () => Promise<void> | void;
+  /**
+   * Sends the browser to the provider's end-session URL once the local session
+   * is already gone. It is injectable so the handoff can be observed in a test
+   * without a real navigation.
+   */
+  readonly onLeaveForProvider?: (url: string) => void;
   readonly children: ReactNode;
 }
 
@@ -84,6 +103,7 @@ export function SessionProvider({
   children,
   client,
   mode = 'live',
+  onLeaveForProvider = navigateToProviderSignOut,
   onSessionEnd,
 }: SessionProviderProps) {
   const [state, setState] = useState<SessionState>(() => ({
@@ -182,6 +202,7 @@ export function SessionProvider({
 
       request.current += 1;
       cachedIdentity.current = undefined;
+      forgetHostedProvider();
       sessionCredentials.clear();
       setState({ status: 'anonymous' });
       void endAccount();
@@ -212,6 +233,9 @@ export function SessionProvider({
       };
       setSignOutIncomplete(false);
       request.current += 1;
+      // A password sign-in is not a provider session, so a marker left by an
+      // earlier hosted sign-in in this tab must not outlive it.
+      forgetHostedProvider();
       await adoptIdentity(user.userId);
       sessionCredentials.adopt(user);
       setState({ status: 'authenticated', user });
@@ -220,17 +244,41 @@ export function SessionProvider({
     [adoptIdentity, client],
   );
 
+  /**
+   * Ends the session everywhere it exists, in that order: the Vistara session
+   * is revoked by the server first, this device forgets everything the account
+   * left behind, and only then is the browser sent to the provider to end the
+   * provider session. A tab that never signed in with a provider, or a
+   * deployment that publishes none, signs out locally and stays here.
+   */
   const signOut = useCallback(async () => {
     request.current += 1;
+    const hostedProvider = client.signOutFromProvider
+      ? readHostedProvider()
+      : undefined;
     let confirmed = true;
+    let endSessionUrl: string | undefined;
     try {
-      await client.logout();
+      if (hostedProvider) {
+        const hosted = await client.signOutFromProvider!(hostedProvider);
+        endSessionUrl = providerSignOutUrl(hosted.endSessionUrl);
+      } else {
+        await client.logout();
+      }
     } catch {
-      // The browser session ends locally either way, but the server may still
-      // hold the cookie, so the visitor is told.
-      confirmed = false;
+      // A provider sign-out that did not answer must not leave the Vistara
+      // session behind it, so the local revocation is attempted on its own.
+      // The browser session ends on this device either way, but the server may
+      // still hold the cookie, so the visitor is told.
+      endSessionUrl = undefined;
+      try {
+        await client.logout();
+      } catch {
+        confirmed = false;
+      }
     }
 
+    forgetHostedProvider();
     setSignOutIncomplete(!confirmed);
     cachedIdentity.current = undefined;
     // Whether or not the server confirmed it, nothing of this session is spent
@@ -238,7 +286,10 @@ export function SessionProvider({
     sessionCredentials.clear();
     setState({ status: 'anonymous' });
     await endAccount();
-  }, [client, endAccount]);
+    if (endSessionUrl) {
+      onLeaveForProvider(endSessionUrl);
+    }
+  }, [client, endAccount, onLeaveForProvider]);
 
   const value = useMemo<SessionContextValue>(() => {
     const membership = activeMembership(state.user);

@@ -12,6 +12,17 @@ detail lives in the companion
 [Azure identity, RBAC, and secrets](azure-identity-and-secrets.md) guide so
 this runbook stays linear.
 
+> **There is now a one-command path.**
+> [`./deploy/azure/up.sh`](../../deploy/azure/README.md) provisions the same
+> shape of deployment from checked-in Bicep, with Entra sign-in, passwordless
+> PostgreSQL, and a guarded teardown — see
+> [Azure hosted bootstrap](azure-hosted-bootstrap.md). Prefer it. This guide
+> remains useful for two things the bootstrap does not do: explaining what the
+> free offers actually give you and how Azure bills these services, and giving
+> you a manual CLI path when you cannot run the bootstrap. Sections that
+> described the absence of Azure-native assets are corrected in
+> [§13](#13-configuration-gaps-that-need-code-changes).
+
 ## How to read this document
 
 Every non-obvious claim is labelled:
@@ -331,6 +342,8 @@ export KV="kv-vistara-$SUFFIX"
 export ACAENV="cae-vistara-$SUFFIX"
 export APIAPP="ca-vistara-api"
 export WORKERAPP="ca-vistara-worker"
+export APIMI="id-vistara-api-$SUFFIX"      # user-assigned identity, API
+export WORKERMI="id-vistara-worker-$SUFFIX"  # user-assigned identity, worker
 export MIGJOB="caj-vistara-migrate"
 export GHCR_NS="<your-github-namespace>"   # ghcr.io/<ns>/vistara-api
 export IMAGE_TAG="<release-tag>"
@@ -427,15 +440,18 @@ it also breaks `az storage cors add`. The trade-offs are in
 
 ### 5.4 PostgreSQL Flexible Server
 
-> **Read this before creating the server.** **[Verified from the code]**
-> Vistara has **no support for Entra (passwordless) PostgreSQL
-> authentication**: every persistence path calls
-> `options.UseNpgsql(connectionString)` with no `NpgsqlDataSource` password
-> provider, so there is nothing to refresh an expiring access token. Create the
-> server with password authentication left **enabled** (the default). Do **not**
-> pass `--password-auth Disabled`, and do not follow Entra-only guidance — the
-> application will not be able to connect. See
-> [§13](#13-configuration-gaps-that-need-code-changes) for the full detail.
+> **Read this before creating the server.** This manual path uses **password
+> authentication**, because it wires the application up with a connection
+> string and nothing here refreshes an expiring token. Create the server with
+> password authentication left **enabled** (the default) and do **not** pass
+> `--password-auth Disabled`.
+>
+> Vistara itself is no longer limited to passwords: `Persistence:Azure`
+> supplies an Entra access token through an `NpgsqlDataSource` periodic
+> password provider, and the hosted bootstrap uses it to create an
+> Entra-only server with no administrator password at all. If you want that,
+> use [Azure hosted bootstrap](azure-hosted-bootstrap.md) rather than this
+> section. See [§13](#13-configuration-gaps-that-need-code-changes).
 
 ```bash
 az postgres flexible-server create \
@@ -651,18 +667,30 @@ the first day.
 These steps live in the companion guide:
 
 - [Managed identity and blob RBAC](azure-identity-and-secrets.md#2-managed-identity-and-blob-rbac)
-  — including the **two** role assignments Vistara needs, one of which is only
+  — create one **user-assigned** identity per role, capture each `clientId`,
+  and make the **two** role assignments Vistara needs, one of which is only
   discovered at runtime if you miss it.
 - [Key Vault and secret hygiene](azure-identity-and-secrets.md#4-key-vault-and-secret-hygiene)
   — create the vault, grant yourself **Key Vault Secrets Officer** so
-  `secret set` works, write the pepper and database passwords, then grant the
-  apps **Key Vault Secrets User**.
+  `secret set` works, write the pepper and database passwords, then grant both
+  identities **Key Vault Secrets User**.
 - [Private GHCR registry credentials](azure-identity-and-secrets.md#5-private-ghcr-registry-credentials)
   — public packages need no credentials at all; private ones should be
   referenced by secret name, never pasted on a command line.
 
-Create the Key Vault and its secrets now; do the role assignments after
-[§8](#8-migrations-deployment-and-validation) creates the apps.
+Create the two user-assigned identities, the Key Vault, and its secrets now,
+and grant every role while you are there. A user-assigned identity is a
+standalone resource, so it and its role assignments exist before
+[§8](#8-migrations-deployment-and-validation) creates the apps — which is why
+that section attaches the identities with `--user-assigned` and passes their
+client IDs straight into configuration.
+
+The only companion steps that must wait for `az containerapp` to exist are the
+two that target an app by name: the Key Vault secret references in
+[azure-identity-and-secrets.md §4.4](azure-identity-and-secrets.md#44-reference-the-secrets-once-the-apps-exist)
+and the private-registry credentials in
+[§5.2](azure-identity-and-secrets.md#52-private-packages-store-the-token-in-key-vault-reference-it-by-name).
+[§8.3](#83-deploy-the-worker) sends you back for both.
 
 ---
 
@@ -684,9 +712,11 @@ use exactly these names.
 | `Media__Storage__Azure__AccountName` | `$STORAGE` | `MediaComposition.cs` |
 | `Media__Storage__Azure__ContainerName` | `$CONTAINER` | `MediaComposition.cs` |
 | `Media__Storage__Azure__ServiceUri` | `https://$STORAGE.blob.core.windows.net` | `AzureBlobStoreOptions.cs` trusted-suffix check |
-| `Media__Storage__Azure__CredentialMode` | `DefaultCredential` (managed identity) or `SharedKey` (fallback) | `MediaComposition.cs` (`MediaAzureCredentialMode`) |
+| `Media__Storage__Azure__CredentialMode` | `ManagedIdentity` (supported deployment path) or `SharedKey` (fallback) | `MediaComposition.cs` (`MediaAzureCredentialMode`) |
+| `Media__Storage__Azure__ManagedIdentityClientId` | `clientId` of the app's user-assigned identity; **required** with `ManagedIdentity`, rejected otherwise | `MediaOptionsValidator.ValidateAzure` |
 | `Media__Storage__Azure__ConnectionString` | **only** with `SharedKey` | `MediaOptionsValidator.ValidateAzure` |
 | `Media__Storage__Azure__AllowSharedKeySas` | `true` **only** with `SharedKey` | `MediaOptionsValidator.ValidateAzure` |
+| `Media__Storage__Azure__AllowDefaultCredentialOutsideDevelopment` | leave unset; reviewed exception that keeps `DefaultCredential` usable outside a `Development` environment | `MediaOptionsValidator.ValidateAzure` |
 | `Media__Storage__Azure__MaximumGrantLifetime` | optional; must be > 0 and ≤ 7 days | `AzureBlobStoreOptions.Validate` |
 | `Media__Imaging__Provider` | `NetVips` (the only accepted value) | `MediaOptionsValidator` |
 | `Security__Hosts__AllowedHosts__0` | your container app FQDN | `SecurityComposition.cs` |
@@ -739,6 +769,8 @@ AZURE_POSTGRES_SERVER=<postgres-flexible-server-name>
 AZURE_POSTGRES_DATABASE=vistara
 AZURE_KEY_VAULT=<key-vault-name>
 AZURE_CONTAINERAPPS_ENV=<container-apps-environment-name>
+AZURE_API_IDENTITY=<user-assigned-identity-name-for-the-api>
+AZURE_WORKER_IDENTITY=<user-assigned-identity-name-for-the-worker>
 AZURE_TENANT_ID=<entra-tenant-id>
 
 # ---------------------------------------------------------------------------
@@ -754,7 +786,8 @@ Media__Storage__Provider=Azure
 Media__Storage__Azure__AccountName=<3-24-lowercase-alphanumeric>
 Media__Storage__Azure__ContainerName=<3-63-lowercase-with-single-hyphens>
 Media__Storage__Azure__ServiceUri=https://<3-24-lowercase-alphanumeric>.blob.core.windows.net
-Media__Storage__Azure__CredentialMode=DefaultCredential
+Media__Storage__Azure__CredentialMode=ManagedIdentity
+Media__Storage__Azure__ManagedIdentityClientId=<user-assigned-identity-client-id>
 Media__Imaging__Provider=NetVips
 
 Security__Hosts__AllowedHosts__0=<container-app-fqdn>
@@ -808,16 +841,21 @@ az containerapp job execution list --name "$MIGJOB" --resource-group "$RG" -o ta
 — <https://learn.microsoft.com/en-us/cli/azure/containerapp/job>,
 <https://learn.microsoft.com/en-us/cli/azure/containerapp/job/execution>
 
-**[Inferred]** The migration image is built locally by
-`deploy/containers/migration.Dockerfile`; unlike the API and worker images it
-is **not** published by `.github/workflows/release-images.yml`, so you must
-build and push it to a registry the environment can pull from first. See
-[§13](#13-configuration-gaps-that-need-code-changes).
+**[Verified from `.github/workflows/release-images.yml`]** the migration image
+**is** published: the release workflow pushes
+`ghcr.io/<namespace>/vistara-migrations` alongside the API and worker images,
+each with a provenance attestation. Pull it at the release tag like the other
+two; building `deploy/containers/migration.Dockerfile` yourself is only needed
+for an unreleased commit.
 
 **[Verified from `migration-entrypoint.sh`]** the entrypoint requires
 `ConnectionStrings__Vistara` (or `Persistence__ConnectionString`) and a
 `MIGRATION_PROVIDER` of `Sqlite` or `PostgreSql`, exiting `64` otherwise. Use
 the **`vistara_migrator`** role here and the runtime roles everywhere else.
+Setting `MIGRATION_MANAGED_IDENTITY_CLIENT_ID` switches the same entrypoint to
+Entra mode, where it builds the connection string from discrete, individually
+validated `MIGRATION_POSTGRES_*` variables and refuses any connection string at
+all; that is the mode the hosted bootstrap uses.
 
 ### 8.2 Deploy the API
 
@@ -828,7 +866,7 @@ az containerapp create \
   --target-port 8080 --ingress external --transport auto \
   --cpu 0.5 --memory 1.0Gi \
   --min-replicas 0 --max-replicas 1 \
-  --system-assigned \
+  --user-assigned "$APIMI_ID" \
   --secrets "api-db-connection=<secret>" "api-pepper=<secret>" \
   --env-vars "Persistence__Provider=PostgreSql" \
              "ConnectionStrings__Vistara=secretref:api-db-connection" \
@@ -836,16 +874,25 @@ az containerapp create \
              "Media__Storage__Azure__AccountName=$STORAGE" \
              "Media__Storage__Azure__ContainerName=$CONTAINER" \
              "Media__Storage__Azure__ServiceUri=https://$STORAGE.blob.core.windows.net" \
-             "Media__Storage__Azure__CredentialMode=DefaultCredential" \
+             "Media__Storage__Azure__CredentialMode=ManagedIdentity" \
+             "Media__Storage__Azure__ManagedIdentityClientId=$APIMI_CLIENT" \
              "Media__Imaging__Provider=NetVips" \
              "Security__Transport__RedirectHttpToHttps=false" \
              "Platform__Authentication__ApiKeys__CurrentPepperVersion=v1" \
              "Platform__Authentication__ApiKeys__Peppers__v1=secretref:api-pepper"
 ```
 
-**[Verified]** `--ingress` accepts only `external` or `internal`, and
-`--transport` accepts `auto`, `http`, `http2`, or `tcp`.
+**[Verified]** `--ingress` accepts only `external` or `internal`,
+`--transport` accepts `auto`, `http`, `http2`, or `tcp`, and `--user-assigned`
+takes "Space-separated user identities to be assigned" — the identity
+**resource IDs**, not their client IDs.
 — <https://learn.microsoft.com/en-us/cli/azure/containerapp>
+
+**[Verified from `MediaComposition.cs`]** the app needs both halves of the
+identity: `--user-assigned` attaches it to the container app, and
+`Media__Storage__Azure__ManagedIdentityClientId` tells Vistara which identity
+to request tokens for. With the identity attached but the client ID missing,
+startup fails validation rather than falling back to any other identity.
 
 **[Verified]** `--min-replicas 0` with the default HTTP scale rule means "You
 aren't billed usage charges if your container app scales to zero." The
@@ -878,7 +925,7 @@ az containerapp create \
   --image "ghcr.io/$GHCR_NS/vistara-worker:$IMAGE_TAG" \
   --cpu 0.5 --memory 1.0Gi \
   --min-replicas 1 --max-replicas 1 \
-  --system-assigned \
+  --user-assigned "$WORKERMI_ID" \
   --secrets "worker-db-connection=<secret>" \
   --env-vars "Persistence__Provider=PostgreSql" \
              "ConnectionStrings__Vistara=secretref:worker-db-connection" \
@@ -886,7 +933,8 @@ az containerapp create \
              "Media__Storage__Azure__AccountName=$STORAGE" \
              "Media__Storage__Azure__ContainerName=$CONTAINER" \
              "Media__Storage__Azure__ServiceUri=https://$STORAGE.blob.core.windows.net" \
-             "Media__Storage__Azure__CredentialMode=DefaultCredential" \
+             "Media__Storage__Azure__CredentialMode=ManagedIdentity" \
+             "Media__Storage__Azure__ManagedIdentityClientId=$WORKERMI_CLIENT" \
              "Media__Imaging__Provider=NetVips" \
              "Worker__InstanceId=azure-worker" \
              "Worker__Jobs__MaximumConcurrency=1" \
@@ -907,10 +955,14 @@ accepting that it will not restart on its own. At 0.5 vCPU / 1.0 GiB a
 continuously running worker consumes the entire ≈ 100-hour free grant in about
 four days.
 
-Now grant both identities their roles —
+Both identities already hold their blob and Key Vault roles from
 [azure-identity-and-secrets.md §2](azure-identity-and-secrets.md#2-managed-identity-and-blob-rbac)
-and [§4.3](azure-identity-and-secrets.md#43-grant-the-apps-read-access-and-reference-the-secrets)
-— and restart the apps so the new permissions take effect.
+and [§4.3](azure-identity-and-secrets.md#43-grant-the-identities-read-access),
+so nothing here waits on permission propagation. Now that the apps exist, go
+back for the two app-scoped steps: the Key Vault secret references in
+[§4.4](azure-identity-and-secrets.md#44-reference-the-secrets-once-the-apps-exist)
+and, for private images, the registry credentials in
+[§5.2](azure-identity-and-secrets.md#52-private-packages-store-the-token-in-key-vault-reference-it-by-name).
 
 ### 8.4 Validate
 
@@ -934,7 +986,11 @@ Startup failures are informative because the options validators run with
 |---|---|
 | "Exactly one media storage provider section must be configured" | Remove leftover `Media__Storage__S3__*` / `Local__RootPath` values |
 | "The Azure Blob service endpoint is invalid" | `ServiceUri` must be `https://<account>.blob.core.windows.net`, no path or query |
-| "Azure shared-key settings cannot be combined with default credentials" | Drop `ConnectionString` / `AllowSharedKeySas` when using `DefaultCredential` |
+| "Azure managed-identity mode requires an explicit user-assigned client ID" | Set `Media__Storage__Azure__ManagedIdentityClientId` to the identity's `clientId` |
+| "The Azure user-assigned managed identity client ID must be a non-empty hyphenated GUID" | Pass the `clientId` unquoted and unbraced, not the `principalId` or the resource ID |
+| "Azure default credentials are limited to local development" | Use `CredentialMode=ManagedIdentity` in every deployed environment; `DefaultCredential` needs `ASPNETCORE_ENVIRONMENT=Development` or the reviewed `AllowDefaultCredentialOutsideDevelopment=true` |
+| "Azure shared-key settings cannot be combined with managed-identity credentials" | Drop `ConnectionString` / `AllowSharedKeySas` when using `ManagedIdentity` |
+| "Azure identity credentials are limited to a first-party Azure Blob endpoint" | `ServiceUri` must be `https://$STORAGE.blob.core.windows.net` for the configured account |
 | "A valid API key pepper and current pepper version are required" | Set `Peppers__v1` and `CurrentPepperVersion` |
 | "At least one valid, explicitly configured JWT issuer is required" | Set all four `Jwt__Issuers__0__*` keys |
 | "Required secret configuration '<key>' is missing" | A `Security__RequiredSecretKeys__N` key has no value |
@@ -1068,21 +1124,22 @@ section linked beside it.
 Limitations of the current codebase, not of Azure. Recorded here so the guide
 does not document a capability that does not exist.
 
-1. **No Entra (passwordless) authentication to PostgreSQL.**
-   **[Verified]** every persistence path calls
-   `options.UseNpgsql(connectionString)` directly
-   (`PersistenceServiceCollectionExtensions.cs`, `GalleryComposition.cs`,
-   `WorkerPlatformComposition.cs`,
-   `JobPersistenceServiceCollectionExtensions.cs`,
-   `TenantDbContextFactory.cs`, `VistaraDbContextFactory.cs`) with no
-   `NpgsqlDataSource` password provider. Microsoft's guidance is that ".NET ...
-   can get an access token for the managed identity ... Then you can use the
-   access token as the password"
-   (<https://learn.microsoft.com/en-us/azure/service-connector/how-to-integrate-postgres>),
-   and those tokens expire, so a periodic password provider is required.
-   **Until that exists, Vistara on Azure must use PostgreSQL password
-   authentication** and real secrets in Key Vault — see the warning in
-   [§5.4](#54-postgresql-flexible-server).
+1. **Entra (passwordless) PostgreSQL authentication now exists, but not on this
+   manual path.** **[Verified from
+   `src/Vistara.Persistence/Azure/PersistenceAzureOptions.cs` and
+   `VistaraNpgsqlDataSourceProvider.cs`]** setting
+   `Persistence__Azure__EntraTokenEnabled=true` with a user-assigned
+   `ManagedIdentityClientId` and a token scope builds an `NpgsqlDataSource`
+   with a periodic password provider, so tokens rotate without a process
+   restart, and `deploy/containers/migration-entrypoint.sh` acquires its own
+   token from discrete variables. Microsoft's guidance is that ".NET ... can
+   get an access token for the managed identity ... Then you can use the access
+   token as the password"
+   (<https://learn.microsoft.com/en-us/azure/service-connector/how-to-integrate-postgres>).
+   [`./deploy/azure/up.sh`](azure-hosted-bootstrap.md) uses exactly that and
+   creates a server with `passwordAuth: Disabled`. The imperative path in
+   [§5.4](#54-postgresql-flexible-server) does **not** wire it up, so it still
+   needs password authentication and real secrets in Key Vault.
 2. **No configuration key for `AzureBlobStoreOptions.AllowedEndpointOrigins`.**
    **[Verified]** the adapter supports an endpoint allowlist, but
    `MediaAzureOptions` in `MediaComposition.cs` does not expose it. Only the
@@ -1097,18 +1154,21 @@ does not document a capability that does not exist.
    `UseForwardedHeaders` does not trust `X-Forwarded-For`, so client-IP
    rate-limit partitioning sees the ingress rather than the caller. A
    VNet-integrated environment with a known infrastructure subnet CIDR is the
-   current workaround.
-4. **The migration image is not published.**
-   **[Verified]** `.github/workflows/release-images.yml` pushes only
-   `vistara-api` and `vistara-worker` to GHCR, while `deploy/README.md`
-   requires the migration container to run first. Any registry-based
-   deployment must build and push `deploy/containers/migration.Dockerfile`
-   itself.
-5. **No Azure-native deployment assets in this repository.** There is no
-   Bicep, ARM, `azd`, or Container Apps YAML under `deploy/`; the supported
-   artifacts are Compose topologies. Everything in this guide is imperative
-   CLI, and should be replaced by checked-in infrastructure-as-code before it
-   is used for anything beyond evaluation.
+   current workaround. The hosted bootstrap does not work around it either: it
+   declares `Platform__RateLimits__PartitionMode=SharedIngress` so the raised
+   hosted ceilings are honest about counting one shared bucket.
+4. **The migration image is published.** **[Verified]**
+   `.github/workflows/release-images.yml` builds and pushes `vistara-api`,
+   `vistara-worker`, **and** `vistara-migrations` to GHCR, each with a
+   provenance attestation. Pull `ghcr.io/<namespace>/vistara-migrations` at the
+   release tag rather than building
+   `deploy/containers/migration.Dockerfile` yourself.
+5. **Azure-native deployment assets exist.** `deploy/azure/` holds the `azd`
+   project, the Bicep templates, the provisioning hooks, and the role bootstrap
+   SQL, and `./deploy/azure/up.sh` is the supported entry point — see
+   [Azure hosted bootstrap](azure-hosted-bootstrap.md). Everything in *this*
+   guide remains imperative CLI, which is why it is now the fallback rather
+   than the recommendation.
 
 ---
 

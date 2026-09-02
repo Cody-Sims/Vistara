@@ -8,6 +8,7 @@ using Vistara.Application.Gallery.Curation;
 using Vistara.Application.Lifecycle;
 using Vistara.Domain.Jobs;
 using Vistara.Persistence;
+using Vistara.Persistence.Azure;
 using Vistara.Persistence.Derivatives.Worker;
 using Vistara.Persistence.Gallery.Curation;
 using Vistara.Persistence.Jobs;
@@ -110,6 +111,7 @@ public static class WorkerPlatformServiceCollectionExtensions
                 "SQLite job execution supports a single worker only.");
         }
 
+        services.AddVistaraNpgsqlDataSources(configuration);
         services.AddVistaraPersistence(options =>
         {
             options.Provider = provider;
@@ -121,17 +123,8 @@ public static class WorkerPlatformServiceCollectionExtensions
             options.ConnectionString = connectionString;
             options.ConfiguredWorkerCount = configuredWorkerCount;
         });
-        services.AddDbContext<OutboxDbContext>(options =>
-        {
-            if (provider == VistaraDatabaseProvider.Sqlite)
-            {
-                options.UseSqlite(connectionString);
-            }
-            else
-            {
-                options.UseNpgsql(connectionString);
-            }
-        });
+        services.AddDbContext<OutboxDbContext>((serviceProvider, options) =>
+            options.UseVistaraDatabase(serviceProvider, provider, connectionString));
 
         services.AddOptions<WorkerPlatformOptions>()
             .Bind(configuration.GetSection(WorkerPlatformOptions.SectionName))

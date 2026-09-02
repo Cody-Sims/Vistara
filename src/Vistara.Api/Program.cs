@@ -2,9 +2,11 @@ using Microsoft.Extensions.FileProviders;
 using Vistara.Api.Composition.Media;
 using Vistara.Api.Composition.Platform;
 using Vistara.Api.Composition.Runtime;
+using Vistara.Api.Composition.Security;
 using Vistara.Api.OpenApi.Gallery;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+builder.Services.AddVistaraApiSecurity(builder.Configuration, builder.Environment);
 builder.Services.AddVistaraApiRuntime(builder.Configuration);
 builder.Services.AddVistaraApiPlatform(builder.Configuration);
 builder.Services.AddVistaraApiPersistence(builder.Configuration);

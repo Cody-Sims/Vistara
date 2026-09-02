@@ -6,9 +6,10 @@ import {
   RouterProvider,
   useLocation,
 } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { VistaraApiError } from '../../api/generated/client';
 import type { CurrentUser } from '../../api/platform';
+import { hostedProviderKey } from './hostedSignIn';
 import {
   RequireAdministration,
   RequireSession,
@@ -34,6 +35,9 @@ interface SessionClientDouble {
     password: string;
   }) => Promise<{ user: CurrentUser; csrfToken: string }>;
   logout: () => Promise<void>;
+  signOutFromProvider?: (
+    providerId: string,
+  ) => Promise<{ endSessionUrl?: string | null }>;
 }
 
 function fakeClient(
@@ -59,6 +63,14 @@ function SessionProbe() {
       <button type="button" onClick={() => void session.signOut()}>
         Sign out
       </button>
+      <button
+        type="button"
+        onClick={() =>
+          void session.signIn({ login: 'ada@example.test', password: 'pw' })
+        }
+      >
+        Sign in
+      </button>
       <button type="button" onClick={() => void session.reload()}>
         Try again
       </button>
@@ -81,6 +93,7 @@ function renderWithSession(
   client: SessionClientDouble,
   initialEntries = ['/settings'],
   onSessionEnd?: () => void | Promise<void>,
+  onLeaveForProvider?: (url: string) => void,
 ) {
   const router = createMemoryRouter(
     [
@@ -91,7 +104,11 @@ function renderWithSession(
   );
 
   return render(
-    <SessionProvider client={client} onSessionEnd={onSessionEnd}>
+    <SessionProvider
+      client={client}
+      onSessionEnd={onSessionEnd}
+      {...(onLeaveForProvider ? { onLeaveForProvider } : {})}
+    >
       <RouterProvider router={router} />
     </SessionProvider>,
   );
@@ -201,6 +218,192 @@ describe('session provider', () => {
       expect(screen.getByTestId('status')).toHaveTextContent('anonymous'),
     );
     expect(screen.getByTestId('signout-incomplete')).toHaveTextContent('false');
+  });
+});
+
+/**
+ * Signing out of a hosted session has to end two sessions. Vistara's own is
+ * revoked by the server first, because a browser that never reaches the
+ * provider must still be signed out here.
+ */
+describe('relying-party sign-out', () => {
+  const hosted = () => {
+    sessionStorage.setItem(hostedProviderKey, 'entra');
+  };
+
+  beforeEach(() => {
+    sessionStorage.clear();
+  });
+
+  it('revokes the Vistara session before leaving for the provider', async () => {
+    const order: string[] = [];
+    const left = vi.fn((url: string) => order.push(`leave:${url}`));
+    const client = fakeClient({
+      signOutFromProvider: vi.fn(async (providerId: string) => {
+        order.push(`revoke:${providerId}`);
+        return { endSessionUrl: 'https://login.example.test/logout' };
+      }),
+    });
+    const user = userEvent.setup();
+    hosted();
+
+    renderWithSession(<SessionProbe />, client, ['/settings'], undefined, left);
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('authenticated'),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('anonymous'),
+    );
+    expect(order).toEqual([
+      'revoke:entra',
+      'leave:https://login.example.test/logout',
+    ]);
+    expect(client.logout).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(hostedProviderKey)).toBeNull();
+  });
+
+  it('stays here when the provider publishes nowhere to end its session', async () => {
+    const left = vi.fn();
+    const user = userEvent.setup();
+    hosted();
+
+    renderWithSession(
+      <SessionProbe />,
+      fakeClient({
+        signOutFromProvider: vi.fn(async () => ({ endSessionUrl: null })),
+      }),
+      ['/settings'],
+      undefined,
+      left,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('authenticated'),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('anonymous'),
+    );
+    expect(left).not.toHaveBeenCalled();
+    expect(screen.getByTestId('signout-incomplete')).toHaveTextContent('false');
+  });
+
+  it('signs out locally when this tab never signed in with a provider', async () => {
+    const left = vi.fn();
+    const client = fakeClient({
+      signOutFromProvider: vi.fn(async () => ({
+        endSessionUrl: 'https://login.example.test/logout',
+      })),
+    });
+    const user = userEvent.setup();
+
+    renderWithSession(<SessionProbe />, client, ['/settings'], undefined, left);
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('authenticated'),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('anonymous'),
+    );
+    expect(client.signOutFromProvider).not.toHaveBeenCalled();
+    expect(client.logout).toHaveBeenCalledTimes(1);
+    expect(left).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A provider sign-out that failed says nothing about the Vistara session, so
+   * it is revoked on its own rather than left open behind a redirect that
+   * never happened.
+   */
+  it('falls back to local revocation when the provider call fails', async () => {
+    const left = vi.fn();
+    const client = fakeClient({
+      signOutFromProvider: vi.fn(async () => {
+        throw apiError(503);
+      }),
+    });
+    const user = userEvent.setup();
+    hosted();
+
+    renderWithSession(<SessionProbe />, client, ['/settings'], undefined, left);
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('authenticated'),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('anonymous'),
+    );
+    expect(client.logout).toHaveBeenCalledTimes(1);
+    expect(left).not.toHaveBeenCalled();
+    expect(screen.getByTestId('signout-incomplete')).toHaveTextContent('false');
+  });
+
+  /** The answer names a destination, and a scheme this page would run is not one. */
+  it('never follows a provider target that is not an HTTP URL', async () => {
+    const left = vi.fn();
+    const user = userEvent.setup();
+    hosted();
+
+    renderWithSession(
+      <SessionProbe />,
+      fakeClient({
+        signOutFromProvider: vi.fn(async () => ({
+          endSessionUrl: 'javascript:alert(1)',
+        })),
+      }),
+      ['/settings'],
+      undefined,
+      left,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('authenticated'),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('anonymous'),
+    );
+    expect(left).not.toHaveBeenCalled();
+  });
+
+  it('forgets the provider once a password sign-in takes the tab over', async () => {
+    const left = vi.fn();
+    const client = fakeClient({
+      getSession: vi.fn(async () => {
+        throw apiError(401);
+      }),
+      signOutFromProvider: vi.fn(async () => ({
+        endSessionUrl: 'https://login.example.test/logout',
+      })),
+    });
+    const user = userEvent.setup();
+    hosted();
+
+    renderWithSession(<SessionProbe />, client, ['/settings'], undefined, left);
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('anonymous'),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('authenticated'),
+    );
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('status')).toHaveTextContent('anonymous'),
+    );
+    expect(client.signOutFromProvider).not.toHaveBeenCalled();
+    expect(client.logout).toHaveBeenCalledTimes(1);
   });
 });
 

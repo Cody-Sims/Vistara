@@ -1,0 +1,90 @@
+{
+  "$schema": "../schema.json",
+  "id": "DEC-0009",
+  "title": "Hosted Entra entry terminates in the existing Vistara cookie session",
+  "status": "proposed",
+  "date": "2026-08-31",
+  "statement": "Planned hosted Microsoft Entra ID entry runs server-side OpenID Connect authorization code flow with PKCE and terminates in the existing Vistara cookie session; allowlisted Entra object and tenant identifiers guard an atomic first-owner bootstrap, the local password recovery owner remains available, and the Azure bootstrap stays optional while Compose remains supported.",
+  "rationale": "The approved plan keeps hosted sign-in an additional entry point rather than a second session model, so browser tokens, owner provisioning, and deployment optionality stay reviewable before any CLOUD task is implemented.",
+  "owners": [
+    "maintainers"
+  ],
+  "anchors": [
+    {
+      "path": "docs/specification.md",
+      "locator": "### Wave 8 — hosted identity and Azure bootstrap"
+    },
+    {
+      "path": "docs/specification.md",
+      "locator": "| `CLOUD-03` | M | CLOUD-02 | Entra OIDC/PKCE browser login and cookie handoff | Browser tests cover state, nonce, tenant, replay, and callback errors |"
+    },
+    {
+      "path": "docs/specification.md",
+      "locator": "| `CLOUD-04` | M | CLOUD-02 | Guarded first-login owner bootstrap | Concurrent eligible sign-ins create exactly one owner |"
+    },
+    {
+      "path": "docs/future-plans/hosted-identity-and-azure-bootstrap.md",
+      "locator": "### Interactive Entra ID sign-in"
+    },
+    {
+      "path": "docs/future-plans/hosted-identity-and-azure-bootstrap.md",
+      "locator": "### Guarded first-login provisioning"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "docs/specification.md",
+      "locator": "`docs/future-plans/` describe planned hosted identity and Azure bootstrap work;"
+    },
+    {
+      "path": "docs/specification.md",
+      "locator": "| Browser auth | Secure cookie; optional external OIDC login |"
+    },
+    {
+      "path": "docs/future-plans/hosted-identity-and-azure-bootstrap.md",
+      "locator": "- Use authorization code flow with PKCE, exact redirect URIs, `state`, `nonce`,"
+    },
+    {
+      "path": "docs/future-plans/hosted-identity-and-azure-bootstrap.md",
+      "locator": "Create the Vistara browser session only after the external identity and active"
+    },
+    {
+      "path": "docs/future-plans/hosted-identity-and-azure-bootstrap.md",
+      "locator": "- Use stable Entra object and tenant IDs as external identity keys. Email and"
+    },
+    {
+      "path": "docs/future-plans/hosted-identity-and-azure-bootstrap.md",
+      "locator": "- Deployment configuration declares an allowlist of initial Entra object IDs or"
+    },
+    {
+      "path": "docs/future-plans/hosted-identity-and-azure-bootstrap.md",
+      "locator": "singleton inside the same transaction that creates the tenant, user,"
+    },
+    {
+      "path": "docs/future-plans/hosted-identity-and-azure-bootstrap.md",
+      "locator": "protected local recovery owner remains available when Entra ID is unavailable"
+    },
+    {
+      "path": "docs/future-plans/hosted-identity-and-azure-bootstrap.md",
+      "locator": "- The existing local Compose deployment and local-password recovery path remain"
+    },
+    {
+      "path": "docs/future-plans/hosted-identity-and-azure-bootstrap.md",
+      "locator": "- Making the Azure template the only supported deployment."
+    },
+    {
+      "path": "docs/future-plans/README.md",
+      "locator": "These documents describe approved post-MVP directions that are not implemented,"
+    }
+  ],
+  "relations": [
+    {
+      "type": "depends_on",
+      "target": "DEC-0003"
+    },
+    {
+      "type": "depends_on",
+      "target": "DEC-0004"
+    }
+  ]
+}

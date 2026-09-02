@@ -48,6 +48,8 @@ internal static class MigrationTestSupport
         "20260831002835_AddUserPreferences";
     internal const string PostgresUserPreferencesMigration =
         "20260831002849_AddUserPreferences";
+    internal const string OidcLoginRequestsMigration =
+        "20260901000000_AddOidcLoginRequests";
 
     internal static readonly string[] SqliteMigrations =
     [
@@ -61,6 +63,7 @@ internal static class MigrationTestSupport
         SqliteLocalCredentialsMigration,
         SqlitePlatformBootstrapMigration,
         SqliteUserPreferencesMigration,
+        OidcLoginRequestsMigration,
     ];
 
     internal static readonly string[] PostgresMigrations =
@@ -75,6 +78,7 @@ internal static class MigrationTestSupport
         PostgresLocalCredentialsMigration,
         PostgresPlatformBootstrapMigration,
         PostgresUserPreferencesMigration,
+        OidcLoginRequestsMigration,
     ];
 
     private static readonly Guid TenantId =

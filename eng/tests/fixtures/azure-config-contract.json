@@ -1,0 +1,686 @@
+{
+  "$comment": [
+    "Ground truth for the configuration keys deploy/azure/infra/main.bicep is allowed to emit.",
+    "Each entry names the type and property that binds the key so a rename in the",
+    "application breaks this contract instead of silently producing a container that",
+    "ignores its own configuration.",
+    "Entries carrying pendingOwner are contributed by a sibling task that has not landed on this branch: the test asserts they are still absent so the marker cannot rot. Every hosted bootstrap task has now landed, so the list is empty.",
+    "Security:Proxy:KnownProxies, Security:Proxy:KnownNetworks, and Security:Proxy:ForwardLimit are intentionally absent: Container Apps publishes no address range for the internal ingress hop, so the deployment trusts no forwarded address and the client IP is not observable. Platform:RateLimits:PartitionMode records that consequence."
+  ],
+  "keys": [
+    {
+      "name": "ASPNETCORE_ENVIRONMENT",
+      "kind": "process",
+      "owner": "aspnetcore",
+      "required": true
+    },
+    {
+      "name": "DOTNET_ENVIRONMENT",
+      "kind": "process",
+      "owner": "aspnetcore",
+      "required": true
+    },
+    {
+      "name": "AZURE_CLIENT_ID",
+      "kind": "process",
+      "owner": "azure-sdk",
+      "required": true
+    },
+    {
+      "name": "MIGRATION_PROVIDER",
+      "kind": "process",
+      "owner": "HB-05",
+      "sourceFile": "deploy/containers/migration-entrypoint.sh",
+      "sourceToken": "MIGRATION_PROVIDER",
+      "required": true,
+      "emittedValue": "PostgreSql"
+    },
+    {
+      "name": "MIGRATION_MANAGED_IDENTITY_CLIENT_ID",
+      "kind": "process",
+      "owner": "HB-05",
+      "sourceFile": "deploy/containers/migration-entrypoint.sh",
+      "sourceToken": "MIGRATION_MANAGED_IDENTITY_CLIENT_ID",
+      "required": true
+    },
+    {
+      "name": "MIGRATION_POSTGRES_HOST",
+      "kind": "process",
+      "owner": "HB-05",
+      "sourceFile": "deploy/containers/migration-entrypoint.sh",
+      "sourceToken": "MIGRATION_POSTGRES_HOST",
+      "required": true
+    },
+    {
+      "name": "MIGRATION_POSTGRES_PORT",
+      "kind": "process",
+      "owner": "HB-05",
+      "sourceFile": "deploy/containers/migration-entrypoint.sh",
+      "sourceToken": "MIGRATION_POSTGRES_PORT",
+      "required": true
+    },
+    {
+      "name": "MIGRATION_POSTGRES_DATABASE",
+      "kind": "process",
+      "owner": "HB-05",
+      "sourceFile": "deploy/containers/migration-entrypoint.sh",
+      "sourceToken": "MIGRATION_POSTGRES_DATABASE",
+      "required": true
+    },
+    {
+      "name": "MIGRATION_POSTGRES_USERNAME",
+      "kind": "process",
+      "owner": "HB-05",
+      "sourceFile": "deploy/containers/migration-entrypoint.sh",
+      "sourceToken": "MIGRATION_POSTGRES_USERNAME",
+      "required": true
+    },
+    {
+      "name": "MIGRATION_ENTRA_TOKEN_SCOPE",
+      "kind": "process",
+      "owner": "HB-05",
+      "sourceFile": "deploy/containers/migration-entrypoint.sh",
+      "sourceToken": "MIGRATION_ENTRA_TOKEN_SCOPE",
+      "required": true
+    },
+    {
+      "name": "ConnectionStrings__Vistara",
+      "kind": "configuration",
+      "owner": "base",
+      "configurationKey": "ConnectionStrings:Vistara",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformComposition.cs",
+      "sourceToken": "GetConnectionString(\"Vistara\")",
+      "required": true,
+      "$comment": "API and worker only. The migration job builds its connection string from the discrete MIGRATION_POSTGRES_* variables above."
+    },
+    {
+      "name": "Persistence__Provider",
+      "kind": "configuration",
+      "owner": "base",
+      "configurationKey": "Persistence:Provider",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformComposition.cs",
+      "sourceToken": "Persistence:Provider",
+      "required": true,
+      "emittedValue": "PostgreSql",
+      "enumType": "VistaraDatabaseProvider",
+      "enumSourceFile": "src/Vistara.Persistence/PersistenceServiceCollectionExtensions.cs"
+    },
+    {
+      "name": "Persistence__Azure__EntraTokenEnabled",
+      "kind": "options",
+      "owner": "HB-05",
+      "sourceFile": "src/Vistara.Persistence/Azure/PersistenceAzureOptions.cs",
+      "optionsType": "PersistenceAzureOptions",
+      "property": "EntraTokenEnabled",
+      "required": true
+    },
+    {
+      "name": "Persistence__Azure__ManagedIdentityClientId",
+      "kind": "options",
+      "owner": "HB-05",
+      "sourceFile": "src/Vistara.Persistence/Azure/PersistenceAzureOptions.cs",
+      "optionsType": "PersistenceAzureOptions",
+      "property": "ManagedIdentityClientId",
+      "required": true
+    },
+    {
+      "name": "Persistence__Azure__TokenRefreshInterval",
+      "kind": "options",
+      "owner": "HB-05",
+      "sourceFile": "src/Vistara.Persistence/Azure/PersistenceAzureOptions.cs",
+      "optionsType": "PersistenceAzureOptions",
+      "property": "TokenRefreshInterval",
+      "required": false
+    },
+    {
+      "name": "Persistence__Azure__TokenRetryInterval",
+      "kind": "options",
+      "owner": "HB-05",
+      "sourceFile": "src/Vistara.Persistence/Azure/PersistenceAzureOptions.cs",
+      "optionsType": "PersistenceAzureOptions",
+      "property": "TokenRetryInterval",
+      "required": false
+    },
+    {
+      "name": "Persistence__Azure__TokenScope",
+      "kind": "options",
+      "owner": "HB-05",
+      "sourceFile": "src/Vistara.Persistence/Azure/PersistenceAzureOptions.cs",
+      "optionsType": "PersistenceAzureOptions",
+      "property": "TokenScope",
+      "required": false
+    },
+    {
+      "name": "Security__Hosts__AllowedHosts__0",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Security/SecurityComposition.cs",
+      "optionsType": "SecurityHostOptions",
+      "property": "AllowedHosts",
+      "required": true
+    },
+    {
+      "name": "Security__Hosts__AllowedHosts__1",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Security/SecurityComposition.cs",
+      "optionsType": "SecurityHostOptions",
+      "property": "AllowedHosts",
+      "required": false
+    },
+    {
+      "name": "Security__Transport__RedirectHttpToHttps",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Security/SecurityComposition.cs",
+      "optionsType": "SecurityTransportOptions",
+      "property": "RedirectHttpToHttps",
+      "required": true
+    },
+    {
+      "name": "Platform__RateLimits__PartitionMode",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformRateLimitOptions.cs",
+      "optionsType": "PlatformRateLimitOptions",
+      "property": "PartitionMode",
+      "required": true,
+      "enumType": "PlatformRateLimitPartitionMode",
+      "emittedValue": "SharedIngress"
+    },
+    {
+      "name": "Platform__RateLimits__Window",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformRateLimitOptions.cs",
+      "optionsType": "PlatformRateLimitOptions",
+      "property": "Window",
+      "required": true
+    },
+    {
+      "name": "Platform__RateLimits__Api",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformRateLimitOptions.cs",
+      "optionsType": "PlatformRateLimitOptions",
+      "property": "Api",
+      "required": true
+    },
+    {
+      "name": "Platform__RateLimits__Events",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformRateLimitOptions.cs",
+      "optionsType": "PlatformRateLimitOptions",
+      "property": "Events",
+      "required": true
+    },
+    {
+      "name": "Platform__RateLimits__Delivery",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformRateLimitOptions.cs",
+      "optionsType": "PlatformRateLimitOptions",
+      "property": "Delivery",
+      "required": true
+    },
+    {
+      "name": "Platform__RateLimits__Media",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformRateLimitOptions.cs",
+      "optionsType": "PlatformRateLimitOptions",
+      "property": "Media",
+      "required": true
+    },
+    {
+      "name": "Security__Limits__RequestsPerWindow",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Security/SecurityComposition.cs",
+      "optionsType": "SecurityLimitOptions",
+      "property": "RequestsPerWindow",
+      "required": true,
+      "$comment": "Shared bucket per replica: behind the Container Apps ingress proxy the limiter partitions on the proxy address, so this is a deployment-wide ceiling and not a per-client allowance."
+    },
+    {
+      "name": "Security__Limits__RateLimitWindow",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Security/SecurityComposition.cs",
+      "optionsType": "SecurityLimitOptions",
+      "property": "RateLimitWindow",
+      "required": true
+    },
+    {
+      "name": "Security__RequiredSecretKeys__0",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Security/SecurityComposition.cs",
+      "optionsType": "VistaraSecurityOptions",
+      "property": "RequiredSecretKeys",
+      "required": true
+    },
+    {
+      "name": "Security__DataProtection__Enabled",
+      "kind": "options",
+      "owner": "HB-06",
+      "sourceFile": "src/Vistara.Api/Composition/Security/DataProtectionComposition.cs",
+      "optionsType": "SecurityDataProtectionOptions",
+      "property": "Enabled",
+      "required": true
+    },
+    {
+      "name": "Security__DataProtection__ApplicationDiscriminator",
+      "kind": "options",
+      "owner": "HB-06",
+      "sourceFile": "src/Vistara.Api/Composition/Security/DataProtectionComposition.cs",
+      "optionsType": "SecurityDataProtectionOptions",
+      "property": "ApplicationDiscriminator",
+      "required": true
+    },
+    {
+      "name": "Security__DataProtection__BlobServiceUri",
+      "kind": "options",
+      "owner": "HB-06",
+      "sourceFile": "src/Vistara.Api/Composition/Security/DataProtectionComposition.cs",
+      "optionsType": "SecurityDataProtectionOptions",
+      "property": "BlobServiceUri",
+      "required": true
+    },
+    {
+      "name": "Security__DataProtection__BlobContainerName",
+      "kind": "options",
+      "owner": "HB-06",
+      "sourceFile": "src/Vistara.Api/Composition/Security/DataProtectionComposition.cs",
+      "optionsType": "SecurityDataProtectionOptions",
+      "property": "BlobContainerName",
+      "required": true
+    },
+    {
+      "name": "Security__DataProtection__KeyBlobName",
+      "kind": "options",
+      "owner": "HB-06",
+      "sourceFile": "src/Vistara.Api/Composition/Security/DataProtectionComposition.cs",
+      "optionsType": "SecurityDataProtectionOptions",
+      "property": "KeyBlobName",
+      "required": true
+    },
+    {
+      "name": "Security__DataProtection__KeyVaultKeyIdentifier",
+      "kind": "options",
+      "owner": "HB-06",
+      "sourceFile": "src/Vistara.Api/Composition/Security/DataProtectionComposition.cs",
+      "optionsType": "SecurityDataProtectionOptions",
+      "property": "KeyVaultKeyIdentifier",
+      "required": true
+    },
+    {
+      "name": "Security__DataProtection__ManagedIdentityClientId",
+      "kind": "options",
+      "owner": "HB-06",
+      "sourceFile": "src/Vistara.Api/Composition/Security/DataProtectionComposition.cs",
+      "optionsType": "SecurityDataProtectionOptions",
+      "property": "ManagedIdentityClientId",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__ApiKeys__CurrentPepperVersion",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOptions.cs",
+      "optionsType": "PlatformApiKeyOptions",
+      "property": "CurrentPepperVersion",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__ApiKeys__Peppers__v1",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOptions.cs",
+      "optionsType": "PlatformApiKeyOptions",
+      "property": "Peppers",
+      "required": true,
+      "secretReference": true
+    },
+    {
+      "name": "Platform__Authentication__Jwt__Issuers__0__ProfileId",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOptions.cs",
+      "optionsType": "PlatformJwtIssuerOptions",
+      "property": "ProfileId",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Jwt__Issuers__0__Issuer",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOptions.cs",
+      "optionsType": "PlatformJwtIssuerOptions",
+      "property": "Issuer",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Jwt__Issuers__0__Audience",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOptions.cs",
+      "optionsType": "PlatformJwtIssuerOptions",
+      "property": "Audience",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Jwt__Issuers__0__MetadataAddress",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOptions.cs",
+      "optionsType": "PlatformJwtIssuerOptions",
+      "property": "MetadataAddress",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Jwt__Issuers__0__AllowedAlgorithms__0",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOptions.cs",
+      "optionsType": "PlatformJwtIssuerOptions",
+      "property": "AllowedAlgorithms",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Enabled",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcOptions",
+      "property": "Enabled",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Providers__0__ProviderId",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcProviderOptions",
+      "property": "ProviderId",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Providers__0__DisplayName",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcProviderOptions",
+      "property": "DisplayName",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Providers__0__TenantId",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcProviderOptions",
+      "property": "TenantId",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Providers__0__ClientId",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcProviderOptions",
+      "property": "ClientId",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Providers__0__Authority",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcProviderOptions",
+      "property": "Authority",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Providers__0__ApplicationBaseUri",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcProviderOptions",
+      "property": "ApplicationBaseUri",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Providers__0__RedirectUri",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcProviderOptions",
+      "property": "RedirectUri",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Providers__0__PostLogoutRedirectUri",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcProviderOptions",
+      "property": "PostLogoutRedirectUri",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Providers__0__Scopes__0",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcProviderOptions",
+      "property": "Scopes",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Providers__0__Scopes__1",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcProviderOptions",
+      "property": "Scopes",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Providers__0__Scopes__2",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcProviderOptions",
+      "property": "Scopes",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Providers__0__AllowedSigningAlgorithms__0",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcProviderOptions",
+      "property": "AllowedSigningAlgorithms",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Providers__0__RequireHttps",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcProviderOptions",
+      "property": "RequireHttps",
+      "required": true
+    },
+    {
+      "name": "Platform__Authentication__Oidc__Providers__0__ManagedIdentityClientId",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformOidcProviderOptions",
+      "property": "ManagedIdentityClientId",
+      "required": true
+    },
+    {
+      "name": "Platform__Bootstrap__FirstOwner__Enabled",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformFirstOwnerOptions",
+      "property": "Enabled",
+      "required": true
+    },
+    {
+      "name": "Platform__Bootstrap__FirstOwner__ProviderId",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformFirstOwnerOptions",
+      "property": "ProviderId",
+      "required": true
+    },
+    {
+      "name": "Platform__Bootstrap__FirstOwner__DirectoryTenantId",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformFirstOwnerOptions",
+      "property": "DirectoryTenantId",
+      "required": true
+    },
+    {
+      "name": "Platform__Bootstrap__FirstOwner__AllowedObjectIds__0",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformFirstOwnerOptions",
+      "property": "AllowedObjectIds",
+      "required": true
+    },
+    {
+      "name": "Platform__Bootstrap__FirstOwner__TenantSlug",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformFirstOwnerOptions",
+      "property": "TenantSlug",
+      "required": true
+    },
+    {
+      "name": "Platform__Bootstrap__FirstOwner__TenantName",
+      "kind": "options",
+      "owner": "HB-11",
+      "sourceFile": "src/Vistara.Api/Composition/Platform/PlatformOidcOptions.cs",
+      "optionsType": "PlatformFirstOwnerOptions",
+      "property": "TenantName",
+      "required": true
+    },
+    {
+      "name": "Media__Storage__Provider",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Media/MediaComposition.cs",
+      "optionsType": "MediaStorageOptions",
+      "property": "Provider",
+      "required": true,
+      "emittedValue": "Azure",
+      "enumType": "MediaStorageProvider"
+    },
+    {
+      "name": "Media__Storage__Azure__AccountName",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Media/MediaComposition.cs",
+      "optionsType": "MediaAzureOptions",
+      "property": "AccountName",
+      "required": true
+    },
+    {
+      "name": "Media__Storage__Azure__ContainerName",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Media/MediaComposition.cs",
+      "optionsType": "MediaAzureOptions",
+      "property": "ContainerName",
+      "required": true
+    },
+    {
+      "name": "Media__Storage__Azure__ServiceUri",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Media/MediaComposition.cs",
+      "optionsType": "MediaAzureOptions",
+      "property": "ServiceUri",
+      "required": true
+    },
+    {
+      "name": "Media__Storage__Azure__CredentialMode",
+      "kind": "options",
+      "owner": "HB-07",
+      "sourceFile": "src/Vistara.Api/Composition/Media/MediaComposition.cs",
+      "optionsType": "MediaAzureOptions",
+      "property": "CredentialMode",
+      "required": true,
+      "emittedValue": "ManagedIdentity",
+      "enumType": "MediaAzureCredentialMode"
+    },
+    {
+      "name": "Media__Storage__Azure__ManagedIdentityClientId",
+      "kind": "options",
+      "owner": "HB-07",
+      "sourceFile": "src/Vistara.Api/Composition/Media/MediaComposition.cs",
+      "optionsType": "MediaAzureOptions",
+      "property": "ManagedIdentityClientId",
+      "required": true
+    },
+    {
+      "name": "Media__Imaging__Provider",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Api/Composition/Media/MediaComposition.cs",
+      "optionsType": "MediaImagingOptions",
+      "property": "Provider",
+      "required": true,
+      "emittedValue": "NetVips",
+      "enumType": "MediaImagingProvider"
+    },
+    {
+      "name": "Worker__InstanceId",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Worker/Composition/Platform/WorkerPlatformComposition.cs",
+      "optionsType": "WorkerPlatformOptions",
+      "property": "InstanceId",
+      "required": true
+    },
+    {
+      "name": "Worker__Jobs__MaximumConcurrency",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Worker/Runtime/Jobs/JobWorkerOptions.cs",
+      "optionsType": "JobWorkerOptions",
+      "property": "MaximumConcurrency",
+      "required": false
+    },
+    {
+      "name": "Worker__ImagingLimits__MaximumConcurrentTransforms",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Worker/Composition/Platform/WorkerPlatformComposition.cs",
+      "optionsType": "WorkerImagingLimitsOptions",
+      "property": "MaximumConcurrentTransforms",
+      "required": false
+    },
+    {
+      "name": "Telemetry__ServiceName",
+      "kind": "options",
+      "owner": "base",
+      "sourceFile": "src/Vistara.Observability/Telemetry/TelemetryComposition.cs",
+      "optionsType": "VistaraTelemetryOptions",
+      "property": "ServiceName",
+      "required": true
+    }
+  ]
+}

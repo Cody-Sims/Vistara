@@ -1,9 +1,13 @@
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Vistara.Migrations.Postgres;
 using Vistara.Persistence;
+using Vistara.Persistence.Auth;
+using Vistara.Persistence.Model;
 using Xunit;
 
 namespace Vistara.MigrationProviderTests.Postgres;
@@ -29,6 +33,8 @@ public sealed class PostgresMigrationVerificationTests
         "20260831002849_AddUserPreferences";
     private const string SharingPersistenceMigration =
         "20260830101824_AddSharingPersistence";
+    private const string OidcLoginRequestsMigration =
+        "20260901000000_AddOidcLoginRequests";
     private const int ReplacedCheckConstraints = 3;
     private const int MigrationBackfillPolicies = 13;
 
@@ -44,6 +50,7 @@ public sealed class PostgresMigrationVerificationTests
         LocalCredentialsMigration,
         PlatformBootstrapMigration,
         UserPreferencesMigration,
+        OidcLoginRequestsMigration,
     ];
 
     [Fact]
@@ -109,6 +116,10 @@ public sealed class PostgresMigrationVerificationTests
             idempotentScript,
             StringComparison.Ordinal);
         Assert.Contains(
+            OidcLoginRequestsMigration,
+            idempotentScript,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "CREATE TEMP TABLE legacy_upload_job_decisions",
             script,
             StringComparison.Ordinal);
@@ -154,6 +165,159 @@ public sealed class PostgresMigrationVerificationTests
                 script,
                 StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// The OIDC login request table is deliberately tenant-independent: it is
+    /// written before any tenant scope exists. It must therefore never gain a
+    /// tenant column, never be enrolled in row-level security, and never appear
+    /// in the tenant-owned table list that drives the fail-closed policies.
+    /// </summary>
+    [Fact]
+    public void Oidc_login_requests_is_created_without_tenant_row_security()
+    {
+        using VistaraDbContext context = CreatePostgresContext();
+        string script = context.GetService<IMigrator>().GenerateScript();
+        ITable table = context.GetService<IDesignTimeModel>()
+            .Model.GetRelationalModel().Tables
+            .Single(candidate => candidate.Name == "oidc_login_requests");
+
+        Assert.Contains(
+            "CREATE TABLE oidc_login_requests",
+            script,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            [
+                "code_verifier",
+                "consumed_at_utc",
+                "created_at_utc",
+                "expires_at_utc",
+                "handle_digest",
+                "nonce_digest",
+                "provider_id",
+                "redirect_uri",
+                "return_to",
+                "state_digest",
+            ],
+            table.Columns.Select(column => column.Name).Order(StringComparer.Ordinal));
+        Assert.Equal(
+            ["state_digest"],
+            table.PrimaryKey!.Columns.Select(column => column.Name));
+        Assert.Equal(
+            ["ix_oidc_login_requests_expires_at_utc"],
+            table.Indexes.Select(index => index.Name));
+        Assert.Empty(table.ForeignKeyConstraints);
+        Assert.DoesNotContain("oidc_login_requests", PostgresTenantRowSecurity.TenantOwnedTables);
+        Assert.DoesNotContain(
+            "oidc_login_requests",
+            PostgresTenantRowSecurity.IdentityDirectoryTables);
+        Assert.DoesNotContain(
+            "ALTER TABLE \"oidc_login_requests\" ENABLE ROW LEVEL SECURITY",
+            script,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "CREATE POLICY \"tenant_isolation\" ON \"oidc_login_requests\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "CREATE POLICY \"identity_directory\" ON \"oidc_login_requests\"",
+            script,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// PostgreSQL must express the single-use claim as one conditional
+    /// <c>UPDATE</c> and the opportunistic sweep as one bounded <c>DELETE</c>.
+    /// PostgreSQL takes a row lock for an <c>UPDATE</c> and, under READ
+    /// COMMITTED, re-evaluates the predicate against the committed row, so the
+    /// losing callback sees <c>consumed_at_utc</c> set and updates zero rows.
+    /// Reading the row first and updating it afterwards would let two
+    /// concurrent callbacks both complete the same authorization, so the
+    /// generated statements are asserted directly rather than reviewed.
+    /// </summary>
+    [Fact]
+    public async Task Oidc_login_request_consume_and_sweep_translate_to_locking_statements()
+    {
+        var interceptor = new CapturingCommandInterceptor();
+        var options = new DbContextOptionsBuilder<AuthenticationCatalogDbContext>();
+        options
+            .UseNpgsql("Host=migration-verification;Database=vistara")
+            .AddInterceptors(interceptor, new OfflineConnectionInterceptor());
+        await using var catalog = new AuthenticationCatalogDbContext(options.Options);
+        DateTimeOffset now = new(2026, 9, 1, 12, 0, 0, TimeSpan.Zero);
+        byte[] stateDigest = new byte[32];
+
+        _ = await catalog.Set<OidcLoginRequestRow>()
+            .Where(row =>
+                row.StateDigest == stateDigest &&
+                row.ConsumedAtUtc == null &&
+                row.ExpiresAtUtc > now &&
+                row.CreatedAtUtc <= now)
+            .ExecuteUpdateAsync(
+                setters => setters.SetProperty(row => row.ConsumedAtUtc, now),
+                CancellationToken.None);
+        _ = await catalog.Set<OidcLoginRequestRow>()
+            .Where(row => row.ExpiresAtUtc < now)
+            .OrderBy(row => row.ExpiresAtUtc)
+            .Take(100)
+            .ExecuteDeleteAsync(CancellationToken.None);
+
+        Assert.Equal(2, interceptor.Commands.Count);
+        string consume = interceptor.Commands[0];
+        string sweep = interceptor.Commands[1];
+
+        Assert.StartsWith("UPDATE oidc_login_requests", consume, StringComparison.Ordinal);
+        Assert.Contains("SET consumed_at_utc", consume, StringComparison.Ordinal);
+        Assert.Contains("consumed_at_utc IS NULL", consume, StringComparison.Ordinal);
+        Assert.Contains("expires_at_utc >", consume, StringComparison.Ordinal);
+        Assert.Contains("created_at_utc <=", consume, StringComparison.Ordinal);
+        Assert.Contains("state_digest =", consume, StringComparison.Ordinal);
+        Assert.DoesNotContain("SELECT", consume, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT", consume, StringComparison.Ordinal);
+
+        Assert.StartsWith("DELETE FROM oidc_login_requests", sweep, StringComparison.Ordinal);
+        Assert.Contains("expires_at_utc <", sweep, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY", sweep, StringComparison.Ordinal);
+        Assert.Contains("LIMIT", sweep, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Captures the SQL PostgreSQL would run and suppresses the round trip, so
+    /// the translation is asserted without a reachable database.
+    /// </summary>
+    private sealed class CapturingCommandInterceptor : DbCommandInterceptor
+    {
+        internal List<string> Commands { get; } = [];
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(command);
+            Commands.Add(command.CommandText);
+            return ValueTask.FromResult(InterceptionResult<int>.SuppressWithResult(0));
+        }
+    }
+
+    /// <summary>
+    /// Keeps the offline command capture from opening a socket.
+    /// </summary>
+    private sealed class OfflineConnectionInterceptor : DbConnectionInterceptor
+    {
+        public override ValueTask<InterceptionResult> ConnectionOpeningAsync(
+            DbConnection connection,
+            ConnectionEventData eventData,
+            InterceptionResult result,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(InterceptionResult.Suppress());
+
+        public override ValueTask<InterceptionResult> ConnectionClosingAsync(
+            DbConnection connection,
+            ConnectionEventData eventData,
+            InterceptionResult result) =>
+            ValueTask.FromResult(InterceptionResult.Suppress());
     }
 
     [Fact]

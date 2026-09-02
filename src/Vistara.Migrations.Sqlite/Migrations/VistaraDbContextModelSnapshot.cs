@@ -1713,6 +1713,74 @@ namespace Vistara.Migrations.Sqlite.Migrations
                     b.ToTable("local_identities", (string)null);
                 });
 
+            modelBuilder.Entity("Vistara.Persistence.Model.OidcLoginRequestRow", b =>
+                {
+                    b.Property<byte[]>("StateDigest")
+                        .HasMaxLength(32)
+                        .HasColumnType("BLOB")
+                        .HasColumnName("state_digest");
+
+                    b.Property<string>("CodeVerifier")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("code_verifier");
+
+                    b.Property<DateTime?>("ConsumedAtUtc")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("consumed_at_utc");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<DateTime>("ExpiresAtUtc")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("expires_at_utc");
+
+                    b.Property<byte[]>("HandleDigest")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("BLOB")
+                        .HasColumnName("handle_digest");
+
+                    b.Property<byte[]>("NonceDigest")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("BLOB")
+                        .HasColumnName("nonce_digest");
+
+                    b.Property<string>("ProviderId")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("provider_id");
+
+                    b.Property<string>("RedirectUri")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("redirect_uri");
+
+                    b.Property<string>("ReturnTo")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("return_to");
+
+                    b.HasKey("StateDigest");
+
+                    b.HasIndex("ExpiresAtUtc")
+                        .HasDatabaseName("ix_oidc_login_requests_expires_at_utc");
+
+                    b.ToTable("oidc_login_requests", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_oidc_login_requests_consumed", "\"consumed_at_utc\" IS NULL OR \"consumed_at_utc\" >= \"created_at_utc\"");
+
+                            t.HasCheckConstraint("ck_oidc_login_requests_lifetime", "\"expires_at_utc\" > \"created_at_utc\"");
+                        });
+                });
+
             modelBuilder.Entity("Vistara.Persistence.Model.PlatformBootstrapRow", b =>
                 {
                     b.Property<int>("Id")

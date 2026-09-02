@@ -262,7 +262,7 @@ settings.
 | `Media:Storage:Provider` | `Local`, `S3`, `Azure` | Exactly one matching `Media:Storage:*` subsection must be configured |
 | `Media:Storage:Local:RootPath` | absolute path | Dedicated directory |
 | `Media:Storage:S3:*` | `Profile`, `CredentialMode`, `BucketName`, `Region`, `ServiceUrl`, `ForcePathStyle`, `AllowInsecureHttp`, `AllowedEndpointHosts`, `AccessKeyId`, `SecretAccessKey`, `SessionToken`, `MaximumPresignLifetime` | `Profile` is `Aws`, `CloudflareR2`, `BackblazeB2`, or `Minio`; `CredentialMode` is `DefaultChain` or `Static` |
-| `Media:Storage:Azure:*` | `AccountName`, `ContainerName`, `ServiceUri`, `EmulatorMode`, `CredentialMode`, `ConnectionString`, `AllowSharedKeySas`, `MaximumGrantLifetime` | `CredentialMode` is `DefaultCredential` (managed identity or the default Azure credential chain) or `SharedKey` |
+| `Media:Storage:Azure:*` | `AccountName`, `ContainerName`, `ServiceUri`, `EmulatorMode`, `CredentialMode`, `ManagedIdentityClientId`, `AllowDefaultCredentialOutsideDevelopment`, `ConnectionString`, `AllowSharedKeySas`, `MaximumGrantLifetime` | `CredentialMode` is `ManagedIdentity`, `SharedKey`, or `DefaultCredential`. `ManagedIdentity` requires `ManagedIdentityClientId`, the client ID of a **user-assigned** managed identity as a hyphenated GUID; a system-assigned identity is not supported. `SharedKey` requires `ConnectionString` and `AllowSharedKeySas`. `DefaultCredential` is for local development only and is rejected outside a `Development` environment unless `AllowDefaultCredentialOutsideDevelopment` is set as a reviewed exception |
 | `Media:Imaging:Provider` | `NetVips` | Required |
 | `Platform:Authentication:ApiKeys:*` | `CurrentPepperVersion`, `Peppers:<version>` | Base64 peppers; required |
 | `Platform:Authentication:Jwt:Issuers` | `ProfileId`, `Issuer`, `Audience`, `MetadataAddress`, `AllowedAlgorithms`, `AllowedTypes` | At least one issuer entry is required at startup even when only local password sign-in is used |
@@ -300,8 +300,10 @@ directory rather than linking to external hosts.
 | [Security operations](docs/security/security-operations.md) | You are reviewing scanning coverage, handling an advisory, or rotating credentials |
 | [Backup and restore](docs/operations/backup-and-restore.md) | You are scheduling backups or running a restore drill |
 | [Release, migration, and rollback runbook](docs/operations/release-runbook.md) | You are publishing, migrating, or rolling back a release |
-| [Azure free credits](docs/operations/azure-free-credits.md) | You are evaluating Vistara on Microsoft Azure free-credit offers |
+| [Azure hosted bootstrap](docs/operations/azure-hosted-bootstrap.md) | You want the one-command Azure evaluation deployment: `./deploy/azure/up.sh` |
+| [Azure free credits](docs/operations/azure-free-credits.md) | You are evaluating Vistara on Microsoft Azure free-credit offers, or need the manual CLI path |
 | [Azure identity, RBAC, and secrets](docs/operations/azure-identity-and-secrets.md) | You are assigning managed identities, blob roles, or Key Vault secrets on Azure |
+| [Future plans](docs/future-plans/README.md) | You want the hosted Entra sign-in and Azure bootstrap plan and its current status |
 | [Future ideas](docs/future-ideas/README.md) | You want the uncommitted post-MVP research directions |
 
 ## Repository layout
@@ -312,7 +314,8 @@ directory rather than linking to external hosts.
   migration, E2E-host, and performance projects, plus the Playwright suite in
   `tests/Vistara.E2E`.
 - `deploy/`: Dockerfiles, Compose topologies, Nginx, MinIO, PostgreSQL, OTLP
-  collector configuration, backup scripts, and deployment gates.
+  collector configuration, backup scripts, deployment gates, and the `azd` and
+  Bicep hosted Azure bootstrap in `deploy/azure/`.
 - `eng/`: repository and Shadow validators with isolated Node dependencies.
 - `.shadow/`: evidence-linked architecture decisions.
 - `.github/workflows/`: CI, Pages preview, gallery smoke, deployment gates,
@@ -329,10 +332,19 @@ directory rather than linking to external hosts.
 - Metadata capture records presence and privacy flags plus dimensions, format,
   and orientation. Vistara does not yet catalogue individual EXIF, IPTC, or XMP
   fields such as camera, lens, exposure, keywords, or coordinates.
-- PostgreSQL connections use a connection string only. There is no Entra ID or
-  managed-identity token provider for PostgreSQL; managed identity is supported
-  for Azure Blob Storage. See the Azure guides for the passwordless-PostgreSQL
-  caveat.
+- PostgreSQL connections use a connection string by default. Passwordless
+  Microsoft Entra connections exist for Azure deployments —
+  `Persistence:Azure:EntraTokenEnabled` with a user-assigned
+  `ManagedIdentityClientId` supplies a rotating access token through an
+  `NpgsqlDataSource` — and are exercised only by the hosted Azure bootstrap;
+  no live-subscription drill has been run yet.
+- Azure Blob managed identity is **user-assigned only**. Set
+  `Media:Storage:Azure:CredentialMode` to `ManagedIdentity` and supply the
+  identity's client ID in `Media:Storage:Azure:ManagedIdentityClientId`; a
+  system-assigned identity, or any identity inferred from the host, is not
+  supported. `DefaultCredential` remains for local development and needs the
+  explicit `AllowDefaultCredentialOutsideDevelopment` opt-in anywhere else,
+  and `SharedKey` remains the connection-string fallback.
 - Storage onboarding validates and generates configuration; it never writes
   configuration or swaps the active provider. Applying a provider requires a
   configuration change and an API and worker restart.
@@ -344,6 +356,14 @@ directory rather than linking to external hosts.
   signed reads; uploads are proxied through the API.
 - The outbox advances durable publication state in the database. No external
   message broker is integrated.
-- Vistara validates JWTs from configured issuers but hosts no interactive OIDC
-  sign-in, callback, or token-issuance flow of its own.
+- Vistara validates JWTs from configured issuers, and hosts an interactive
+  OpenID Connect sign-in for Microsoft Entra ID that terminates in the ordinary
+  cookie session. It is off unless a provider is configured, issues no tokens
+  of its own, and registers no front-channel logout URL: single sign-out is the
+  authenticated, CSRF-protected relying-party endpoint. The Azure hosted
+  bootstrap configures it; the Compose topologies do not.
+- The hosted Azure bootstrap (`./deploy/azure/up.sh`) is an **evaluation**
+  deployment with public Container Apps ingress and no reviewed edge, and it
+  has not yet been drilled against a live Azure subscription. Compose is the
+  supported self-hosting path.
 - The worker exposes no HTTP health endpoint; its health snapshot is in-process.

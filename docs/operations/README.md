@@ -16,11 +16,14 @@ Runbooks for people who run a Vistara instance.
 
 | Document | Use it when |
 |---|---|
-| [Azure free credits](azure-free-credits.md) | Standing up a non-production evaluation instance on current Microsoft Azure free-credit offers |
-| [Azure identity, RBAC, and secrets](azure-identity-and-secrets.md) | Assigning managed identities, blob role assignments, Key Vault secrets, or private registry credentials |
+| [Azure hosted bootstrap](azure-hosted-bootstrap.md) | You want the one-command path: `./deploy/azure/up.sh` provisions, migrates, and hands you a browser sign-in, and `./deploy/azure/down.sh` tears it down |
+| [Azure free credits](azure-free-credits.md) | You want to understand the credit offers, how Azure bills these services, and the manual CLI path the bootstrap replaces |
+| [Azure identity, RBAC, and secrets](azure-identity-and-secrets.md) | You are assigning managed identities, blob role assignments, Key Vault secrets, or private registry credentials by hand |
 
-Both Azure guides are evaluation runbooks, not a production architecture, and
-label every non-obvious claim as verified, inferred, or unverified.
+Start with the hosted bootstrap; the other two are background and manual
+alternatives. All three are evaluation runbooks, not a production
+architecture, and label every non-obvious claim as verified, inferred, or
+unverified.
 
 ## Related
 

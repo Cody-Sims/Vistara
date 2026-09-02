@@ -48,7 +48,21 @@ public sealed class ProviderParityTests
         Assert.NotEqual(sqliteTypes, postgresTypes);
         Assert.All(
             sqliteTypes,
-            value => Assert.Matches(@"^.+:(TEXT|INTEGER|text)$", value));
+            value => Assert.Matches(@"^.+:(TEXT|INTEGER|text|BLOB)$", value));
+        Assert.Equal(
+            [
+                "oidc_login_requests.handle_digest:BLOB",
+                "oidc_login_requests.nonce_digest:BLOB",
+                "oidc_login_requests.state_digest:BLOB",
+            ],
+            sqliteTypes.Where(value => value.EndsWith(":BLOB", StringComparison.Ordinal)));
+        Assert.Equal(
+            [
+                "oidc_login_requests.handle_digest:bytea",
+                "oidc_login_requests.nonce_digest:bytea",
+                "oidc_login_requests.state_digest:bytea",
+            ],
+            postgresTypes.Where(value => value.EndsWith(":bytea", StringComparison.Ordinal)));
         Assert.Contains(postgresTypes, value => value.EndsWith(":uuid", StringComparison.Ordinal));
         Assert.Contains(
             postgresTypes,

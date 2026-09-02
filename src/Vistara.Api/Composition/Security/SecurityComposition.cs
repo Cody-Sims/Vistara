@@ -97,6 +97,7 @@ public static class SecurityServiceCollectionExtensions
 
         services.AddSingleton<IVistaraSecurityRegistration,
             VistaraSecurityRegistration>();
+        services.AddVistaraApiDataProtection(configuration, environment);
         IConfigurationSection securitySection =
             configuration.GetSection(VistaraSecurityOptions.SectionName);
         IConfigurationSection allowedHostsSection =

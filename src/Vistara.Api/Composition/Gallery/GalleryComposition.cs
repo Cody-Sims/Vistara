@@ -17,6 +17,7 @@ using Vistara.Application.Lifecycle;
 using Vistara.Application.Sharing;
 using Vistara.Auth.Sharing;
 using Vistara.Persistence;
+using Vistara.Persistence.Azure;
 using Vistara.Persistence.Gallery.Curation;
 using Vistara.Persistence.Gallery.Queries;
 using Vistara.Persistence.Lifecycle;
@@ -164,17 +165,9 @@ public static class GalleryServiceCollectionExtensions
                 "Gallery sharing requires the configured Vistara persistence provider.");
         }
 
-        services.AddDbContext<SharingDbContext>(options =>
-        {
-            if (provider == VistaraDatabaseProvider.Sqlite)
-            {
-                options.UseSqlite(connectionString);
-            }
-            else
-            {
-                options.UseNpgsql(connectionString);
-            }
-        });
+        services.AddVistaraNpgsqlDataSources(configuration);
+        services.AddDbContext<SharingDbContext>((serviceProvider, options) =>
+            options.UseVistaraDatabase(serviceProvider, provider, connectionString));
     }
 }
 

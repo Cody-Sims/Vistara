@@ -6,6 +6,7 @@ using Vistara.Api.Features.Admin;
 using Vistara.Api.Features.ApiKeys;
 using Vistara.Api.Features.Capabilities;
 using Vistara.Api.Features.Jobs;
+using Vistara.Api.Features.Oidc;
 using Vistara.Api.Features.Tenants;
 
 namespace Vistara.Api.Composition.Platform;
@@ -83,6 +84,7 @@ public static class PlatformSurfaceEndpointRouteBuilderExtensions
         endpoints.MapVistaraApiKeys();
         endpoints.MapVistaraTenants();
         endpoints.MapVistaraAccount();
+        endpoints.MapVistaraOidcAuthentication();
         endpoints.MapVistaraAdministration();
         return endpoints;
     }
