@@ -207,8 +207,22 @@ if ! subscription_name=$(az account show --subscription "$subscription_id" --que
     "subscription ${subscription_id} is not available to this sign-in. Check: az account list --output table"
 fi
 subscription_name=$(printf '%s' "$subscription_name" | tr -d '\r\n')
-signed_in_tenant=$(az account show --subscription "$subscription_id" --query tenantId --output tsv 2>/dev/null | tr -d '\r\n' || true)
-tenant_id=${tenant_id:-$signed_in_tenant}
+subscription_tenant=$(az account show --subscription "$subscription_id" --query tenantId --output tsv 2>/dev/null | tr -d '\r\n' || true)
+active_tenant=$(az account show --query tenantId --output tsv 2>/dev/null | tr -d '\r\n' || true)
+
+# `az ad` has no subscription or tenant switch: it answers for whichever tenant
+# the CLI is currently pointed at. So when the subscription being deployed into
+# belongs to a different tenant than the active one, the signed-in object ID
+# read below would come from the wrong directory — an owner allowlist and a
+# PostgreSQL administrator naming a principal that does not exist where the
+# deployment trusts it. Rather than silently switch the operator's CLI before
+# they have agreed to anything, say so and let them point it themselves.
+if [ -n "$subscription_tenant" ] && [ -n "$active_tenant" ] && [ "$subscription_tenant" != "$active_tenant" ]; then
+  vistara_die "$VISTARA_EXIT_USAGE" \
+    "subscription ${subscription_id} belongs to tenant ${subscription_tenant} but the Azure CLI is signed in to ${active_tenant}, so directory lookups would answer for the wrong tenant. Run: az account set --subscription ${subscription_id} (or az login --tenant ${subscription_tenant}) and rerun."
+fi
+
+tenant_id=${tenant_id:-$subscription_tenant}
 vistara_require_guid "$tenant_id" '--tenant-id'
 
 signed_in_object_id=$(az ad signed-in-user show --query id --output tsv 2>/dev/null | tr -d '\r\n' || true)

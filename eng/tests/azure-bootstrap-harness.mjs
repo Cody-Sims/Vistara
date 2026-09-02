@@ -140,7 +140,13 @@ case "\${1:-}" in
         case "$query" in
           id) printf '%s\\n' "$(state_read subscription_id ${SUBSCRIPTION_ID})" ;;
           name) printf 'Scratch Subscription\\n' ;;
-          tenantId) printf '%s\\n' "$(state_read tenant_id ${TENANT_ID})" ;;
+          tenantId)
+            if [ -n "$requested" ] && [ "$requested" != "$(state_read subscription_id ${SUBSCRIPTION_ID})" ]; then
+              printf '%s\\n' "$(state_read foreign_tenant_id "$(state_read tenant_id ${TENANT_ID})")"
+            else
+              printf '%s\\n' "$(state_read tenant_id ${TENANT_ID})"
+            fi
+            ;;
           user.name) printf 'operator@example.com\\n' ;;
           *) printf '\\n' ;;
         esac

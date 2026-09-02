@@ -777,6 +777,26 @@ test('the first owner and tenant are reported so the operator can check them', (
   });
 });
 
+test('a subscription in another tenant is refused rather than guessed at', () => {
+  withSandbox('foreign-tenant', (sandbox) => {
+    sandbox.touch('allow_subscription_switch');
+    sandbox.state('foreign_tenant_id', '12121212-1212-1212-1212-121212121212');
+    const result = run(
+      sandbox,
+      UP_SCRIPT,
+      upArguments(['--subscription', '99999999-9999-9999-9999-999999999999']),
+    );
+    assert.equal(result.status, 64, result.output);
+    assert.match(result.output, /belongs to tenant 12121212/, 'the two tenants are named');
+    assert.match(result.output, /az account set --subscription 99999999/, 'and the fix is spelled out');
+    assert.deepEqual(
+      mutatingCalls(sandbox).map((call) => call.join(' ')),
+      [],
+      'a directory lookup that would answer for the wrong tenant stops the run before it changes anything',
+    );
+  });
+});
+
 test('a malformed owner object ID or environment name is refused before any call', () => {
   withSandbox('bad-owner', (sandbox) => {
     const result = run(sandbox, UP_SCRIPT, upArguments(['--owner-object-id', 'not-a-guid']));
